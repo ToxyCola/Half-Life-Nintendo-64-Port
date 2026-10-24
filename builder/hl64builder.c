@@ -215,6 +215,17 @@ static int find_steam_halflife(char *out)
     return 0;
 }
 
+// libdragon's tools split paths on '/' only (and Windows accepts '/'): arguments get forward slashes
+static const char *fwd(const char *p)
+{
+    static char buf[8][MAX_PATH * 2];
+    static int k;
+    char *b = buf[k++ & 7];
+    snprintf(b, MAX_PATH * 2, "%s", p);
+    for (char *c = b; *c; c++) if (*c == '\\') *c = '/';
+    return b;
+}
+
 // ------------------------------------------------------------------ running the steps
 static int run(const char *cmdline)
 {
@@ -332,7 +343,7 @@ int main(int argc, char **argv)
     printf("\n[2/3] Packing the N64 filesystem\n");
     char cmd[MAX_PATH * 8], dfs[MAX_PATH], tmp[MAX_PATH], rom[MAX_PATH];
     snprintf(dfs, sizeof dfs, "%s\\hl64.dfs", g_work);
-    snprintf(cmd, sizeof cmd, "\"%s\\tools\\mkdfs.exe\" \"%s\" \"%s\"", g_root, dfs, fsdir);
+    snprintf(cmd, sizeof cmd, "\"%s\\tools\\mkdfs.exe\" \"%s\" \"%s\"", g_root, fwd(dfs), fwd(fsdir));
     if (run(cmd) != 0) fail("mkdfs failed%s", "");
 
     printf("[3/3] Writing the ROM\n");
@@ -340,10 +351,10 @@ int main(int argc, char **argv)
     DeleteFileA(tmp);
     snprintf(cmd, sizeof cmd,
              "\"%s\\tools\\n64tool.exe\" --toc --title \"HALF-LIFE 64\" --category N --output \"%s\" "
-             "--align 256 \"%s\\engine\\hl64.elf.stripped\" \"%s\\engine\\hl64.elf.sym\" \"%s\" \"%s\\engine\\libdragon.version\"",
-             g_root, tmp, g_root, g_root, dfs, g_root);
+             "--align 256 \"%s/engine/hl64.elf.stripped\" \"%s/engine/hl64.elf.sym\" \"%s\" \"%s/engine/libdragon.version\"",
+             g_root, fwd(tmp), fwd(g_root), fwd(g_root), fwd(dfs), fwd(g_root));
     if (run(cmd) != 0) fail("n64tool failed%s", "");
-    snprintf(cmd, sizeof cmd, "\"%s\\tools\\ed64romconfig.exe\" --savetype sram256k --expansionpak unspecified --regionfree \"%s\"", g_root, tmp);
+    snprintf(cmd, sizeof cmd, "\"%s\\tools\\ed64romconfig.exe\" --savetype sram256k --expansionpak unspecified --regionfree \"%s\"", g_root, fwd(tmp));
     if (run(cmd) != 0) fail("ed64romconfig failed%s", "");
     snprintf(rom, sizeof rom, "%s\\hl64.z64", g_exedir);
     if (!MoveFileExA(tmp, rom, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {

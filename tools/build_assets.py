@@ -40,6 +40,11 @@ EXTRA_SEQS = ['retract', 'delpoy', 'hide', 'spin', 'lying_on_back', 'lying_on_st
               'sitting2', 'sitlookleft']
 
 
+def slashes(p):
+    """libdragon's tools split paths on '/' only: give them forward slashes on Windows too"""
+    return p.replace('\\', '/') if os.sep == '\\' else p
+
+
 def npc_model_table():
     """classname -> model, read from src/npc.c so the table lives in one place"""
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'npc.c'), encoding='latin1').read()
@@ -112,7 +117,7 @@ def build_models(a, maps):
                 outs.append(out)
     mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
     if outs and not a.no_compress:
-        subprocess.run([mk, '-c', '2', '-w', '256', '-o', os.path.join(a.out, 'models')] + outs, capture_output=True)
+        subprocess.run([mk, '-c', '2', '-w', '256', '-o', slashes(os.path.join(a.out, 'models'))] + [slashes(o) for o in outs], capture_output=True)
     print('models: %d, %.1f MB' % (len(outs), sum(os.path.getsize(o) for o in outs) / 1048576))
 
 
@@ -259,7 +264,7 @@ def main():
         mapdir = os.path.join(a.out, 'maps')
         files = [os.path.join(mapdir, m + '.hlb') for m in maps]
         def comp(fl):
-            return subprocess.run([mk, '-c', str(a.compress_level), '-w', '256', '-o', mapdir] + fl, capture_output=True)
+            return subprocess.run([mk, '-c', str(a.compress_level), '-w', '256', '-o', slashes(mapdir)] + [slashes(f) for f in fl], capture_output=True)
         chunks = [files[i::a.j] for i in range(a.j)]
         from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(a.j) as ex:
@@ -337,7 +342,7 @@ def wav_loop_start(path):
 def _conv_one(job):
     conv, src, dstdir, opts = job
     os.makedirs(dstdir, exist_ok=True)
-    r = subprocess.run([conv] + opts + ['-o', dstdir, src], capture_output=True, text=True)
+    r = subprocess.run([conv] + opts + ['-o', slashes(dstdir), slashes(src)], capture_output=True, text=True)
     base = os.path.splitext(os.path.basename(src))[0]
     out = os.path.join(dstdir, base + '.wav64')
     low = os.path.join(dstdir, base.lower() + '.wav64')

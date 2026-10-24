@@ -71,7 +71,7 @@ def write_fnt(path, height, rects, glow_pad=0):
 
 def mksprite(png, outdir, fmt='I4'):
     tool = shutil.which('mksprite') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mksprite')
-    r = subprocess.run([tool, '-f', fmt, '-o', outdir, png], capture_output=True, text=True)
+    r = subprocess.run([tool, '-f', fmt, '-o', outdir.replace('\\', '/'), png.replace('\\', '/')], capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr)
 

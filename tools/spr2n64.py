@@ -152,7 +152,7 @@ def convert(path, name, outdir, tmp):
     png = os.path.join(tmp, name + '.png')
     strip.save(png)
     tool = shutil.which('mksprite') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mksprite')
-    r = subprocess.run([tool, '-f', fmt, '-c', '1', '-o', outdir, png], capture_output=True, text=True)
+    r = subprocess.run([tool, '-f', fmt, '-c', '1', '-o', outdir.replace('\\', '/'), png.replace('\\', '/')], capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr)
     return len(conv), fw, fh, ow, oh, typ, texfmt, fmt, tint, n
