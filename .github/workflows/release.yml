@@ -1,0 +1,79 @@
+# Builds HL64Builder.exe (the Windows ROM builder, see builder/) and publishes it as a release.
+# Push a tag like v1.0 to make a release; "Run workflow" on the Actions tab builds it without one.
+name: Release HL64Builder.exe
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  N64_INST: /opt/libdragon
+  # the versions this port is built and tested with
+  LIBDRAGON_COMMIT: 39d0d6096130836a65710da6730290701d060272   # preview branch
+  TINY3D_COMMIT: 6f5ac0ba098f86d04e549ea754834f1be3c150e1
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # git describe names the version
+
+      - name: Host packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q mingw-w64 libz-mingw-w64-dev python3-pip python3-numpy python3-pil
+
+      - name: N64 toolchain
+        run: |
+          curl -sSfL -o tc.deb https://github.com/DragonMinded/libdragon/releases/download/toolchain-continuous-prerelease/gcc-toolchain-mips64-x86_64.deb
+          sudo dpkg -i tc.deb
+          sudo mkdir -p $N64_INST && sudo chown -R $USER $N64_INST
+
+      - name: libdragon (patched as in README)
+        run: |
+          git clone -q https://github.com/DragonMinded/libdragon.git $RUNNER_TEMP/libdragon
+          cd $RUNNER_TEMP/libdragon
+          git checkout -q $LIBDRAGON_COMMIT
+          git apply $GITHUB_WORKSPACE/tools/libdragon-rspq-buffer.patch
+          make -j$(nproc) install >/dev/null
+          make -j$(nproc) tools-install >/dev/null
+
+      - name: tiny3d
+        run: |
+          git clone -q https://github.com/HailToDodongo/tiny3d.git $RUNNER_TEMP/tiny3d
+          cd $RUNNER_TEMP/tiny3d
+          git checkout -q $TINY3D_COMMIT
+          ./build.sh >/dev/null
+
+      - name: HL64Builder.exe
+        run: |
+          T3D_INST=$RUNNER_TEMP/tiny3d LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_windows.sh
+          ls -la builder/out/HL64Builder.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HL64Builder
+          path: builder/out/HL64Builder.exe
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: builder/out/HL64Builder.exe
+          body: |
+            **HL64Builder.exe** builds the Half-Life 64 ROM (`hl64.z64`) from your own copy of Half-Life.
+
+            1. Install Half-Life on Steam (or have a copy of its `valve` folder).
+            2. Download and run **HL64Builder.exe**. It finds Half-Life through Steam; if it can't, drag your Half-Life folder onto the window and press Enter.
+            3. Wait for it to convert the game (30-90 minutes the first time). `hl64.z64` appears next to the .exe.
+
+            Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.
+
+            The program contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.
+            Windows may warn that the program is unrecognised (it isn't code-signed): choose "More info", then "Run anyway".
