@@ -45,9 +45,8 @@ It is built from:
 
 * The monster AI is a compact rewrite of the SDK's schedule system, not a port of it: no squad
   tactics, and the bosses and flying machines are simplified versions of the PC behaviour.
-* No sprites, decals, particles or dynamic lights: muzzle flashes, blood and smoke are missing,
-  beams and explosions are drawn as simple 2D overlays, and the flashlight only shows on the HUD.
-  Animated (`+0…`) textures show their first frame.
+* No decals or smoke; effects use a handful of the game's sprites (explosions, muzzle flashes,
+  beams, sparks, blood, spit and energy balls). Animated (`+0…`) textures show their first frame.
 * No save games. A death restarts the current map with what you had when you entered it.
   Use Load game to start any chapter.
 
