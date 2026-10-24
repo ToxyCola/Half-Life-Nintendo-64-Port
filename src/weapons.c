@@ -2053,7 +2053,7 @@ void weapons_draw_hud(float dt, bool show_crosshair)
             float c[3] = {n->origin[0], n->origin[1], n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f}, sx, sy;
             if (project(c, &sx, &sy)) { tx = fminf(fmaxf(sx, 40), 280); ty = fminf(fmaxf(sy, 30), 210); }
         }
-        float k = fminf(1, dt * 18);
+        float k = fminf(1, dt * (t >= 0 ? 30 : 18));   // snaps on fast, eases back to the centre
         xh_x += (tx - xh_x) * k; xh_y += (ty - xh_y) * k;
         font_color(RGBA32(255, 160, 0, 255));
         image_draw(&xhair, (int)(xh_x + 0.5f) - 12, (int)(xh_y + 0.5f) - 12, w->cx, w->cy, 24, 24);

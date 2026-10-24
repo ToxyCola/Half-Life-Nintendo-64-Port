@@ -1014,6 +1014,63 @@ int main(void)
             }
         }
 #endif
+#ifdef CHAINTEST
+        // automated test: take every trigger_changelevel in every map and check the arrival
+        {
+#ifndef CHAINTEST_START
+#define CHAINTEST_START 0
+#endif
+            static int cm = CHAINTEST_START, ck = 0, cst = 0;
+            static float ct, az; static char dst[32], src[32]; static bool in_air;
+            extern bool pm_position_free(const float *pos);
+            memset(&in, 0, sizeof(in)); memset(&pressed, 0, sizeof(pressed));
+            if (cst == 0) {
+                if (cm >= num_maps) { debugf("CHAIN DONE\n"); cst = 9; }
+                else { menu_close(); start_game(maplist[cm]); player.suit = true; strcpy(src, maplist[cm]); cst = 1; ct = game_clock + 0.6f; }
+            } else if (cst == 1 && game_clock > ct) {
+                int i = -1, n = 0;
+                for (int j = ents_find_class("trigger_changelevel", 0); j >= 0; j = ents_find_class("trigger_changelevel", j + 1))
+                    if (n++ == ck) { i = j; break; }
+                if (i < 0) { cm++; ck = 0; cst = 0; }
+                else {
+                    entity_t *e = &entities[i];
+                    char mpb[32] = "", lmb[48] = ""; const char *v;
+                    if ((v = ent_value(e, "map"))) strncpy(mpb, v, 31);
+                    if ((v = ent_value(e, "landmark"))) strncpy(lmb, v, 47);
+                    const char *mp = mpb[0] ? mpb : NULL, *lm = lmb;
+                    if (!mp || !map_in_rom(mp)) { debugf("CHAIN %s #%d -> %s NOT IN ROM\n", src, ck, mp ? mp : "?"); ck++; cst = 0; }
+                    else {
+                        bmodel_t *bm = &world.bmodels[e->model];
+                        float c[3];
+                        for (int k = 0; k < 3; k++) c[k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f;
+                        pm_find_free_position(c);
+                        {   // a trigger up in the air (on a train's path): falling after the change is expected
+                            static const float hmn[3] = {-16, -16, -36}, hmx[3] = {16, 16, 36};
+                            float dn[3] = {c[0], c[1], c[2] - 200};
+                            gtrace_t tr; game_trace(c, dn, hmn, hmx, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, -1, &tr);
+                            in_air = tr.fraction >= 1;
+                        }
+                        pm_reset_player(c);
+                        strcpy(dst, mp);
+                        game_request_changelevel(mp, lm);
+                        cst = 2; ct = game_clock + 8;
+                    }
+                }
+            } else if (cst == 2) {
+                if (!strcasecmp(cur_map, dst)) { cst = 3; ct = game_clock + 3; float o[3]; pm_get_origin(o); az = o[2]; }
+                else if (game_clock > ct) { debugf("CHAIN %s #%d -> %s FAILED (map %s)\n", src, ck, dst, cur_map); ck++; cst = 0; }
+            } else if (cst == 3 && game_clock > ct) {
+                float o[3]; pm_get_origin(o);
+                const char *res = "OK";
+                if (strcasecmp(cur_map, dst)) res = "BOUNCED";
+                else if (player.dead) res = "DIED";
+                else if (!pm_position_free(o)) res = "STUCK";
+                else if (az - o[2] > 300) res = in_air ? "fell (trigger in the air)" : "FELL";
+                debugf("CHAIN %s #%d -> %s %s at %.0f %.0f %.0f hp %.0f\n", src, ck, dst, res, o[0], o[1], o[2], player.health);
+                ck++; cst = 0;
+            }
+        }
+#endif
 #ifdef TESTFIRE
         { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); ents_fire_targets(TESTFIRE); } }
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;

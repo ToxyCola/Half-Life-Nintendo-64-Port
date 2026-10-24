@@ -762,6 +762,19 @@ static void special_use(entity_t *e)
         if (!(e->spawnflags & 1)) e->removed = true;     // SF_GIBSHOOTER_REPEATABLE
         break;
     }
+    case ENT_FUNNEL: {
+        // effects.cpp CEnvFunnel: a sucking (or with SF 1 spraying) cloud of green sparks
+        for (int k = 0; k < 4; k++) {
+            float o[3] = {e->origin[0] + (rand() % 200 - 100), e->origin[1] + (rand() % 200 - 100), e->origin[2] + (rand() % 100)};
+            game_effect_particles(o, 24, 260, 120, 255, 120, 1.6f, (e->spawnflags & 1) ? 0 : -200);
+        }
+        break;
+    }
+    case ENT_ENV_BLOOD: {
+        extern void game_effect_blood_color(const float *o, bool yellow);
+        game_effect_blood_color(e->origin, (int)ent_float(e, "color", 0) == 1);
+        break;
+    }
     case ENT_BEVERAGE: {
         // CEnvBeverage: each use drops a can worth 1 health; "health" cans in the machine
         if (e->health <= 0) e->health = ent_float(e, "health", 10) > 0 ? ent_float(e, "health", 10) : 10;
@@ -1244,6 +1257,8 @@ static void ent_use(entity_t *e)
     case ENT_ENV_EXPLOSION:
     case ENT_ENV_SHOOTER:
     case ENT_BEVERAGE:
+    case ENT_FUNNEL:
+    case ENT_ENV_BLOOD:
         special_use(e);
         break;
     case ENT_GLOBAL_BEAM:
@@ -1340,7 +1355,7 @@ static enttype_t classify(const char *cn)
         {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_MOMENTARY_BUTTON}, {"func_friction", ENT_FRICTION},
         {"trigger_autosave", ENT_AUTOSAVE}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
         {"ambient_generic", ENT_AMBIENT}, {"speaker", ENT_SPEAKER}, {"env_shake", ENT_ENV_SHAKE},
-        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_global", ENT_ENV_GLOBAL}, {"env_sprite", ENT_SPRITE}, {"env_glow", ENT_SPRITE}, {"env_shooter", ENT_ENV_SHOOTER}, {"env_beverage", ENT_BEVERAGE}, {"player_loadsaved", ENT_LOADSAVED}, {"func_pendulum", ENT_PENDULUM}, {"env_explosion", ENT_ENV_EXPLOSION},
+        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_global", ENT_ENV_GLOBAL}, {"env_sprite", ENT_SPRITE}, {"env_glow", ENT_SPRITE}, {"env_shooter", ENT_ENV_SHOOTER}, {"env_beverage", ENT_BEVERAGE}, {"env_funnel", ENT_FUNNEL}, {"env_blood", ENT_ENV_BLOOD}, {"cycler_sprite", ENT_SPRITE}, {"player_loadsaved", ENT_LOADSAVED}, {"func_pendulum", ENT_PENDULUM}, {"env_explosion", ENT_ENV_EXPLOSION},
         {"trigger_monsterjump", ENT_INVISIBLE_BRUSH}, {"trigger_gravity", ENT_TRIGGER_GRAVITY},
         {"trigger_transition", ENT_INVISIBLE_BRUSH}, {"func_vehiclecontrols", ENT_INVISIBLE_BRUSH},
         {"trigger", ENT_INVISIBLE_BRUSH},
