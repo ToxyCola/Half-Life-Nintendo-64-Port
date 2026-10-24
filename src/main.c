@@ -358,6 +358,12 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     weapons_map_start();
     game_trace_begin_frame();
     debugf("map %s start %.0f %.0f %.0f\n", name, origin[0], origin[1], origin[2]);
+    { heap_stats_t hs; sys_get_heap_stats(&hs); int lo = 0, hi = 8 << 20; while (hi - lo > 4096) { int mid = (lo + hi) / 2; void *volatile p = malloc(mid); if (p) { free(p); lo = mid; } else hi = mid; }
+      debugf("heap after load: %d KB used of %d KB, largest free block %d KB\n", hs.used / 1024, hs.total / 1024, lo / 1024);
+#ifdef HEAPDBG
+      { extern void heapdbg_dump(void); debugf("HEAPDUMP %s\n", name); heapdbg_dump(); }
+#endif
+    }
     autosave_pending = true;
     return true;
 }

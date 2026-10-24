@@ -19,7 +19,7 @@ static T3DMat4FP *mat_pool;          // FB_COUNT * (1 + MAX_ENT_MATS), uncached
 static int frame_index;
 
 static int framecount = 1;
-#define ENT_MAX_LEAFS 16
+#define ENT_MAX_LEAFS 32
 typedef struct { float org[3]; int16_t n; uint16_t leaf[ENT_MAX_LEAFS]; } ent_leafs_t;
 static ent_leafs_t *ent_leafs;
 static int ent_leafs_count;
@@ -216,19 +216,14 @@ static chunkstrips_t *chunk_strips;
 static strip_t *strips;
 static int16_t *strip_idx;
 
-static void build_strips(void)
+// two passes (count, then fill) so the index and strip arrays are allocated at their exact size
+static int strips_pass(int16_t *idx, strip_t *st, int *out_nst)
 {
-    free(chunk_strips); free(strips); free(strip_idx);
-    chunk_strips = malloc(sizeof(chunkstrips_t) * (world.numchunks + 1));
-    // worst case: every triangle restarts (3 indices) plus alignment padding per strip
-    int maxidx = world.numtris * 3 + world.numchunks * 8 + 64;
-    int16_t *idx = memalign(16, maxidx * sizeof(int16_t));
-    strip_t *st = malloc(sizeof(strip_t) * (world.numchunks * 4 + 16));
-    int nidx = 0, nst = 0, stcap = world.numchunks * 4 + 16;
+    int nidx = 0, nst = 0;
+#define PUT(v) do { if (idx) idx[nidx] = (v); nidx++; } while (0)
     for (int c = 0; c < world.numchunks; c++) {
         bchunk_t *ch = &world.chunks[c];
-        chunk_strips[c].first = nst;
-        chunk_strips[c].nstrips = 0;
+        if (idx) { chunk_strips[c].first = nst; chunk_strips[c].nstrips = 0; }
         // indices are DMA'd into DMEM just after the vertex cache: keep each list short enough
         int limit = ((T3D_VERTEX_CACHE_SIZE - ch->numverts) * 36) / 2 - 8;
         if (limit > 240) limit = 240;
@@ -244,38 +239,38 @@ static void build_strips(void)
                 for (int k = 0; k < 3; k++) {
                     int x = v[k], y = v[(k + 1) % 3], z = v[(k + 2) % 3];
                     if ((y == a && z == b) || (y == b && z == a)) { ext = x; break; }
-                    (void)x;
                 }
             }
-            if (ext >= 0) {
-                idx[nidx++] = ext;
-                a = b; b = ext;
-                continue;
-            }
+            if (ext >= 0) { PUT(ext); a = b; b = ext; continue; }
             if (start < 0 || nidx - start + 3 > limit) {
                 // close the current strip, begin a new one (8-byte aligned)
-                if (start >= 0) {
-                    st[nst - 1].count = nidx - start;
-                    while (nidx & 3) idx[nidx++] = 0;
-                }
-                if (nst >= stcap) { stcap *= 2; st = realloc(st, sizeof(strip_t) * stcap); }
+                if (start >= 0) { if (st) st[nst - 1].count = nidx - start; while (nidx & 3) PUT(0); }
                 start = nidx;
-                st[nst].offset = nidx;
-                st[nst].count = 0;
+                if (st) { st[nst].offset = nidx; st[nst].count = 0; chunk_strips[c].nstrips++; }
                 nst++;
-                chunk_strips[c].nstrips++;
-                idx[nidx++] = t0; idx[nidx++] = t1; idx[nidx++] = t2;
+                PUT(t0); PUT(t1); PUT(t2);
             } else {
-                idx[nidx++] = (int16_t)(t0 | 0x8000); idx[nidx++] = t1; idx[nidx++] = t2;
+                PUT((int16_t)(t0 | 0x8000)); PUT(t1); PUT(t2);
             }
             a = t1; b = t2;
         }
-        if (start >= 0) {
-            st[nst - 1].count = nidx - start;
-            while (nidx & 3) idx[nidx++] = 0;
-        }
-        start = -1;
+        if (start >= 0) { if (st) st[nst - 1].count = nidx - start; while (nidx & 3) PUT(0); }
     }
+#undef PUT
+    *out_nst = nst;
+    return nidx;
+}
+
+static void build_strips(void)
+{
+    free(chunk_strips); free(strips); free(strip_idx);
+    chunk_strips = malloc(sizeof(chunkstrips_t) * (world.numchunks + 1));
+    int nst = 0;
+    int nidx = strips_pass(NULL, NULL, &nst);
+    int16_t *idx = memalign(16, nidx * sizeof(int16_t) + 16);
+    strip_t *st = malloc(sizeof(strip_t) * (nst + 1));
+    assertf(chunk_strips && idx && st, "out of memory for the map's strips");
+    strips_pass(idx, st, &nst);
     // convert each strip to tiny3d's DMEM-pointer format
     for (int i = 0; i < nst; i++) t3d_indexbuffer_convert(&idx[st[i].offset], st[i].count);
     data_cache_hit_writeback(idx, nidx * sizeof(int16_t));
@@ -398,54 +393,55 @@ static void draw_world(void)
 }
 
 // ---------------------------------------------------------------- brush entities
-static rspq_block_t **model_blocks;
 static int num_model_blocks;
 
 // Brush entity models never change, so record their draw commands once per map
 // (texture binds + vertex loads + strips); drawing an entity is then one block call.
+// brush models are drawn directly from a per-model face list sorted by texture (recorded rspq
+// blocks for every model used to cost several hundred KB of RDRAM per map)
+static uint16_t *model_faces;       // face indices, model m's are [model_first[m], model_first[m+1])
+static uint32_t *model_first;
 static void record_model_blocks(void)
 {
-    num_model_blocks = world.nummodels;
-    model_blocks = calloc(num_model_blocks, sizeof(rspq_block_t *));
+    free(model_faces); free(model_first);
+    model_faces = NULL; model_first = NULL;
+    num_model_blocks = 0;
+    int total = 0;
+    for (int m = 1; m < world.nummodels; m++) total += world.bmodels[m].numfaces > 0 ? world.bmodels[m].numfaces : 0;
+    model_first = malloc((world.nummodels + 1) * sizeof(uint32_t));
+    model_faces = malloc((total + 1) * sizeof(uint16_t));
+    if (!model_first || !model_faces) { free(model_first); free(model_faces); model_first = NULL; model_faces = NULL; return; }
+    int n = 0;
+    model_first[0] = 0;
     for (int m = 1; m < world.nummodels; m++) {
+        model_first[m] = n;
         bmodel_t *bm = &world.bmodels[m];
-        if (bm->numfaces <= 0) continue;
-        rspq_block_begin();
-        int cur_alpha = -1;
-        for (int t = 0; t < world.numtextures; t++) {
-            bool any = false;
-            for (int fi = bm->firstface; fi < bm->firstface + bm->numfaces; fi++) {
-                bface_t *f = &world.faces[fi];
-                if (f->texture != t || (f->flags & (FF_SKY | FF_NODRAW)) || !f->numchunks) continue;
-                if (!any) {
-                    int alpha = (world.textures[t].flags & FF_ALPHATEST) ? 1 : 0;
-                    if (alpha != cur_alpha) { rdpq_mode_alphacompare(alpha ? 128 : 0); cur_alpha = alpha; }
-                    if (tex_blocks[t]) rspq_block_run(tex_blocks[t]);
-                    any = true;
-                }
-                draw_face(fi);
-            }
+        int start = n;
+        for (int fi = bm->firstface; fi < bm->firstface + bm->numfaces; fi++) {
+            bface_t *f = &world.faces[fi];
+            if ((f->flags & (FF_SKY | FF_NODRAW)) || !f->numchunks) continue;
+            // insertion by texture (models have few faces)
+            int j = n++;
+            while (j > start && world.faces[model_faces[j - 1]].texture > f->texture) { model_faces[j] = model_faces[j - 1]; j--; }
+            model_faces[j] = fi;
         }
-        model_blocks[m] = rspq_block_end();
     }
+    model_first[world.nummodels] = n;
+    num_model_blocks = world.nummodels;
     free(model_tris);
     model_tris = calloc(world.nummodels, sizeof(int));
-    for (int m = 1; model_tris && m < world.nummodels; m++) {
-        bmodel_t *bmm = &world.bmodels[m];
-        for (int fi = bmm->firstface; fi < bmm->firstface + bmm->numfaces; fi++)
-            for (int c = 0; c < world.faces[fi].numchunks; c++)
-                model_tris[m] += world.chunks[world.faces[fi].firstchunk + c].numtris;
-    }
+    for (int m = 1; model_tris && m < world.nummodels; m++)
+        for (uint32_t k = model_first[m]; k < model_first[m + 1]; k++) {
+            bface_t *f = &world.faces[model_faces[k]];
+            for (int c = 0; c < f->numchunks; c++) model_tris[m] += world.chunks[f->firstchunk + c].numtris;
+        }
 }
 
 static void free_model_blocks(void)
 {
-    if (!model_blocks) return;
-    rspq_wait();
-    for (int m = 0; m < num_model_blocks; m++)
-        if (model_blocks[m]) rspq_block_free(model_blocks[m]);
-    free(model_blocks);
-    model_blocks = NULL;
+    free(model_faces); free(model_first);
+    model_faces = NULL; model_first = NULL;
+    num_model_blocks = 0;
 }
 
 static void build_entity_matrix(T3DMat4FP *out, const float *origin, const float *angles, float s)
@@ -551,9 +547,14 @@ static void draw_entities(const float *eye, T3DMat4FP *mats)
             rdpq_mode_end();
             rdpq_set_prim_color(RGBA32(255, 255, 255, e->renderamt));
         }
-        // back faces are culled by the RSP inside the recorded block (no per-face CPU test)
-        if (model_blocks[e->model]) {
-            rspq_block_run(model_blocks[e->model]);
+        // back faces are culled by the RSP (no per-face CPU test)
+        if (model_first && e->model < num_model_blocks) {
+            bound_tex = -1;
+            for (uint32_t k = model_first[e->model]; k < model_first[e->model + 1]; k++) {
+                int fi = model_faces[k];
+                bind_texture(world.faces[fi].texture);
+                draw_face(fi);
+            }
             if (model_tris) rstats.tris += model_tris[e->model];
         }
         bound_tex = -1;

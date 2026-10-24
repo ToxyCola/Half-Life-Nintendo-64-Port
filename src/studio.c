@@ -187,6 +187,7 @@ static void build_model_strips(studio_t *m)
     for (int i = 0; i < nst; i++) t3d_indexbuffer_convert(&idx[st[i] >> 8], st[i] & 0xff);
     data_cache_hit_writeback(idx, nidx * sizeof(int16_t));
     m->strip_idx = idx; m->strip_ofs = st; m->cs_first = cf; m->cs_count = cc;
+    debugf("studio strips: %s %d indices %d strips (%d bytes)\n", m->name, nidx, nst, (int)(nidx * 2 + nst * 4 + m->numchunks * 4));
 }
 
 studio_t *studio_get(const char *name)
