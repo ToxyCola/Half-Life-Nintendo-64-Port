@@ -64,10 +64,12 @@ typedef struct {
     float light_pos[3], light_time;
     float leaf_org[3]; int leaf_cache;
     int maker;               // monstermaker entity that made it (0 none)
+    bool spawned;            // made during play (its slots can be reused once the body is gone)
     int bkind, bstate, bi[4];    // bosses (nihilanth, big momma, apache, osprey): kind, state, ints
     float bt[4], bv[3];          //   timers, flying velocity
     int weapons;                 // human grunt "weapons" bits (1 mp5, 2 hand grenades, 4 launcher, 8 shotgun)
-    float next_grenade, cover_until;   // BSP leaf at leaf_org (PVS checks)
+    float next_grenade, cover_until;
+    bool vis_cache; int vis_target; float vis_time;   // combat line-of-sight cache   // BSP leaf at leaf_org (PVS checks)
 } npc_t;
 
 typedef struct { float origin[3], mins[3], maxs[3]; } npc_box_t;

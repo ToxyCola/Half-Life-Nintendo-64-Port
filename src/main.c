@@ -899,6 +899,9 @@ int main(void)
 #ifdef TESTNOCLIP
     settings.cheats = true; dbg_noclip = true; dbg_god = true; player.suit = true; dbg_give_all = true;
 #endif
+#ifdef TESTGOD
+    settings.cheats = true; dbg_god = true; player.suit = true; dbg_give_all = true;
+#endif
 #endif
 #endif
 

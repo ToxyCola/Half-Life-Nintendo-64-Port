@@ -413,6 +413,7 @@ static void spawn_one(int i, const char *cls_override)
     if (n->health <= 0) n->health = n->maxhealth = d && d->hpdef > 0 ? d->hpdef : 20;
     if (e->health > 0 && !(n->flags & NF_ITEM)) n->health = n->maxhealth = e->health;
     if (n->bkind == 2) n->health = n->maxhealth = 150 * fmaxf(skill_get("sk_bigmomma_health_factor"), 1);
+    if (!strcmp(mname, "hassassin") && !(n->flags & NF_DEAD)) n->weapons = 2;   // CHAssassin throws grenades too
 
     // starting animation
     int seq = -1;
@@ -518,7 +519,10 @@ void npcs_spawn_all(void)
 // CMonsterMaker::MakeMonster: a monster appearing during play (alien slaves teleporting in, ...)
 int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker)
 {
-    if (num_entities >= MAX_ENTITIES || num_npcs >= MAX_NPCS) return -1;
+    // reuse the slots of a made monster whose body is gone (endless makers: cockroaches)
+    int reuse = -1;
+    for (int k = 0; k < num_npcs; k++) if (npcs[k].spawned && entities[npcs[k].ent].removed) { reuse = k; break; }
+    if (reuse < 0 && (num_entities >= MAX_ENTITIES - 48 || num_npcs >= MAX_NPCS - 8)) return -1;
     int di = def_for_class(classname);
     if (di < 0) return -1;
     // room for it? (the PC maker checks for anything in the box first)
@@ -540,7 +544,8 @@ int npc_spawn_monster(const char *classname, const float *origin, float yaw, con
     static int kvnext;
     char *kv = kvpool[kvnext++ & 31];
     snprintf(kv, 64, "\"classname\" \"%s\" }", classname);
-    entity_t *e = &entities[num_entities];
+    int idx = reuse >= 0 ? npcs[reuse].ent : num_entities;
+    entity_t *e = &entities[idx];
     memset(e, 0, sizeof(*e));
     e->kv = kv;
     strncpy(e->classname, classname, sizeof(e->classname) - 1);
@@ -550,15 +555,20 @@ int npc_spawn_monster(const char *classname, const float *origin, float yaw, con
     e->renderamt = 255;
     memcpy(e->origin, origin, 12);
     e->angles[1] = yaw;
-    int idx = num_entities++;
+    if (reuse < 0) num_entities++;
+    int saved = num_npcs;
+    if (reuse >= 0) num_npcs = reuse;   // new_npc() fills npcs[num_npcs]
     int before = num_npcs;
     spawn_one(idx, NULL);
-    if (num_npcs == before) { e->removed = true; return -1; }
-    npc_t *n = &npcs[num_npcs - 1];
+    bool made = num_npcs > before;
+    if (reuse >= 0) num_npcs = saved;
+    if (!made) { e->removed = true; return -1; }
+    npc_t *n = &npcs[reuse >= 0 ? reuse : num_npcs - 1];
+    n->spawned = true;
     n->maker = maker;
     if (maker > 0) entities[maker].maker_live++;
     n->next_look = 0;   // looks around straight away
-    return num_npcs - 1;
+    return (int)(n - npcs);
 }
 
 // an item created during play (from a crate, or dropped by a dead soldier)
@@ -1504,9 +1514,19 @@ static void attack_hit(npc_t *n)
         else npc_sound(n, CHAN_WEAPON, d->snd->atk, d->snd->nat, 1, ATTN_NORM);
         break;
     }
-    case R_FLAME:
+    case R_FLAME: {
+        // CGargantua::FlameDamage: two jets of flame from the eyes
+        extern void game_effect_beam_plain(const float *, const float *, int, int, int);
+        float a = n->yaw * (float)M_PI / 180, side[3] = {-sinf(a) * 14, cosf(a) * 14, 0};
+        for (int k = -1; k <= 1; k += 2) {
+            float from[3] = {eye[0] + side[0] * k, eye[1] + side[1] * k, eye[2]};
+            game_effect_beam_plain(from, tp, 255, 120 + rand() % 60, 30);
+        }
+        game_effect_particles(tp, 4, 120, 255, 160, 60, 0.4f, -200);
+        if (game_time() > n->bt[3]) { n->bt[3] = game_time() + 1.5f; snd_emit(n->ent, CHAN_WEAPON, "garg/gar_flamerun1.wav", 1, ATTN_NORM, PITCH_NORM, NULL); }
         if (dist < d->rmax) damage_target(n, t, dmg * 3, DMG_BURN);
         break;
+    }
     }
 }
 
@@ -1626,9 +1646,8 @@ static void talker_idle(npc_t *n, float dt)
     float now = game_time();
     if (n->flags & NF_GAG) return;
     float pd = dist3(n->origin, player_pos);
-    bool see_player = pd < 512 && player_alive() && can_see(n, 0, false);
     if (!(n->said & 1)) {
-        if (pd < 256 && see_player && ok_to_speak(n)) {
+        if (pd < 256 && player_alive() && ok_to_speak(n) && can_see(n, 0, false)) {
             const char *g = (n->flags & NF_PREDIS) ? grp(n, "SC_PHELLO", NULL) : grp(n, "SC_HELLO", "BA_HELLO");
             if (g) npc_say(n, g, 3.2f, 1, ATTN_IDLE);
             n->said |= 1;
@@ -1638,6 +1657,7 @@ static void talker_idle(npc_t *n, float dt)
     }
     if (now < n->idle_speak_time) return;
     n->idle_speak_time = now + 3 + (rand() % 100) / 25.0f;
+    bool see_player = pd < 512 && player_alive() && can_see(n, 0, false);   // only when about to speak
     if (!ok_to_speak(n) || rand() % (n->nspeak * 2 + 1) != 0) return;
     // hurt player being followed
     if (n->following && player.health > 0) {
@@ -1753,8 +1773,11 @@ static bool grunt_grenade(npc_t *n, int t, bool vis, float dist)
     float peak[3] = {src[0] + vel[0] * 0.3f, src[1] + vel[1] * 0.3f, src[2] + vel[2] * 0.3f};
     if (!game_visible(src, peak)) return false;
     proj_spawn_vel(launcher ? 2 /* P_ARGRENADE */ : 1 /* P_HGRENADE */, src, vel, (n - npcs) + 1, -1);
+#ifdef BOSSDEBUG
+    debugf("grunt %d grenade (%s) at %.0f %.0f %.0f %s\n", (int)(n - npcs), launcher ? "launcher" : "hand", to[0], to[1], to[2], hiding ? "hiding" : "visible");
+#endif
     if (launcher) snd_emit(n->ent, CHAN_WEAPON, "weapons/glauncher.wav", 0.8f, ATTN_NORM, PITCH_NORM, NULL);
-    if (ok_to_speak(n)) npc_say(n, launcher ? "HG_THROW" : "HG_GREN", 2, 1, ATTN_NORM);
+    if (!strcmp(D(n)->model, "hgrunt") && ok_to_speak(n)) npc_say(n, launcher ? "HG_THROW" : "HG_GREN", 2, 1, ATTN_NORM);
     if (!set_activity(n, ACT_RANGE_ATTACK2)) set_activity(n, ACT_RANGE_ATTACK1);
     restart_seq(n, n->seq);
     n->ai = AI_ATTACK;
@@ -1788,7 +1811,10 @@ static void grunt_take_cover(npc_t *n)
     if (best < 0) return;
     start_moving(n, nav_node_origin(best), true);
     n->cover_until = now + 4;
-    if (ok_to_speak(n)) npc_say(n, "HG_COVER", 2, 1, ATTN_NORM);
+#ifdef BOSSDEBUG
+    debugf("grunt %d takes cover at node %d\n", (int)(n - npcs), best);
+#endif
+    if (!strcmp(D(n)->model, "hgrunt") && ok_to_speak(n)) npc_say(n, "HG_COVER", 2, 1, ATTN_NORM);
 }
 
 static void ai_combat(npc_t *n, float dt)
@@ -1805,7 +1831,13 @@ static void ai_combat(npc_t *n, float dt)
     }
     float tp[3];
     target_pos(t, tp);
-    bool vis = can_see(n, t, false);
+    // line of sight to the enemy: a trace a few times a second, not every frame
+    if (now >= n->vis_time || n->vis_target != t) {
+        n->vis_cache = can_see(n, t, false);
+        n->vis_time = now + 0.12f + (rand() % 100) / 1000.0f;
+        n->vis_target = t;
+    }
+    bool vis = n->vis_cache;
     if (vis) memcpy(n->last_seen, tp, 12);
     float dist = target_dist(n, t);
     // scientists run from danger
@@ -2549,6 +2581,8 @@ void npcs_think(float dt)
             gravity(n, dt);
             continue;
         case AI_DEAD:
+            // bodies of monsters made during play fade after a while (frees their slots)
+            if (n->spawned && now > n->dead_time + 15) { entities[n->ent].removed = true; n->solid = false; }
             continue;
         case AI_PAIN:
             if (n->seq_done) { n->ai = n->enemy >= 0 ? AI_COMBAT : AI_IDLE; set_seq(n, n->idle_seq); }
@@ -2596,7 +2630,7 @@ void npcs_think(float dt)
                         if (n->following && klass(n) == C_ALLY && !(n->flags & NF_SCI)) {}
                         if (d && d->snd && d->snd->alert) npc_sound(n, CHAN_VOICE, d->snd->alert, d->snd->na, 1, ATTN_NORM);
                         else if (d && !strcmp(d->model, "barney") && ok_to_speak(n)) npc_say(n, "BA_ATTACK", 2, 1, ATTN_NORM);
-                        else if (n->weapons && ok_to_speak(n)) npc_say(n, e == 0 ? "HG_ALERT" : "HG_MONST", 2, 1, ATTN_NORM);
+                        else if (n->weapons && !strcmp(d->model, "hgrunt") && ok_to_speak(n)) npc_say(n, e == 0 ? "HG_ALERT" : "HG_MONST", 2, 1, ATTN_NORM);
                         if (n->flags & NF_SCI) { n->ai = AI_FLEE; n->fear_time = now; n->said &= ~32; }
                     }
                 } else if (e >= 0 && e != n->enemy) {
@@ -2761,13 +2795,13 @@ void npcs_restore_transition(const float *lm)
 static int base_npcs, base_ents;
 void npcs_mark_base(void) { base_npcs = num_npcs; base_ents = num_entities; }
 int npcs_base_ents(void) { return base_ents; }
-typedef struct { float o[3], yaw, health; uint8_t gone, following, pad[2]; } nsnap_t;
+typedef struct { float o[3], yaw, health; uint8_t gone, following, bstate, pad; } nsnap_t;
 int npcs_snapshot(uint8_t *b, int max)
 {
     int pos = 4, n = 0;
     for (int i = 0; i < base_npcs && pos + (int)sizeof(nsnap_t) <= max; i++) {
         npc_t *c = &npcs[i];
-        nsnap_t r = {.yaw = c->yaw, .health = c->health, .gone = entities[c->ent].removed || is_dead(c), .following = c->following};
+        nsnap_t r = {.yaw = c->yaw, .health = c->health, .gone = entities[c->ent].removed || is_dead(c), .following = c->following, .bstate = (uint8_t)c->bstate};
         memcpy(r.o, c->origin, 12);
         memcpy(b + pos, &r, sizeof r); pos += sizeof r; n++;
     }
@@ -2800,6 +2834,7 @@ void npcs_apply_snapshot(const uint8_t *b, int len)
         npc_t *c = &npcs[i];
         if (r.gone) { entities[c->ent].removed = true; c->solid = false; c->health = 0; c->flags |= NF_DEAD | NF_NOTSOLID; continue; }
         memcpy(c->origin, r.o, 12); c->yaw = r.yaw; c->health = r.health; c->following = r.following;
+        if (c->bkind && c->bkind != 2 && r.bstate) c->bstate = 1;   // a boss that was awake stays awake (path restarts)
         memcpy(entities[c->ent].origin, r.o, 12);
     }
     int nc = b[2];
