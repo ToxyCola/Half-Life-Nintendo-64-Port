@@ -217,6 +217,7 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     { extern void menu_release_title(void); menu_release_title(); }
     render_free_map(); // free the old map's render data first so the big map buffer fits
     studio_free_all();
+    { extern void fxspr_free_all(void); fxspr_free_all(); }
     nav_load(NULL);
     num_npcs = 0;
     bsp_free();
@@ -538,7 +539,18 @@ static void leave_game(void)
     menu_open(false);
 }
 
-void game_autosave_tick(void) { if (autosave_pending && in_game) { autosave_pending = false; autosave(); hud_message("Autosaved"); } }
+// autosaves start with Office Complex (c1a1): none in Hazard Course, the tram ride or Anomalous Materials
+static bool autosave_allowed(void)
+{
+    return strncasecmp(cur_map, "t0", 2) && strncasecmp(cur_map, "c0", 2) && strncasecmp(cur_map, "c1a0", 4);
+}
+void game_autosave_tick(void)
+{
+    if (autosave_pending && in_game) {
+        autosave_pending = false;
+        if (autosave_allowed()) { autosave(); hud_message("Autosaved"); }
+    }
+}
 
 static void do_pending_change(void)
 {
@@ -1072,7 +1084,7 @@ int main(void)
         }
 #endif
 #ifdef TESTFIRE
-        { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); ents_fire_targets(TESTFIRE); } }
+        { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); { char tl[128]; strncpy(tl, TESTFIRE, 127); tl[127] = 0; for (char *t = strtok(tl, ","); t; t = strtok(NULL, ",")) ents_fire_targets(t); } } }
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;
             for (int i = 0; i < num_npcs; i++) if (entities[npcs[i].ent].targetname[0]) debugf("NPC %s %.0f %.0f %.0f hp %.0f ai %d script %d %s\n", entities[npcs[i].ent].targetname, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].health, npcs[i].ai, npcs[i].script, entities[npcs[i].ent].removed ? "GONE" : ""); } }
 #endif

@@ -511,9 +511,68 @@ static bool ent_in_pvs(int i, const entity_t *e, const float *mn, const float *m
     for (int k = 0; k < el->n; k++) if (leaf_inpvs[el->leaf[k]]) return true;
     return false;
 }
+// translucent brush entities (glass, water, energy fields) wait until the effects are drawn, so a
+// beam, glow or portal behind a window shows through the glass instead of painting over it
+#define MAX_TRANS_ENTS 48
+static struct { int16_t ent; T3DMat4FP *mat; float d; } trans_ents[MAX_TRANS_ENTS];
+static int num_trans_ents;
+static void draw_bmodel_faces(entity_t *e)
+{
+    if (model_first && e->model < num_model_blocks) {
+        bound_tex = -1;
+        for (uint32_t k = model_first[e->model]; k < model_first[e->model + 1]; k++) {
+            int fi = model_faces[k];
+            bind_texture(world.faces[fi].texture);
+            draw_face(fi);
+        }
+        if (model_tris) rstats.tris += model_tris[e->model];
+    }
+    bound_tex = -1;
+    bound_alpha = -1;
+}
+// called by weapons.c after the effects and before the view model (which clears the depth buffer)
+void render_draw_translucent(void)
+{
+    if (!num_trans_ents) return;
+    // far to near
+    for (int i = 1; i < num_trans_ents; i++)
+        for (int j = i; j > 0 && trans_ents[j].d > trans_ents[j - 1].d; j--) {
+            __typeof__(trans_ents[0]) t = trans_ents[j]; trans_ents[j] = trans_ents[j - 1]; trans_ents[j - 1] = t;
+        }
+    rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
+    rdpq_set_mode_standard();
+    rdpq_mode_begin();
+    rdpq_mode_tlut(TLUT_RGBA16);
+    rdpq_mode_antialias(AA_NONE);
+    rdpq_mode_fog(fog_on ? RDPQ_FOG_STANDARD : 0);
+    rdpq_mode_end();
+    t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED | ENT_CULL);
+    for (int i = 0; i < num_trans_ents; i++) {
+        entity_t *e = &entities[trans_ents[i].ent];
+        t3d_matrix_push(trans_ents[i].mat);
+        rdpq_sync_pipe();
+        rdpq_mode_begin();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);   // the RDP's additive blend wraps around: additive surfaces are blended
+        rdpq_mode_combiner(RDPQ_COMBINER2((TEX0, 0, SHADE, 0), (0, 0, 0, PRIM), (0, 0, 0, COMBINED), (0, 0, 0, COMBINED)));
+        rdpq_mode_zbuf(true, false);
+        rdpq_mode_end();
+        rdpq_set_prim_color(RGBA32(255, 255, 255, e->rendermode == 5 ? e->renderamt * 3 / 5 : e->renderamt));
+        draw_bmodel_faces(e);
+        t3d_matrix_pop(1);
+    }
+    num_trans_ents = 0;
+    rdpq_sync_pipe();
+    rdpq_mode_begin();
+    rdpq_mode_blender(0);
+    rdpq_mode_combiner(RDPQ_COMBINER_TEX_SHADE);
+    rdpq_mode_zbuf(true, true);
+    rdpq_mode_end();
+    t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED);
+}
 static void draw_entities(const float *eye, T3DMat4FP *mats)
 {
     int used = 0;
+    num_trans_ents = 0;
     t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED | ENT_CULL);
     for (int i = 1; i < num_entities && used < MAX_ENT_MATS; i++) {
         entity_t *e = &entities[i];
@@ -538,27 +597,27 @@ static void draw_entities(const float *eye, T3DMat4FP *mats)
         flush_cache();
         t3d_matrix_push(mat);
         bool trans = (e->rendermode == 2 || e->rendermode == 5) && e->renderamt < 255;
+        if (trans && num_trans_ents < MAX_TRANS_ENTS) {
+            float c[3], d = 0;
+            for (int k = 0; k < 3; k++) { c[k] = (mn[k] + mx[k]) * 0.5f - eye[k]; d += c[k] * c[k]; }
+            trans_ents[num_trans_ents].ent = i;
+            trans_ents[num_trans_ents].mat = mat;
+            trans_ents[num_trans_ents].d = d;
+            num_trans_ents++;
+            t3d_matrix_pop(1);
+            continue;
+        }
         if (trans) {
             rdpq_sync_pipe();
             rdpq_mode_begin();
-            rdpq_mode_blender(e->rendermode == 5 ? RDPQ_BLENDER_ADDITIVE : RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);   // the RDP's additive blend wraps around: additive surfaces are blended
             rdpq_mode_combiner(RDPQ_COMBINER2((TEX0, 0, SHADE, 0), (0, 0, 0, PRIM), (0, 0, 0, COMBINED), (0, 0, 0, COMBINED)));
             rdpq_mode_zbuf(true, false);
             rdpq_mode_end();
-            rdpq_set_prim_color(RGBA32(255, 255, 255, e->renderamt));
+            rdpq_set_prim_color(RGBA32(255, 255, 255, e->rendermode == 5 ? e->renderamt * 3 / 5 : e->renderamt));
         }
         // back faces are culled by the RSP (no per-face CPU test)
-        if (model_first && e->model < num_model_blocks) {
-            bound_tex = -1;
-            for (uint32_t k = model_first[e->model]; k < model_first[e->model + 1]; k++) {
-                int fi = model_faces[k];
-                bind_texture(world.faces[fi].texture);
-                draw_face(fi);
-            }
-            if (model_tris) rstats.tris += model_tris[e->model];
-        }
-        bound_tex = -1;
-        bound_alpha = -1;
+        draw_bmodel_faces(e);
         if (trans) {
             rdpq_sync_pipe();
             rdpq_mode_begin();

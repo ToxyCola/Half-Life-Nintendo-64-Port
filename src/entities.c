@@ -285,7 +285,7 @@ void game_effect_particles(const float *o, int count, float speed, int r, int g,
 static void ambient_use(entity_t *e);
 static void play_cd_track(int track);
 static void spark_sound(entity_t *e);
-typedef struct { int16_t ia, ib; uint8_t c[4]; bool laser, init; } beam_cache_t;
+typedef struct { int16_t ia, ib; uint8_t c[4]; bool laser, init, plain; float radius, strike; } beam_cache_t;
 static beam_cache_t beam_cache[MAX_ENTITIES];   // env_beam endpoints, resolved on first use
 void pm_set_ontrain(bool on);
 void pm_set_velocity(const float *v);
@@ -1007,6 +1007,7 @@ static void tank_think(entity_t *e, int idx, float dt, const float *porg)
 }
 bool ents_tank_driving(void) { return tank_driven >= 0; }
 // the glow sprites that are switched on (weapons.c draws them)
+float ents_time(void) { return g_time; }
 int ents_sprites(int *out, int max)
 {
     static int16_t list[512];
@@ -1019,7 +1020,7 @@ int ents_sprites(int *out, int max)
     int n = 0;
     for (int k = 0; k < nlist && n < max; k++) {
         entity_t *e = &entities[list[k]];
-        if (e->active && !e->removed && (e->code == 0 || e->code == 3)) out[n++] = list[k];
+        if (e->active && !e->removed && (e->sprid >= 0 || e->code == 0 || e->code == 3)) out[n++] = list[k];
     }
     return n;
 }
@@ -1295,9 +1296,10 @@ static void ent_use(entity_t *e)
     case ENT_SPRITE: {
         float sc = ent_float(e, "scale", 1);
         if (sc <= 0) sc = 1;
-        if (e->code == 1) game_effect_explosion(e->origin, 60 * sc);
+        if (e->code == 5) { e->active = true; e->sprt0 = g_time; }
+        else if (e->code == 1) game_effect_explosion(e->origin, 60 * sc);
         else if (e->code == 2) { extern void game_effect_flash(const float *o, float rad); game_effect_flash(e->origin, 24 * sc); }
-        else e->active = !e->active;
+        else { e->active = !e->active; if (e->active) e->sprt0 = g_time; }
         break;
     }
     case ENT_MORTAR_FIELD: {
@@ -1393,6 +1395,7 @@ static void spawn_entity(entity_t *e)
     e->health = ent_float(e, "health", 0);
     e->rendermode = (int)ent_float(e, "rendermode", 0);
     e->renderamt = (int)ent_float(e, "renderamt", 255);
+    e->renderfx = (int)ent_float(e, "renderfx", 0);
     e->movesnd = (int)ent_float(e, "movesnd", 0);
     e->stopsnd = (int)ent_float(e, "stopsnd", 0);
     e->visible = e->model > 0;
@@ -1702,6 +1705,16 @@ static void spawn_entity(entity_t *e)
         const char *m = ent_value(e, "model");
         char nm[48] = "";
         if (m) for (int k = 0; m[k] && k < 47; k++) nm[k] = tolower((unsigned char)m[k]), nm[k + 1] = 0;
+        {   // the PC sprite itself (spr/index.txt), animated at "framerate"
+            extern int fxspr_find(const char *name);
+            const char *b = strrchr(nm, '/');
+            char base[32];
+            str_copy(base, b ? b + 1 : nm, sizeof(base));
+            char *dot = strrchr(base, '.');
+            if (dot) *dot = 0;
+            e->sprid = fxspr_find(base);
+            e->sprt0 = 0;
+        }
         if (strstr(nm, "flare1") || strstr(nm, "flare3") || strstr(nm, "glow0") || strstr(nm, "flare2")) e->code = 0;
         else if (strstr(nm, "xplo") || strstr(nm, "blast") || strstr(nm, "explode")) e->code = 1;
         else if (strstr(nm, "xflare") || strstr(nm, "xspark") || strstr(nm, "muzzleflash") || strstr(nm, "stmbal")) e->code = 2;
@@ -1709,6 +1722,7 @@ static void spawn_entity(entity_t *e)
         else e->code = 4;   // smoke and other animated sheets: not drawn
         bool once = !strcasecmp(e->classname, "env_sprite") && (e->spawnflags & 2);
         if (once && e->code < 1) e->code = 2;
+        if (e->sprid >= 0) e->code = once ? 5 : 0;   // 5: play the animation once when used
         e->active = !once && (!strcasecmp(e->classname, "env_glow") || !e->targetname[0] || (e->spawnflags & 1));
         e->visible = false; e->solid = SOLID_NOT; e->leaf = 0;
         break;
@@ -2796,7 +2810,37 @@ void ents_think(float dt)
                     bc->ib = b[0] ? ents_find_targetname(b, 1) : -1;
                     parse_color(e, "rendercolor", bc->c, 3);
                     if (!bc->c[0] && !bc->c[1] && !bc->c[2]) { bc->c[0] = 255; bc->c[1] = 255; bc->c[2] = 255; }
+                    bc->radius = ent_float(e, "Radius", 0);
+                    bc->strike = ent_float(e, "StrikeTime", 0);
+                    const char *tx = ent_value(e, "texture");
+                    bc->plain = tx && strstr(tx, "laserbeam");
                     bc->init = true;
+                }
+                if (bc->ib < 0 && bc->radius > 0) {
+                    // CLightning::RandomArea: an arc from the start to a random wall within "Radius"
+                    // (the G-Man's portal at the end, Xen crystal zaps)
+                    float pa[3];
+                    memcpy(pa, e->origin, 12);
+                    if (bc->ia >= 0) ents_sound_origin(bc->ia, pa);
+                    float dd = 0;
+                    for (int k = 0; k < 3; k++) dd += (pa[k] - porg[k]) * (pa[k] - porg[k]);
+                    if (dd > 2000.0f * 2000.0f) break;
+                    if (bc->strike < 0) e->ltime2 = g_time + 0.05f + (rand() % 100) / 100.0f * -bc->strike;
+                    else if (bc->strike > 0) e->ltime2 = g_time + fminf(bc->strike, 0.25f);
+                    for (int tries = 0; tries < 6; tries++) {
+                        float d[3] = {(rand() % 200 - 100) / 100.0f, (rand() % 200 - 100) / 100.0f, (rand() % 200 - 100) / 100.0f};
+                        float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                        if (l < 0.1f) continue;
+                        float end[3];
+                        for (int k = 0; k < 3; k++) end[k] = pa[k] + d[k] / l * bc->radius;
+                        gtrace_t tr;
+                        game_trace(pa, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+                        if (tr.fraction >= 1 || tr.fraction < 0.1f) continue;
+                        if (bc->plain) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, tr.endpos, bc->c[0], bc->c[1], bc->c[2]); }
+                        else game_effect_lightning(pa, tr.endpos, bc->c[0], bc->c[1], bc->c[2]);
+                        break;
+                    }
+                    break;
                 }
                 if (bc->ib < 0) break;
                 float pa[3], pb[3];

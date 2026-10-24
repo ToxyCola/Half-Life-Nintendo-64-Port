@@ -1388,6 +1388,22 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         eye[2] += 28;
         npc_autoaim(eye, aim_dir);
     }
+#ifdef TESTPROJ
+    {   // effects test: the three PC-sprite projectiles drifting in front of the camera
+        static float nt = 4;
+        if (wtime > nt) {
+            nt = wtime + 3;
+            float o[3]; pm_get_origin(o);
+            float y = view_angles[1] * (float)M_PI / 180;
+            static const int kinds[3] = {P_TELEBALL, P_NIHZAP, P_BALL};
+            for (int k = 0; k < 3; k++) {
+                float sp[3] = {o[0] + cosf(y) * 260 - sinf(y) * (k - 1) * 90, o[1] + sinf(y) * 260 + cosf(y) * (k - 1) * 90, o[2] + 30};
+                float v[3] = {-cosf(y) * 20, -sinf(y) * 20, 0};
+                proj_spawn_vel(kinds[k], sp, v, -1, -1);
+            }
+        }
+    }
+#endif
     projs_think(dt);
     gibs_think(dt);
     // hornets grow back (CHgun::WeaponIdle / Reload)
@@ -1524,54 +1540,273 @@ bool weapons_hidden;   // manning a func_tank: no view model
 // billboards (explosions, muzzle flashes, the gluon flare): one sprite upload per billboard.
 // view = the first-person gun's own flashes, drawn over the view model at its muzzle
 static sprite_t *fx_projspr[5];   // spit, momma spit, nihilanth zap, controller ball, teleport ball
+// ---- env_sprite / env_glow / cycler_sprite with the PC's own sprite art (tools/spr2n64.py)
+// spr/index.txt lists every sprite the maps use and the strip that draws it; strips are loaded the
+// first time one is seen in a map (if the heap can spare it) and freed when the map changes.
+typedef struct {
+    char name[16], file[16];
+    uint8_t frames, srcframes, rgba, type;
+    uint8_t fw, fh, tint[3];
+    uint16_t ow, oh;
+    int8_t file_id;
+} fxspr_t;
+#define MAX_FXSPR 64
+#define MAX_FXFILE 24
+static fxspr_t fxspr[MAX_FXSPR];
+static int num_fxspr;
+static struct { char name[16]; sprite_t *sp; bool failed; } fxfile[MAX_FXFILE];
+static int num_fxfile;
+static uint32_t spr_col[MAX_ENTITIES];   // rendercolor + renderamt per sprite entity (0: not read yet)
+static float spr_fr[MAX_ENTITIES];       // framerate
+static uint8_t spr_vis[MAX_ENTITIES];    // glow sprites: 1 seen, 2 hidden (traced every few frames)
+static void fxspr_load_index(void)
+{
+    FILE *f = fopen("rom:/spr/index.txt", "r");
+    if (!f) return;
+    char line[160];
+    while (num_fxspr < MAX_FXSPR && fgets(line, sizeof line, f)) {
+        fxspr_t *x = &fxspr[num_fxspr];
+        char fmt[16];
+        int nf, fw, fh, ow, oh, typ, tf, r, g, b, sn;
+        if (sscanf(line, "%15s %15s %d %d %d %d %d %d %d %15s %d %d %d %d", x->name, x->file, &nf, &fw, &fh, &ow, &oh, &typ, &tf, fmt, &r, &g, &b, &sn) != 14) continue;
+        x->frames = nf; x->srcframes = sn > 255 ? 255 : (sn < nf ? nf : sn); x->fw = fw; x->fh = fh; x->ow = ow; x->oh = oh; x->type = typ;
+        x->rgba = !strcmp(fmt, "RGBA32");
+        x->tint[0] = r; x->tint[1] = g; x->tint[2] = b;
+        x->file_id = -1;
+        for (int k = 0; k < num_fxfile; k++) if (!strcmp(fxfile[k].name, x->file)) x->file_id = k;
+        if (x->file_id < 0 && num_fxfile < MAX_FXFILE) { strcpy(fxfile[num_fxfile].name, x->file); x->file_id = num_fxfile++; }
+        num_fxspr++;
+    }
+    fclose(f);
+}
+int fxspr_find(const char *name)
+{
+    for (int i = 0; i < num_fxspr; i++) if (!strcasecmp(fxspr[i].name, name)) return fxspr[i].file_id >= 0 ? i : -1;
+    return -1;
+}
+// before a map is loaded: give the memory back while the heap is being emptied anyway
+void fxspr_free_all(void)
+{
+    for (int k = 0; k < num_fxfile; k++) {
+        if (fxfile[k].sp) { sprite_free(fxfile[k].sp); fxfile[k].sp = NULL; }
+        fxfile[k].failed = false;
+    }
+    memset(spr_col, 0, sizeof spr_col);
+    memset(spr_vis, 0, sizeof spr_vis);
+}
+static sprite_t *fxspr_sprite(const fxspr_t *x)
+{
+    int k = x->file_id;
+    if (k < 0) return NULL;
+    if (fxfile[k].sp || fxfile[k].failed) return fxfile[k].sp;
+    heap_stats_t hs;
+    sys_get_heap_stats(&hs);
+    int need = x->fw * x->fh * x->frames * (x->rgba ? 4 : 1);
+    if (hs.total - hs.used < need + 160 * 1024) { fxfile[k].failed = true; debugf("fxspr %s: no room (%d KB)\n", x->file, need / 1024); return NULL; }
+    char path[48];
+    snprintf(path, sizeof path, "rom:/spr/%s.sprite", x->file);
+    fxfile[k].sp = sprite_load(path);
+    if (!fxfile[k].sp) fxfile[k].failed = true;
+    return fxfile[k].sp;
+}
 static sprite_t *fx_flare;
-// env_glow / env_sprite flares: one shared glow texture tinted with the entity's rendercolor
+// one quad (or several 30-texel tiles of it: TMEM holds 32x32 RGBA32) between four projected corners
+static void quad_tiles(sprite_t *sp, const fxspr_t *x, int frame, float c[4][3])
+{
+    surface_t surf = sprite_get_pixels(sp);
+    int y0 = frame * x->fh;
+    int step = x->rgba ? 30 : 64;
+    for (int ty = 0; ty < x->fh; ty += step)
+        for (int tx = 0; tx < x->fw; tx += step) {
+            int s0 = tx, s1 = tx + step < x->fw ? tx + step : x->fw;
+            int t0 = ty, t1 = ty + step < x->fh ? ty + step : x->fh;
+            // a texel of overlap so bilinear filtering doesn't seam the tiles
+            int us0 = s0 > 0 ? s0 - 1 : 0, us1 = s1 < x->fw ? s1 + 1 : s1;
+            int ut0 = t0 > 0 ? t0 - 1 : 0, ut1 = t1 < x->fh ? t1 + 1 : t1;
+            rdpq_sync_tile(); rdpq_sync_load();
+            rdpq_tex_upload_sub(TILE0, &surf, &(rdpq_texparms_t){.s.repeats = 1, .t.repeats = 1}, us0, y0 + ut0, us1, y0 + ut1);
+            float v[4][6];
+            const int ss[4] = {s0, s1, s0, s1}, tt[4] = {t0, t0, t1, t1};
+            for (int q = 0; q < 4; q++) {
+                float u = (float)ss[q] / x->fw, w = (float)tt[q] / x->fh;
+                // corners: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right
+                for (int k = 0; k < 3; k++)
+                    v[q][k] = (c[0][k] * (1 - u) + c[1][k] * u) * (1 - w) + (c[2][k] * (1 - u) + c[3][k] * u) * w;
+                v[q][3] = ss[q]; v[q][4] = y0 + tt[q]; v[q][5] = 1;
+            }
+            rdpq_triangle(&TRIFMT_ZBUF_TEX, v[0], v[1], v[2]);
+            rdpq_triangle(&TRIFMT_ZBUF_TEX, v[1], v[3], v[2]);
+        }
+}
+static float fx_right[3] = {0, -1, 0}, fx_fwd[3] = {1, 0, 0};
+// a camera-facing PC sprite at o, half size hw world units, animated at fps (projectiles)
+static bool fxspr_billboard(int id, const float *o, float hw, float t, float fps, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    if (id < 0) return false;
+    const fxspr_t *x = &fxspr[id];
+    sprite_t *sp = fxspr_sprite(x);
+    if (!sp) return false;
+    float d[3] = {o[0] - fx_eye[0], o[1] - fx_eye[1], o[2] - fx_eye[2]};
+    float dep = d[0] * fx_fwd[0] + d[1] * fx_fwd[1] + d[2] * fx_fwd[2];
+    float cx, cy;
+    if (dep < 8 || !project(o, &cx, &cy)) return true;
+    float px = fminf(hw * 160 / dep, 140), py = px * x->oh / (x->ow ? x->ow : 1);
+    if (px < 1) return true;
+    float c[4][3];
+    for (int q = 0; q < 4; q++) { c[q][0] = cx + ((q & 1) ? px : -px); c[q][1] = cy + ((q & 2) ? py : -py); c[q][2] = proj_z; }
+    int frame = x->frames > 1 ? (int)(t * fps) % x->srcframes * x->frames / x->srcframes : 0;
+    rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (TEX0, 0, PRIM, 0)));
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_mode_zbuf(true, false);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    rdpq_set_prim_color(RGBA32(r * x->tint[0] / 255, g * x->tint[1] / 255, b * x->tint[2] / 255, a));
+    quad_tiles(sp, x, frame, c);
+    return true;
+}
 static void draw_env_sprites(void)
 {
-    if (!fx_flare) return;
     extern int ents_sprites(int *out, int max);
     extern bool render_leaf_visible(int leaf);
+    extern float ents_time(void);
     int list[96];
     int n = ents_sprites(list, 96), drawn = 0;
-    bool up = false;
-    for (int i = 0; i < n && drawn < 32; i++) {
-        entity_t *e = &entities[list[i]];
+    float now = ents_time();
+    int mode = 0;
+    static unsigned framecnt;
+    framecnt++;
+    for (int i = 0; i < n && drawn < 24; i++) {
+        int ei = list[i];
+        entity_t *e = &entities[ei];
         float dx = e->origin[0] - fx_eye[0], dy = e->origin[1] - fx_eye[1], dz = e->origin[2] - fx_eye[2];
-        if (dx * dx + dy * dy + dz * dz > 1800.0f * 1800.0f) continue;
+        if (dx * dx + dy * dy + dz * dz > 2000.0f * 2000.0f) continue;
         if (e->leaf == 0) e->leaf = bsp_leaf_for_point(e->origin);
         if (!render_leaf_visible(e->leaf)) continue;
-        float sc = e->ltime > 0 ? e->ltime : (e->ltime = fmaxf(ent_value(e, "scale") ? atof(ent_value(e, "scale")) : 1.0f, 0.1f));
-        float rad = (e->code == 3 ? 40 : 14) * sc;
-        float x, y, x2, y2;
-        if (!project(e->origin, &x, &y)) continue;
-        float z = proj_z;
-        float up3[3] = {e->origin[0] + fx_up[0] * rad, e->origin[1] + fx_up[1] * rad, e->origin[2] + fx_up[2] * rad};
-        if (!project(up3, &x2, &y2)) continue;
-        float rr = sqrtf((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
-        if (rr < 1.5f) continue;
-        if (rr > 100) rr = 100;
-        sprite_t *sp = e->code == 3 ? fx_projspr[4] : fx_flare;
+        float sc = e->ltime > 0 ? e->ltime : (e->ltime = fmaxf(ent_value(e, "scale") ? atof(ent_value(e, "scale")) : 1.0f, 0.05f));
+        if (!spr_col[ei]) {
+            int r = 0, g = 0, b = 0;
+            const char *rc = ent_value(e, "rendercolor");
+            if (rc) sscanf(rc, "%d %d %d", &r, &g, &b);
+            spr_col[ei] = 0x80000000u | (r & 255) << 16 | (g & 255) << 8 | (b & 255);
+            const char *fr = ent_value(e, "framerate");
+            spr_fr[ei] = fr ? atof(fr) : 10;
+            if (spr_fr[ei] <= 0) spr_fr[ei] = 10;
+        }
+        const fxspr_t *x = e->sprid >= 0 ? &fxspr[e->sprid] : NULL;
+        sprite_t *sp = x ? fxspr_sprite(x) : NULL;
+        int frame = 0;
+        if (x && x->frames > 1) {
+            float t = now - e->sprt0;
+            if (t < 0) t = 0;
+            // the strip may hold fewer frames than the .spr: time runs over the .spr's frames
+            int total = x->srcframes;
+            frame = (int)(t * spr_fr[ei]);
+            if (e->code == 5 && frame >= total) { e->active = false; continue; }
+            frame = frame % total * x->frames / total;
+        } else if (x && e->code == 5 && now - e->sprt0 > 0.3f) { e->active = false; continue; }
+        // colour: glow / colour modes use rendercolor; additive art keeps its own colours
+        int rm = e->rendermode;
+        uint32_t col = spr_col[ei];
+        uint8_t cr = 255, cg = 255, cb = 255;
+        if (x) { cr = x->tint[0]; cg = x->tint[1]; cb = x->tint[2]; }
+        if ((rm == 1 || rm == 3 || !x || (x && strcmp(x->name, x->file))) && (col & 0xFFFFFF)) {
+            cr = col >> 16 & 255; cg = col >> 8 & 255; cb = col & 255;
+        }
+        int a = rm == 0 ? 255 : (e->renderamt > 0 ? e->renderamt : 255);
+        float gsc = sc;
+        if (rm == 3 && e->renderfx != 14) {
+            // R_GlowBlend (kRenderGlow without kRenderFxNoDissipation): the same size on screen at
+            // any distance (scale = dist * 0.005), brightness 19000 / dist^2 between 0.05 and 1
+            float d2 = dx * dx + dy * dy + dz * dz, dist = sqrtf(d2);
+            gsc = dist * 0.005f;
+            float br = d2 > 1 ? 19000.0f / d2 : 1;
+            a = (int)(a * fminf(fmaxf(br, 0.05f), 1.0f));
+            if (a < 4) continue;
+        }
+        // size: the sprite's own pixels are world units, times "scale"
+        float hw, hh;
+        if (x) { hw = x->ow * 0.5f * gsc; hh = x->oh * 0.5f * gsc; }
+        else { hw = hh = (e->code == 3 ? 40 : 14) * gsc; sp = e->code == 3 ? fx_projspr[4] : fx_flare; }
         if (!sp) continue;
-        if (!up || e->code == 3) {
+        // corners: facing the camera (types 0-2, 4), or in the entity's own plane (3: ORIENTED)
+        float rv[3], uv[3];
+        if (x && x->type == 3) {
+            float p = e->angles[0] * (float)M_PI / 180, y = e->angles[1] * (float)M_PI / 180, ro = e->angles[2] * (float)M_PI / 180;
+            float sp_ = sinf(p), cp = cosf(p), sy = sinf(y), cy = cosf(y), sr = sinf(ro), cr_ = cosf(ro);
+            rv[0] = -sr * sp_ * cy + cr_ * sy; rv[1] = -sr * sp_ * sy - cr_ * cy; rv[2] = -sr * cp;
+            uv[0] = cr_ * sp_ * cy + sr * sy; uv[1] = cr_ * sp_ * sy - sr * cy; uv[2] = cr_ * cp;
+            for (int k = 0; k < 3; k++) rv[k] = -rv[k];
+        } else {
+            memcpy(rv, fx_right, 12); memcpy(uv, fx_up, 12);
+        }
+        // glows (kRenderGlow) aren't depth tested on the PC: a trace from the eye decides whether they
+        // show, so the light fixture they sit in doesn't cut them in half but a wall in front hides them
+        bool glow = rm == 3;
+        if (glow) {
+            if (!spr_vis[ei] || ((framecnt + ei) & 3) == 0) {
+                gtrace_t tr;
+                game_trace(fx_eye, e->origin, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+                // R_GlowBlend: hidden only when more than 8 units of the line are blocked
+                float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+                spr_vis[ei] = (1 - tr.fraction) * dist <= 8 ? 1 : 2;
+            }
+#ifdef SPRDEBUG
+            { static float nt2; if (now > nt2 && dx * dx + dy * dy < 400 * 400) { nt2 = now + 1; debugf("SPRV %d vis %d d %.0f\n", ei, spr_vis[ei], sqrtf(dx * dx + dy * dy + dz * dz)); } }
+#endif
+            if (spr_vis[ei] != 1) continue;
+        }
+        float c[4][3];
+        bool ok = true;
+        if (x && x->type == 3) {   // in its own plane: project each corner
+            for (int q = 0; q < 4 && ok; q++) {
+                float sx = (q & 1) ? hw : -hw, sy = (q & 2) ? -hh : hh;
+                float w[3];
+                for (int k = 0; k < 3; k++) w[k] = e->origin[k] + rv[k] * sx + uv[k] * sy;
+                ok = project(w, &c[q][0], &c[q][1]);
+                c[q][2] = proj_z;
+            }
+        } else {
+            // facing the camera: one projection, the corners are the centre +- the size / depth
+            // (90 degree FOV on 320x240: 160 pixels per unit of x/depth and of y/depth)
+            float cx, cy;
+            float dep = dx * fx_fwd[0] + dy * fx_fwd[1] + dz * fx_fwd[2];
+            if (dep < 8 || !project(e->origin, &cx, &cy)) continue;
+            float px = hw * 160 / dep, py = hh * 160 / dep;
+            for (int q = 0; q < 4; q++) {
+                c[q][0] = cx + ((q & 1) ? px : -px);
+                c[q][1] = cy + ((q & 2) ? py : -py);
+                c[q][2] = proj_z;
+            }
+        }
+        if (!ok) continue;
+        float ext = fmaxf(fabsf(c[3][0] - c[0][0]), fabsf(c[3][1] - c[0][1]));
+        if (ext < 1.5f) continue;
+        if (fmaxf(fmaxf(c[0][0], c[1][0]), fmaxf(c[2][0], c[3][0])) < 0 || fminf(fminf(c[0][0], c[1][0]), fminf(c[2][0], c[3][0])) > 320) continue;
+        if (fmaxf(fmaxf(c[0][1], c[1][1]), fmaxf(c[2][1], c[3][1])) < 0 || fminf(fminf(c[0][1], c[1][1]), fminf(c[2][1], c[3][1])) > 240) continue;
+        if (mode != 1 + glow) {
             rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
             rdpq_set_mode_standard();
             rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (TEX0, 0, PRIM, 0)));
             rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-            rdpq_mode_zbuf(true, false);
+            rdpq_mode_zbuf(!glow, false);
             rdpq_mode_filter(FILTER_BILINEAR);
-            rdpq_sprite_upload(TILE0, sp, NULL);
-            up = e->code != 3;
+            mode = 1 + glow;
         }
-        uint8_t c[3] = {255, 255, 255};
-        const char *rc = ent_value(e, "rendercolor");
-        if (rc) { int r, g, b; if (sscanf(rc, "%d %d %d", &r, &g, &b) == 3 && (r | g | b)) { c[0] = r; c[1] = g; c[2] = b; } }
-        int a = e->renderamt > 0 ? e->renderamt : 255;
-        rdpq_set_prim_color(RGBA32(c[0], c[1], c[2], a));
-        float tw = sp->width, th = sp->height;
-        float v0[6] = {x - rr, y - rr, z, 0, 0, 1}, v1[6] = {x + rr, y - rr, z, tw, 0, 1};
-        float v2[6] = {x - rr, y + rr, z, 0, th, 1}, v3[6] = {x + rr, y + rr, z, tw, th, 1};
-        rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
-        rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+#ifdef SPRDEBUG
+        { static float nt; if (now > nt) { nt = now + 1; debugf("SPR fmt %d %dx%d | %d %s fr %d sc %.2f hw %.0f c0 %.0f %.0f %.3f c3 %.0f %.0f %.3f a %d\n", sp ? (int)sprite_get_format(sp) : -1, sp ? sp->width : 0, sp ? sp->height : 0, ei, x ? x->name : "-", frame, sc, hw, c[0][0], c[0][1], c[0][2], c[3][0], c[3][1], c[3][2], a); } }
+#endif
+        rdpq_set_prim_color(RGBA32(cr, cg, cb, a));
+        if (x) quad_tiles(sp, x, frame, c);
+        else {
+            rdpq_sync_tile(); rdpq_sync_load();
+            rdpq_sprite_upload(TILE0, sp, NULL);
+            float tw = sp->width, th = sp->height;
+            float v0[6] = {c[0][0], c[0][1], c[0][2], 0, 0, 1}, v1[6] = {c[1][0], c[1][1], c[1][2], tw, 0, 1};
+            float v2[6] = {c[2][0], c[2][1], c[2][2], 0, th, 1}, v3[6] = {c[3][0], c[3][1], c[3][2], tw, th, 1};
+            rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
+            rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+        }
         drawn++;
     }
 }
@@ -1590,6 +1825,13 @@ static void draw_bills(bool view)
         case P_BALL: si = 3; rad = 10; break;
         case P_TELEBALL: si = 4; rad = 24; break;
         default: continue;
+        }
+        {   // the PC's own animated art where we have it (nihilanth.cpp / controller.cpp)
+            static int ids[3] = {-2, -2, -2};
+            if (ids[0] == -2) { ids[0] = fxspr_find("nhth1"); ids[1] = fxspr_find("xspark4"); ids[2] = fxspr_find("exit1"); }
+            int id = si == 2 ? ids[0] : si == 3 ? ids[1] : si == 4 ? ids[2] : -1;
+            float hw = si == 4 ? 40 : si == 2 ? 16 : 12;   // exit1 is 80 units across: the teleport ball
+            if (id >= 0 && fxspr_billboard(id, p->o, hw, wtime + i * 0.37f, si == 4 ? 20 : 15, r, g, b, 255)) continue;
         }
         sprite_t *sp = fx_projspr[si];
         if (!sp) continue;
@@ -1662,6 +1904,8 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
         float sp_ = sinf(angles[0] * (float)M_PI / 180), cp_ = cosf(angles[0] * (float)M_PI / 180);
         float sy_ = sinf(angles[1] * (float)M_PI / 180), cy_ = cosf(angles[1] * (float)M_PI / 180);
         fx_up[0] = sp_ * cy_; fx_up[1] = sp_ * sy_; fx_up[2] = cp_;
+        fx_right[0] = sy_; fx_right[1] = -cy_; fx_right[2] = 0;
+        fx_fwd[0] = cp_ * cy_; fx_fwd[1] = cp_ * sy_; fx_fwd[2] = -sp_;
     }
     for (int i = 0; i < MAX_PROJ; i++) {
         proj_t *p = &projs[i];
@@ -1685,6 +1929,7 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
     uint32_t wt0 = TICKS_READ();
 #endif
     weapons_draw_effects();
+    { extern void render_draw_translucent(void); render_draw_translucent(); }
 #ifdef PROFX
     uint32_t wt1 = TICKS_READ();
     { pacc[0] += TICKS_DISTANCE(wt0, pst[0]); pacc[1] += TICKS_DISTANCE(pst[0], pst[1]); pacc[2] += TICKS_DISTANCE(pst[1], pst[2]); pacc[3] += TICKS_DISTANCE(pst[2], pst[3]);
@@ -1996,6 +2241,7 @@ void weapons_hud_init(void)
     static const char *pn[5] = {"fx_spit", "fx_mspit", "fx_nball", "fx_cball", "fx_tball"};
     for (int k = 0; k < 5; k++) { snprintf(path, sizeof(path), "rom:/ui/%s.sprite", pn[k]); fx_projspr[k] = sprite_load(path); }
     fx_flare = sprite_load("rom:/ui/fx_flare.sprite");
+    fxspr_load_index();
 }
 static float ammo_fade;
 static int last_clip = -1, last_ammo = -1;

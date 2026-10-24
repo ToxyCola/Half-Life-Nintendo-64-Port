@@ -53,7 +53,7 @@ typedef struct entity_s {
     float avelocity[3];
     int   spawnflags;
     int   state;
-    int   rendermode, renderamt;
+    int   rendermode, renderamt, renderfx;
     int   solid;           // SOLID_BSP or SOLID_NOT
     int   contents;        // for func_water / func_ladder (moveents)
     bool  visible, removed, active, triggered;
@@ -79,7 +79,9 @@ typedef struct entity_s {
     int   charge_on;
     float maxhealth;
     float mpos, mdir, mlast;
-    int leaf;               // env_sprite: BSP leaf (PVS test), 0 unknown   // momentary_rot_button position 0..1, direction, last held; pendulum phase
+    int leaf;               // env_sprite: BSP leaf (PVS test), 0 unknown
+    int16_t sprid;          // env_sprite: converted PC sprite (weapons.c fxspr), -1 none
+    float sprt0;            // env_sprite: when its animation started   // momentary_rot_button position 0..1, direction, last held; pendulum phase
 } entity_t;
 
 extern entity_t entities[MAX_ENTITIES];

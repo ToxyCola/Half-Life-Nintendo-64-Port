@@ -17,6 +17,7 @@ import bsp2n64
 import sky2n64
 import mdl2n64
 import ui2n64
+import spr2n64
 import re
 
 CAMPAIGN = """c0a0 c0a0a c0a0b c0a0c c0a0d c0a0e c1a0 c1a0d c1a0a c1a0b c1a0e c1a0c c1a1 c1a1a c1a1f c1a1b c1a1c
@@ -235,6 +236,7 @@ def main():
         return
     if a.ui_only:
         ui2n64.build(a.valve, a.out, '/tmp/ui2n64')
+        spr2n64.build(a.valve, a.out, maps)
         build_chapters(a, maps)
         build_arrivals(a, maps)
         return
@@ -288,6 +290,7 @@ def main():
 
     build_models(a, maps)
     ui2n64.build(a.valve, a.out, '/tmp/ui2n64')
+    spr2n64.build(a.valve, a.out, maps)
     build_chapters(a, maps)
     build_arrivals(a, maps)
 
