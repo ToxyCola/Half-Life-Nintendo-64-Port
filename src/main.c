@@ -373,7 +373,7 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     return true;
 }
 
-// ---- saves (EEPROM 16kbit = 2KB): slot 0 = autosave, slots 1..5 = manual saves ----
+// ---- saves (SRAM): slot 0 = autosave, slots 1..2 = manual saves (the older one is replaced) ----
 typedef struct { uint32_t magic, serial; char map[32]; float o[3], a[3]; int skill; player_t pl; } save_t;
 #define SAVE_MAGIC 0x484C3637   // bumped: global states and gravity in the slot
 // SRAM 32KB: 3 slots of 10KB, each the player plus a snapshot of the level (entities, characters)

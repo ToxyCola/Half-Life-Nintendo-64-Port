@@ -21,8 +21,9 @@ It is built from:
 
 | Area | Status |
 |---|---|
-| All 103 campaign maps (Black Mesa Inbound → the G-Man ending, plus the Hazard Course) | New game, Training Room, and chapter select (Load game) |
-| World rendering | BSP + PVS culling, frustum culling, original textures, baked lighting, skyboxes |
+| The whole campaign | All 103 maps, Black Mesa Inbound → the G-Man ending, plus the Hazard Course, played through in order with the PC's level changes. New game (Easy / Medium / Hard or the Training Room), Continue, chapter select under Load game |
+| Saving | Battery-backed SRAM, like a cartridge save: an autosave each time you enter a level (from Office Complex on, as the PC starts autosaving after the tram ride) and at the maps' trigger_autosave points, plus manual saves from the pause menu (Save game). A save holds the player, the level's doors, lifts, triggers and characters, global states (Blast Pit's fuel, oxygen and power) and Xen's gravity. Dying restarts from where you entered the level |
+| World rendering | BSP + PVS culling, frustum culling, original textures, baked lighting, light styles (switchable and flickering lights), skyboxes, see-through grates (alpha-tested) and glass/water (translucent, drawn after the effects so beams and glows behind them show through correctly) |
 | Characters | Scientists, Barney, the G-Man and every monster are placed with their original models, skins, heads and animations (studio models converted by `tools/mdl2n64.py`, skinned on the RSP). They are solid, lit by the floor beneath them, and follow the player through level transitions |
 | Navigation | Characters walk on the map's own node graph (`info_node`), like `dlls/nodes.cpp`: `tools/navgen.c` links the nodes offline with the same 18-unit step test the PC does at load time, and the N64 finds routes with A*. Movement is collision-checked against the world, doors, other characters and the player, with step-up, gravity and riding lifts |
 | Scripted sequences | `dlls/scripted.cpp`: a scene waits (retrying every second) until its character is free, the character walks or runs to its mark along the node graph, turns, plays its animation and fires its events; the scene's target fires when the animation ends |
@@ -32,25 +33,27 @@ It is built from:
 | Weapons | All 14 weapons with their first-person models and animations, ammo, reloads and alternate fire: crowbar, glock, .357, MP5 + grenades, shotgun, crossbow, RPG (laser-guided), gauss (charged shot), egon, hivehand, hand grenades, satchels, trip mines, snarks. Placed where the maps put them, in crates (`func_breakable` spawn objects) and dropped by soldiers. Autoaim as in single player. HUD ammo counters, weapon selection, crosshairs, damage indicators |
 | Combat | Monsters see, hear and chase you along the node graph, and use their own attack animations: zombie claws, headcrab leaps, houndeye blasts, vortigaunt zaps, soldiers' MP5s, shotguns and grenades (they take cover when hurt), alien grunt hornets, bullsquid spit, gargantua flames, turrets, barnacles, tentacles. Monstermakers bring in reinforcements. Barney fights alongside you, scientists flee. Damage, pain, deaths. Values come from the game's `skill.cfg` (difficulty from the New Game dialog) |
 | Bosses | Nihilanth (arenas, teleport balls, crystal recharging, opening head), Gonarch (node path with per-node health, mortar, baby headcrabs), Apache (path, strafing, rockets), Osprey (drops soldiers) |
+| Effects | The PC's own sprites: explosions, muzzle flashes (at the weapon model's muzzle), gluon gun beams (xbeam1/xspark1), lightning and laser beams, sparks, blood, gibs, bullsquid/Gonarch spit, alien-controller balls, Nihilanth zaps and teleport balls, and every env_sprite/env_glow in the maps (portals, including the G-Man's at the end, light glows, Xen flares) animated at their framerate. Glows follow GoldSrc's `R_GlowBlend`: hidden by walls in front, constant size on screen, fading with distance. Everything else is depth-tested against the world, so walls and grates hide it |
 | Brush entities | Doors (sliding and rotating), buttons, lifts/plats, func_train, rotating objects, walls, water, ladders, breakables (shoot or hit them; they drop their items) |
 | Trains | `func_tracktrain` ported from `plats.cpp`/`pathcorner.cpp`: path_track switching (alternate paths, disabled tracks), track-change lifts, dead ends, and **player-driven trains** (On A Rail) with the HUD speed gauge |
 | Map logic | trigger_once/multiple/auto/relay/push/teleport/hurt, multi_manager, multisource masters, trigger_changetarget, trigger_camera, env_fade, env_message, env_shake, env_explosion, env_spark, game_text, env_render, env_sprite/env_glow, env_shooter, env_funnel, env_blood, env_beverage, env_global (global states carried between maps and saves), trigger_gravity (Xen's 0.6 gravity), trigger_autosave, player_loadsaved, func_friction, func_pendulum, func_mortar_field, momentary_rot_button + momentary_door, func_tank family, killtarget, `globalname` carry-over |
 | Text | Half-Life's own font (`gfx.wad` CREDITSFONT) for menus and HUD messages. `titles.txt` is parsed at run time: intro credits, chapter titles, Hazard Course instructions and end credits use their original positions, colours and fade/type-on effects (`cl_dll/message.cpp`) |
-| Menus | Modelled on the PC GameUI: logo, New game / Load game / Options, the VGUI-style New Game, Load Game and Options dialogs, "Loading..." box, pause menu over the game |
-| Level transitions | trigger_changelevel with landmarks, as on PC. The intro tram plays through c0a0–c0a0e. Your health, suit and weapons carry over |
+| Menus | Modelled on the PC GameUI: logo, Continue / New game / Load game / Options on the title screen; Resume / Save game / Load game / Options / Leave game in the pause menu; the VGUI-style New Game, Load Game (saves first, then chapters) and Options dialogs, "Loading..." box |
+| Level transitions | trigger_changelevel with landmarks, as on PC, carrying over characters that follow you, `changetarget` events (Office Complex's elevator) and global states. The intro tram plays through c0a0–c0a0e. Your health, suit, weapons and ducking carry over. The Options → Debug tab can also jump straight to any map, placing you where the level is normally entered |
 | Player physics | Valve's pm_shared.c, unmodified (including the long jump module) |
-| Performance | Roughly 20–60 fps at 320×240 in ares (cycle-accurate emulator), depending on the view and how many characters are visible. PVS + frustum culling of world faces and brush entities, idle monsters out of sight think at 4 Hz |
+| Performance | Roughly 20–60 fps at 320×240 in ares (cycle-accurate emulator), depending on the view and how many characters are visible. PVS + frustum culling of world faces and brush entities, characters drawn as triangle strips with cached poses for corpses, idle monsters out of sight think at 4 Hz, a deeper RSP command queue so the CPU and RSP work in parallel |
+| HUD | HEV HUD and title credit inset for CRT overscan; the crosshair (on once you have the suit) slides onto the enemy the auto-aim locks on to |
 
 ## What is not there (yet)
 
 * The monster AI is a compact rewrite of the SDK's schedule system, not a port of it: no squad
   tactics, and the bosses and flying machines are simplified versions of the PC behaviour.
-* No decals or smoke; effects use a handful of the game's sprites (explosions, muzzle flashes,
-  beams, sparks, blood, spit and energy balls). Animated (`+0…`) textures show their first frame.
-* No save games. A death restarts the current map with what you had when you entered it.
-  Use Load game to start any chapter.
+* No decals (bullet holes, blood splats, scorch marks) and no smoke puffs.
+* Animated (`+0…`) textures show their first frame.
+* Sprites missing from the `sprites` folder you build from are replaced by the nearest one you
+  have (for example the G-Man's `E-Tele1` portal by the Xen `exit1` portal); the asset build
+  prints which. Building from a full Half-Life install uses the exact art.
 
-## Controls (N64 pad)
 ## Controls (N64 pad)
 
 | Button | Action |
@@ -61,7 +64,7 @@ It is built from:
 | R | Alternate fire (MP5 grenade, double barrel, gauss charge, RPG laser, satchel detonator...) |
 | A | Jump |
 | L | Duck (hold A while ducking for the long jump) |
-| B | Use: doors, buttons, chargers (hold), scientists and Barney (follow / wait). On a train: take or leave the controls |
+| B | Use: doors, buttons, chargers and valves (hold), scientists and Barney (follow / wait). On a train or a mounted gun: take or leave the controls |
 | D-pad left / right | Previous / next weapon |
 | D-pad down | Reload |
 | D-pad up | Flashlight |
@@ -69,12 +72,14 @@ It is built from:
 | Start | Pause menu |
 | Cheats (Options → Controls): L + D-pad up | Noclip |
 | Cheats: L + D-pad down | Every weapon and full ammo (impulse 101) |
+| Cheats: Options → Debug | God mode, noclip, give everything, and go to any map |
 
 Two other layouts are in **Options → Controls**: stick looks / C buttons move (Turok style),
 and stick moves and turns (GoldenEye 1.1). Look sensitivity and "Reverse up-down axis" are
 there too. In menus, use the D-pad or stick, A to choose, B to go back, Z/R to change tabs.
 
-**An Expansion Pak (8 MB) is required.** Large maps decompress to about 3 MB.
+**An Expansion Pak (8 MB) is required.** Large maps decompress to about 3 MB. Saves use the
+cartridge's 32 KB SRAM (set the save type to SRAM 256k on a flashcart or emulator).
 
 ### Running it
 
@@ -101,7 +106,7 @@ git clone https://github.com/HailToDodongo/tiny3d && (cd tiny3d && ./build.sh)
 
 # 2. Convert your game data (maps, node graphs, textures, skies, models, fonts, sounds, music) into filesystem/
 python3 tools/build_assets.py "/path/to/Half-Life/valve" filesystem
-#    --models-only / --ui-only rebuild just the characters or the fonts, sprites and titles
+#    --models-only / --ui-only rebuild just the characters or the fonts, HUD/effect sprites and titles
 #    options: --maps c1a0 c1a1 ...   (subset)   --grid 64 --tol 12 (lighting detail vs triangles)
 
 # 3. Build the ROM
@@ -112,7 +117,7 @@ make T3D_INST=/path/to/tiny3d
 The asset build takes about 45 minutes, most of it Shrinkler compression of the maps
 (`--compress-level 3`, ~20% smaller than aPLib). That, and libdragon's ULC audio codec for the
 2,500 sounds and 27 music tracks, is what makes everything fit in one 64 MB cartridge image
-(about 62 MB). `--maps-only`, `--models-only`, `--ui-only` and `--sounds-only` rebuild one part.
+(about 63 MB). `--maps-only`, `--models-only`, `--ui-only` and `--sounds-only` rebuild one part.
 Building needs a host C compiler (`cc`) for `tools/navgen.c`.
 
 ## How the conversion works
@@ -137,6 +142,11 @@ Building needs a host C compiler (`cc`) for `tools/navgen.c`.
   and `*01.mdl` sequence groups) and keeps the sequences the maps use: idles, walks and runs,
   every animation named by a scripted_sequence, dead and sitting poses. Vertices are grouped by
   bone so tiny3d can skin them with one matrix per batch. Textures become CI8.
+* **Effect sprites:** `tools/spr2n64.py` converts every sprite the maps' env_sprite, env_glow and
+  cycler_sprite entities use (and those the game code uses) into N64 frame strips: single-hue art
+  as 8-bit intensity tinted at draw time, coloured art as RGBA32 tiles. Additive art is drawn as
+  alpha blending with alpha = brightness, because the RDP's additive blend wraps around instead
+  of saturating.
 * **Fonts and UI:** `tools/ui2n64.py` converts `gfx.wad`'s CREDITSFONT into three sizes of
   I4 glyph atlas, the 320×240 HUD sprites (`sprites/320hud3.spr`: train gauge and title) and the
   menu logo (`resource/logo.tga`). Colours and layout come from `resource/TrackerScheme.res`
@@ -145,11 +155,11 @@ Building needs a host C compiler (`cc`) for `tools/navgen.c`.
 ## Source layout
 
 ```
-src/main.c        main loop, input, view, trigger_camera, level changes
+src/main.c        main loop, input, view, trigger_camera, level changes, saves
 src/render.c      tiny3d renderer: PVS, batching, CI8 textures, skybox, characters
 src/bsp.c         map loader, PVS, hull traces, texture-under-point, light sampling
 src/pmove.c       engine callbacks for Valve's pm_shared.c (incl. monster box hulls)
-src/entities.c    doors, buttons, trains, triggers, multi_managers, fades, messages ...
+src/entities.c    doors, buttons, trains, tanks, triggers, multi_managers, global states, fades ...
 src/studio.c      studio model loading and skinned drawing
 src/font.c        Half-Life font drawing
 src/hud.c         titles.txt messages, screen fades, game title, train gauge
@@ -158,10 +168,10 @@ src/sound.c       channels, 3D sound, sentences.txt speech, music
 src/npc.c         monsters, NPCs, items: AI, talking, following, scripted sequences
 src/nav.c         node graph routes (A*)
 src/player.c      health, HEV suit, damage, items, health/armour HUD
-src/weapons.c     weapons, projectiles, view model, ammo HUD
+src/weapons.c     weapons, projectiles, view model, ammo HUD, effects and env_sprites
 src/skill.c       skill.cfg
 valve_sdk/        files from Valve's Half-Life SDK (see valve_sdk/LICENSE)
-tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py
+tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, spr2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py
 test/             PC test harness: runs the same game code on a converted map
 ```
 
