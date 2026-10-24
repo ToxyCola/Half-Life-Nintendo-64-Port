@@ -65,6 +65,8 @@ typedef struct {
     float xform[3][4];
     float (*att_out)[3];     // optional: world positions of the first att_n attachments
     int att_n;
+    int16_t *cache_slot;     // optional: where a fixed pose's cached bone matrices are (-1 none)
+    bool cacheable;          // the pose is final (a body on the floor): cache it
 } studio_draw_t;
 
 void studio_begin_frame(int frame_index);

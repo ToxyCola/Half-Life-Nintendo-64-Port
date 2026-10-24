@@ -18,6 +18,10 @@
 static studio_t *cache[MAX_MODELS];
 static int num_cached;
 static T3DMat4FP *bone_pool;         // FB_COUNT * MAX_DRAWN_BONES, uncached
+// poses that never change (bodies on the floor): their bone matrices are kept here once computed
+#define STATIC_BONES 384
+static T3DMat4FP *static_pool;
+static int static_used;
 static int pool_frame, pool_used;
 
 static void *lump(uint8_t *buf, uint32_t *tab, int i, int *count)
@@ -293,6 +297,7 @@ void studio_free(studio_t *m)
 void studio_free_all(void)
 {
     rspq_wait();
+    static_used = 0;
     for (int i = 0; i < num_cached; i++) {
         studio_t *m = cache[i];
         for (int t = 0; t < m->numtex; t++) if (m->texblocks[t]) rspq_block_free(m->texblocks[t]);
@@ -331,6 +336,7 @@ float studio_seq_duration(studio_t *m, int seq)
 void studio_begin_frame(int frame_index)
 {
     if (!bone_pool) bone_pool = malloc_uncached(sizeof(T3DMat4FP) * MAX_DRAWN_BONES * FB_COUNT);
+    if (!static_pool) static_pool = malloc_uncached(sizeof(T3DMat4FP) * STATIC_BONES);
     pool_frame = frame_index % FB_COUNT;
     pool_used = 0;
 }
@@ -364,8 +370,9 @@ void studio_draw(const studio_draw_t *d)
 {
     studio_t *m = d->model;
     if (!m || m->numseqs == 0) return;
+    bool cached = d->cache_slot && *d->cache_slot >= 0 && *d->cache_slot + m->numbones <= static_used;
     // keep room for the first-person weapon (drawn last): busy scenes used to run the pool dry
-    if (pool_used + m->numbones > MAX_DRAWN_BONES - (d->use_xform ? 0 : 160)) return;
+    if (!cached && pool_used + m->numbones > MAX_DRAWN_BONES - (d->use_xform ? 0 : 160)) return;
     int seq = d->seq;
     if (seq < 0 || seq >= m->numseqs) seq = 0;
     sseq_t *s = &m->seqs[seq];
@@ -394,10 +401,11 @@ void studio_draw(const studio_draw_t *d)
     if (d->use_xform) memcpy(ent, d->xform, sizeof(ent));
     float bonemat[128][3][4];
     float inv = 1.0f / m->posscale;
-    T3DMat4FP *out = &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used];
+    T3DMat4FP *out = cached ? &static_pool[*d->cache_slot] : &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used];
 #ifdef PROFX
     uint32_t pb0 = TICKS_READ();
 #endif
+    if (!cached) {
     for (int b = 0; b < m->numbones && b < 128; b++) {
         float qa[4], qb[4], q[4], p[3], dot = 0;
         const float qs = 1.0f / 32767.0f;
@@ -459,15 +467,22 @@ void studio_draw(const studio_draw_t *d)
         t3d_mat4_to_fixed_3x4(&out[b], &tm);
     }
     pool_used += m->numbones;
-#ifdef PROFX
-    uint32_t pb1 = TICKS_READ();
-#endif
     for (int a = 0; a < d->att_n && a < m->numatt; a++) {
         satt_t *at = &m->att[a];
         if (at->bone < 0 || at->bone >= m->numbones || at->bone >= 128) continue;
         float (*bm)[4] = bonemat[at->bone];
         for (int r = 0; r < 3; r++) d->att_out[a][r] = bm[r][0] * at->org[0] + bm[r][1] * at->org[1] + bm[r][2] * at->org[2] + bm[r][3];
     }
+    // a pose that won't change: keep its matrices for the next frames
+    if (d->cache_slot && d->cacheable && static_pool && static_used + m->numbones <= STATIC_BONES) {
+        memcpy(&static_pool[static_used], out, sizeof(T3DMat4FP) * m->numbones);
+        *d->cache_slot = static_used;
+        static_used += m->numbones;
+    }
+    }
+#ifdef PROFX
+    uint32_t pb1 = TICKS_READ();
+#endif
 
     // lighting: ambient from the floor's baked light + a soft light from above
     uint8_t amb[4] = {(uint8_t)(d->light[0] * 0.75f), (uint8_t)(d->light[1] * 0.75f), (uint8_t)(d->light[2] * 0.75f), 0xff};

@@ -221,6 +221,12 @@ static int find_npc_for_entity(int ent)
 int npc_for_entity(int ent) { return find_npc_for_entity(ent); }
 
 static bool is_dead(npc_t *n) { return (n->flags & NF_DEAD) || n->ai == AI_DYING || n->ai == AI_DEAD; }
+// a corpse whose death animation has finished (or a placed dead body): its pose never changes
+bool npc_pose_final(int i)
+{
+    npc_t *n = &npcs[i];
+    return (n->ai == AI_DEAD || (n->flags & NF_DEAD)) && n->sstate == NS_IDLE && n->script < 0;
+}
 bool npc_alive(int i) { return i >= 0 && i < num_npcs && !is_dead(&npcs[i]) && !(npcs[i].flags & NF_ITEM) && !entities[npcs[i].ent].removed; }
 bool npc_is_item(int i) { return npcs[i].flags & NF_ITEM; }
 float npc_eye_height(int i) { npc_t *n = &npcs[i]; return n->maxs[2] * 0.9f; }
@@ -343,6 +349,7 @@ static npc_t *new_npc(int ent, int def, studio_t *m)
     n->talk_target = -1;
     n->trig_cond = ent_value(&entities[ent], "TriggerTarget") && ent_value(&entities[ent], "TriggerCondition") ? atoi(ent_value(&entities[ent], "TriggerCondition")) : -1;
     n->voice = -1;
+    n->bone_cache = -1;
     n->onground = true;
     n->ground_ent = -1;
     return n;

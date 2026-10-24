@@ -702,6 +702,17 @@ static void draw_npcs(const float *eye)
         npc_t *c = &npcs[order[i]];
         studio_draw_t d = {.model = c->model, .yaw = c->yaw, .seq = c->seq, .frame = c->frame,
                            .body = c->body, .skin = c->skin, .att_out = c->att, .att_n = 1, .ctl0 = c->ctl0};
+        {   // bodies lying still keep their pose: bones computed once (studio.c static pool)
+            extern bool npc_pose_final(int i);
+            bool fin = npc_pose_final(order[i]);
+            if (!fin || c->bone_cache_org[0] != c->origin[0] || c->bone_cache_org[1] != c->origin[1] ||
+                c->bone_cache_org[2] != c->origin[2] || c->bone_cache_org[3] != c->yaw) {
+                c->bone_cache = -1;
+                memcpy(c->bone_cache_org, c->origin, 12); c->bone_cache_org[3] = c->yaw;
+            }
+            d.cache_slot = &c->bone_cache;
+            d.cacheable = fin;
+        }
         if (c->model->numatt > 0) { extern float game_time(void); c->att_time = game_time(); }
         memcpy(d.origin, c->origin, 12);
         memcpy(d.light, c->light, 3);
