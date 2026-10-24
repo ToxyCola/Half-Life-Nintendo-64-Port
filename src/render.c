@@ -439,8 +439,8 @@ static void record_model_blocks(void)
 
 static void free_model_blocks(void)
 {
-    free(model_faces); free(model_first);
-    model_faces = NULL; model_first = NULL;
+    free(model_faces); free(model_first); free(model_tris);
+    model_faces = NULL; model_first = NULL; model_tris = NULL;
     num_model_blocks = 0;
 }
 
