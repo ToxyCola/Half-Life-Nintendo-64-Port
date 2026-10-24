@@ -1,0 +1,6 @@
+build/
+filesystem/
+*.z64
+*.ram
+__pycache__/
+*.pyc
