@@ -1083,6 +1083,9 @@ int main(void)
             }
         }
 #endif
+#ifdef TESTMS
+        { extern void ents_debug_ms(void); static float nt = 1; if (in_game && game_clock > nt) { nt = game_clock + 1; ents_debug_ms(); } }
+#endif
 #ifdef TESTFIRE
         { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); { char tl[128]; strncpy(tl, TESTFIRE, 127); tl[127] = 0; for (char *t = strtok(tl, ","); t; t = strtok(NULL, ",")) ents_fire_targets(t); } } }
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;

@@ -237,6 +237,29 @@ static bool global_ok(entity_t *e)   // an entity with "globalstate" works only 
 typedef struct { int16_t ent, n; int16_t src[24]; uint32_t on; } msrc_t;
 static msrc_t msrc[MAX_MSOURCES];
 static int num_msrc;
+// CMultiManager::HasTarget: is name one of the manager's "target" "delay" keys?
+static bool mm_has_target(const entity_t *mm, const char *name)
+{
+    const char *p = mm->kv;
+    size_t nl = strlen(name);
+    while (p && *p && *p != '}') {
+        while (*p && *p != '"' && *p != '}') p++;
+        if (*p != '"') break;
+        const char *k = ++p;
+        while (*p && *p != '"') p++;
+        size_t klen = p - k;
+        if (*p) p++;
+        while (*p && *p != '"') p++;
+        if (!*p) break;
+        p++;
+        while (*p && *p != '"') p++;
+        if (*p) p++;
+        const char *hash = memchr(k, '#', klen);
+        if (hash) klen = hash - k;
+        if (klen == nl && !strncasecmp(k, name, nl)) return true;
+    }
+    return false;
+}
 static msrc_t *msrc_for(int ent) { for (int i = 0; i < num_msrc; i++) if (msrc[i].ent == ent) return &msrc[i]; return NULL; }
 static bool msource_triggered(entity_t *ms)
 {
@@ -1008,6 +1031,13 @@ static void tank_think(entity_t *e, int idx, float dt, const float *porg)
 bool ents_tank_driving(void) { return tank_driven >= 0; }
 // the glow sprites that are switched on (weapons.c draws them)
 float ents_time(void) { return g_time; }
+#ifdef TESTMS
+void ents_debug_ms(void)
+{
+    for (int i = ents_find_targetname(TESTMS, 1); i >= 0; i = ents_find_targetname(TESTMS, i + 1))
+        if (entities[i].type == ENT_MULTISOURCE) { msrc_t *m = msrc_for(i); debugf("MS %s sources %d on %lx triggered %d\n", TESTMS, m ? m->n : -1, m ? (unsigned long)m->on : 0ul, msource_triggered(&entities[i])); }
+}
+#endif
 int ents_sprites(int *out, int max)
 {
     static int16_t list[512];
@@ -1173,6 +1203,8 @@ static void ent_use(entity_t *e)
         // further triggers are ignored unless the manager is multithreaded (spawnflag 1)
         if (!(e->spawnflags & 1) && e->nextthink > g_time) break;
         float maxdelay = 0;
+        int oldc_mm = cur_caller;
+        cur_caller = (int)(e - entities);   // the manager is the caller (a multisource source)
         // every key that isn't a standard key is "targetname" "delay"
         const char *p = e->kv;
         while (p && *p && *p != '}') {
@@ -1199,6 +1231,7 @@ static void ent_use(entity_t *e)
             if (d > maxdelay) maxdelay = d;
             queue_event(key, g_time + d);
         }
+        cur_caller = oldc_mm;
         e->nextthink = g_time + maxdelay + 0.001f;
         break;
     }
@@ -1795,8 +1828,15 @@ void ents_spawn_all(void)
             int n = 0;
             msrc_t *m = num_msrc < MAX_MSOURCES ? &msrc[num_msrc++] : NULL;
             if (m) { memset(m, 0, sizeof(*m)); m->ent = i; }
+            // CMultiSource::Register: everything whose "target" is this, then every multi_manager
+            // that lists it (the ending's teleport gates in c5a1 are opened only by managers)
             for (int j = 1; j < num_entities; j++)
                 if (entities[j].target[0] && !strcasecmp(entities[j].target, e->targetname)) {
+                    if (m && n < 24) m->src[n] = j;
+                    n++;
+                }
+            for (int j = 1; j < num_entities; j++)
+                if (entities[j].type == ENT_MULTI_MANAGER && e->targetname[0] && mm_has_target(&entities[j], e->targetname)) {
                     if (m && n < 24) m->src[n] = j;
                     n++;
                 }
@@ -3227,6 +3267,18 @@ int ents_snapshot(uint8_t *b, int max, int base)
         memcpy(b + pos, &r, sizeof r); pos += sizeof r; n++;
     }
     b[384] = n & 255; b[385] = n >> 8;
+    // multisource switches that are on (which sources have fired: gates stay open after a load)
+    if (pos + 2 <= max) {
+        int cpos = pos, c = 0;
+        pos += 2;
+        for (int k = 0; k < num_msrc && pos + 6 <= max; k++) {
+            if (!msrc[k].on || msrc[k].ent >= base) continue;
+            int16_t ent = msrc[k].ent;
+            memcpy(b + pos, &ent, 2); memcpy(b + pos + 2, &msrc[k].on, 4);
+            pos += 6; c++;
+        }
+        b[cpos] = c & 255; b[cpos + 1] = c >> 8;
+    }
     return pos;
 }
 void ents_apply_snapshot(const uint8_t *b, int len, int base)
@@ -3247,5 +3299,15 @@ void ents_apply_snapshot(const uint8_t *b, int len, int base)
         e->state = r.state; e->visible = r.fl & 1; e->solid = (r.fl & 2) ? SOLID_BSP : SOLID_NOT;
         e->curspeed = r.curspeed; e->path = r.path;
         e->nextthink = r.think >= 0 ? g_time + r.think : 0;
+    }
+    if (pos + 2 <= len) {
+        int c = b[pos] | (b[pos + 1] << 8);
+        pos += 2;
+        for (int k = 0; k < c && pos + 6 <= len; k++, pos += 6) {
+            int16_t ent; uint32_t on;
+            memcpy(&ent, b + pos, 2); memcpy(&on, b + pos + 2, 4);
+            msrc_t *m = msrc_for(ent);
+            if (m) m->on = on;
+        }
     }
 }
