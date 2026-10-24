@@ -21,13 +21,14 @@ typedef enum {
     ENT_PATH_TRACK, ENT_MULTISOURCE, ENT_ENV_FADE, ENT_ENV_MESSAGE, ENT_GAME_TEXT, ENT_CAMERA, ENT_SENTENCE,
     ENT_ENV_RENDER, ENT_ENDSECTION,
     ENT_AMBIENT, ENT_SPEAKER, ENT_CDAUDIO, ENT_TARGET_CDAUDIO, ENT_RECHARGE, ENT_HEALTHCHARGER,
-    ENT_ENV_SHAKE, ENT_WEAPONSTRIP, ENT_ENV_SPARK, ENT_ENV_EXPLOSION, ENT_GLOBAL_BEAM,
+    ENT_ENV_SHAKE, ENT_WEAPONSTRIP, ENT_ENV_SPARK, ENT_ENV_EXPLOSION, ENT_GLOBAL_BEAM, ENT_MONSTERMAKER,
 } enttype_t;
 
 enum { MS_IDLE = 0, MS_AT_BOTTOM, MS_AT_TOP, MS_GOING_UP, MS_GOING_DOWN };
 
 typedef struct entity_s {
     const char *kv;        // start of this entity's block in the entity lump
+    int maker_count, maker_live, maker_maxlive;   // monstermaker: left to make (-1 endless), alive, cap (-1 none)
     enttype_t type;
     char classname[32];
     char targetname[48];

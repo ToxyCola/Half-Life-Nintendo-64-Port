@@ -19,7 +19,7 @@ static T3DMat4FP *mat_pool;          // FB_COUNT * (1 + MAX_ENT_MATS), uncached
 static int frame_index;
 
 static int framecount = 1;
-#define ENT_MAX_LEAFS 40
+#define ENT_MAX_LEAFS 16
 typedef struct { float org[3]; int16_t n; uint16_t leaf[ENT_MAX_LEAFS]; } ent_leafs_t;
 static ent_leafs_t *ent_leafs;
 static int ent_leafs_count;
@@ -84,14 +84,26 @@ void render_new_map(void)
     leaf_inpvs = calloc(world.numleafs, 1);
     free(vis_faces);
     vis_faces = malloc(world.numfaces * sizeof(int32_t));
+    // the culling helpers are optional: only when the heap keeps room for the sky and play
+    #define HEAP_MARGIN (160 * 1024)
     free(ent_leafs);
     ent_leafs_count = num_entities;
-    ent_leafs = malloc(sizeof(ent_leafs_t) * ent_leafs_count);
+    ent_leafs = NULL;
+    {
+        size_t need = sizeof(ent_leafs_t) * ent_leafs_count;
+        void *t = malloc(need + HEAP_MARGIN);
+        if (t) { free(t); ent_leafs = malloc(need); }
+    }
     if (ent_leafs) for (int i = 0; i < ent_leafs_count; i++) ent_leafs[i].n = -2;
     free(face_box);
-    face_box = malloc(world.numfaces * sizeof(*face_box));
+    face_box = NULL;
+    {
+        size_t need = world.numfaces * sizeof(*face_box);
+        void *t = malloc(need + HEAP_MARGIN);
+        if (t) { free(t); face_box = malloc(need); }
+    }
     float inv = 1.0f / world.vertscale;
-    for (int fi = 0; fi < world.numfaces; fi++) {
+    for (int fi = 0; face_box && fi < world.numfaces; fi++) {
         bface_t *f = &world.faces[fi];
         float mn[3] = {1e9f, 1e9f, 1e9f}, mx[3] = {-1e9f, -1e9f, -1e9f};
         for (int c = 0; c < f->numchunks; c++) {
@@ -361,7 +373,7 @@ static void collect_world(const float *eye)
         if (f->flags & FF_SKY) { if (!sky_visible && !face_back(fi, eye)) sky_visible = true; continue; }
         if (f->flags & FF_NODRAW || !f->numchunks) continue;
         if (face_back(fi, eye)) continue;
-        {   // drop faces whose own bounds are outside the view (big leaves straddle the frustum)
+        if (face_box) {   // drop faces whose own bounds are outside the view (big leaves straddle the frustum)
             const int16_t *b = face_box[fi];
             float mn[3] = {b[0], b[1], b[2]}, mx[3] = {b[3], b[4], b[5]};
             if (box_culled(mn, mx)) { CULLDBG_INC; continue; }
@@ -794,6 +806,9 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
     uint32_t t5 = TICKS_READ();
 #ifndef NO_ENTS
     draw_entities(eye, &mats[1]);
+#endif
+#ifdef EXP_WAITNPC
+    rspq_wait();
 #endif
     uint32_t t5a = TICKS_READ();
     rstats.npcs = 0;

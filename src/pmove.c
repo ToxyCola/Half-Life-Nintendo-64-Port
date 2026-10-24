@@ -198,6 +198,13 @@ static int test_position_ex(float *pos, pmtrace_t *ptrace, int (*ignore)(physent
         physent_t *pe = &pm->physents[i];
         if (!pe->model && pe->solid != SOLID_BBOX) continue;
         if (ignore && ignore(pe)) continue;
+        if (pe->model && pe->iuser4) {   // outside the entity's bounds (+ player hull): can't be inside it
+            int h = pm->usehull & 3;
+            bool out = false;
+            for (int k = 0; k < 3 && !out; k++)
+                out = pos[k] + pm->player_maxs[h][k] + 1 < pe->mins[k] || pos[k] + pm->player_mins[h][k] - 1 > pe->maxs[k];
+            if (out) continue;
+        }
         float offset[3], test[3];
         hull_t *hull = hull_for_physent(pe, pm->usehull, offset);
         VectorSubtract(pos, offset, test);
@@ -652,7 +659,7 @@ static float stuck_time;
 bool pm_unstick(float dt)
 {
     if (pm->movetype == MOVETYPE_NOCLIP) { stuck_time = 0; return false; }
-    pm_build_physents();
+    // the physents pm_run just built are still current (nothing has moved since)
     if (test_position_ex(pm->origin, NULL, NULL) < 0) { stuck_time = 0; return false; }
     stuck_time += dt;
     if (stuck_time < 0.5f) return false;

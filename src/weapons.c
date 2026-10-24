@@ -318,7 +318,7 @@ static void explode(const float *o, float dmg, int owner)
 
 // ------------------------------------------------------------------ projectiles
 enum { P_NONE, P_HGRENADE, P_ARGRENADE, P_ROCKET, P_BOLT, P_HORNET_P, P_SATCHEL, P_TRIPMINE, P_SNARK, P_GAUSSDUMMY,
-       P_SPIT = 10, P_HORNET = 11, P_BALL = 12 };
+       P_SPIT = 10, P_HORNET = 11, P_BALL = 12, P_MORTAR = 13, P_TELEBALL = 14, P_NIHZAP = 15 };
 typedef struct {
     int kind;
     float o[3], v[3], yaw, pitch;
@@ -356,10 +356,13 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
     case P_HORNET: case P_HORNET_P: speed = owner == 0 ? 300 : 300; p->die = wtime + 5; model = "hornet"; break;
     case P_SPIT: speed = 900; p->die = wtime + 4; break;
     case P_BALL: speed = 500; p->die = wtime + 5; break;
+    case P_MORTAR: speed = 1; p->die = wtime + 8; break;            // velocity set by the caller (a lob)
+    case P_TELEBALL: speed = 300; p->die = wtime + 10; break;
+    case P_NIHZAP: speed = 400; p->die = wtime + 6; break;
     case P_TRIPMINE: speed = 1; p->die = wtime + 1e6f; model = "v_tripmine"; p->armed = wtime + 2.5f; break;   // v = the beam direction
     }
     for (int k = 0; k < 3; k++) p->v[k] = dir[k] * speed;
-    if (kind == P_HGRENADE || kind == P_SATCHEL || kind == P_SNARK) {
+    if ((kind == P_HGRENADE || kind == P_SATCHEL || kind == P_SNARK) && owner == 0) {
         float pv[3];
         pm_get_velocity(pv);
         for (int k = 0; k < 3; k++) p->v[k] += pv[k];
@@ -369,6 +372,26 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
     p->pitch = 0;
     if (model) p->model = studio_get(model);
     return s;
+}
+
+// a projectile with a given velocity (lobs: grenades, Big Momma's mortar)
+int proj_spawn_vel(int kind, const float *origin, const float *vel, int owner, int target)
+{
+    float dir[3] = {1, 0, 0};
+    int s = proj_spawn(kind, origin, dir, owner, target);
+    if (s >= 0) {
+        memcpy(projs[s].v, vel, 12);
+        projs[s].yaw = atan2f(vel[1], vel[0]) * 180 / (float)M_PI;
+        if (kind == P_HGRENADE) projs[s].die = wtime + 3.5f;
+    }
+    return s;
+}
+
+// a hostile snark from a snark nest (monstermaker "monster_snark"): hunts the player
+int proj_spawn_snark(const float *origin, float yaw)
+{
+    float a = yaw * (float)M_PI / 180, dir[3] = {cosf(a), sinf(a), 0};
+    return proj_spawn(P_SNARK, origin, dir, -1, 0);
 }
 
 static void proj_hit_damage(proj_t *p, gtrace_t *tr, float dmg, int type)
@@ -444,7 +467,8 @@ static void projs_think(float dt)
         }
         if (p->kind == P_SATCHEL && p->stuck) continue;
         // homing
-        if (p->kind == P_HORNET || p->kind == P_HORNET_P || p->kind == P_SNARK || (p->kind == P_BALL && p->target >= 0)) {
+        if (p->kind == P_HORNET || p->kind == P_HORNET_P || p->kind == P_SNARK || (p->kind == P_BALL && p->target >= 0) ||
+            p->kind == P_TELEBALL || p->kind == P_NIHZAP) {
             if (p->target < 0 || (p->target > 0 && !npc_alive(p->target - 1))) p->target = nearest_target(p->o, p->owner, p->kind == P_SNARK ? 1024 : 512);
             if (p->target >= 0) {
                 float t[3];
@@ -477,7 +501,7 @@ static void projs_think(float dt)
             if (sp < 2000 && sp > 0.1f) for (int k = 0; k < 3; k++) p->v[k] *= (sp + 1200 * dt) / sp;
         }
         // gravity for thrown things
-        if (p->kind == P_HGRENADE || p->kind == P_ARGRENADE || p->kind == P_SATCHEL || p->kind == P_SNARK || p->kind == P_SPIT)
+        if (p->kind == P_HGRENADE || p->kind == P_ARGRENADE || p->kind == P_SATCHEL || p->kind == P_SNARK || p->kind == P_SPIT || p->kind == P_MORTAR)
             p->v[2] -= (p->kind == P_ARGRENADE ? 400 : 800) * dt;
         if (p->kind == P_BOLT && pm_get_waterlevel() < 3) p->v[2] -= 40 * dt;
         float to[3] = {p->o[0] + p->v[0] * dt, p->o[1] + p->v[1] * dt, p->o[2] + p->v[2] * dt};
@@ -537,6 +561,24 @@ static void projs_think(float dt)
             break;
         case P_BALL:
             proj_hit_damage(p, &tr, skill_get("sk_controller_dmgball"), DMG_ENERGYBEAM);
+            p->kind = P_NONE;
+            break;
+        case P_MORTAR:   // CBMortar::Touch: an acid splash
+            snd_emit(-1, CHAN_VOICE, "bullchicken/bc_spithit1.wav", 1, ATTN_NORM, 90, p->o);
+            game_effect_particles(p->o, 14, 260, 120, 220, 60, 0.7f, 600);
+            game_radius_damage(p->o, skill_get("sk_bigmomma_dmg_blast"), skill_get("sk_bigmomma_radius_blast") > 0 ? skill_get("sk_bigmomma_radius_blast") : 250,
+                               p->owner > 0 ? p->owner - 1 : -1, DMG_ACID);
+            p->kind = P_NONE;
+            break;
+        case P_NIHZAP:   // CNihilanthHVR::ZapTouch
+            snd_emit(-1, CHAN_VOICE, "weapons/electro4.wav", 1, ATTN_NORM, PITCH_NORM, p->o);
+            proj_hit_damage(p, &tr, skill_get("sk_nihilanth_zap") > 0 ? skill_get("sk_nihilanth_zap") : 30, DMG_SHOCK);
+            game_effect_particles(p->o, 8, 200, 255, 240, 160, 0.4f, 300);
+            p->kind = P_NONE;
+            break;
+        case P_TELEBALL:   // CNihilanthHVR::TeleportTouch: the player is sent to the next arena
+            if (tr.player) { extern void npc_teleball_hit(void); npc_teleball_hit(); }
+            snd_emit(-1, CHAN_VOICE, "x/x_teleattack1.wav", 1, ATTN_NORM, PITCH_NORM, p->o);
             p->kind = P_NONE;
             break;
         case P_SNARK:
@@ -1450,8 +1492,46 @@ static bool project(const float *p, float *sx, float *sy)
 static float fx_eye[3], fx_angles[3], fx_up[3] = {0, 0, 1};
 // billboards (explosions, muzzle flashes, the gluon flare): one sprite upload per billboard.
 // view = the first-person gun's own flashes, drawn over the view model at its muzzle
+static sprite_t *fx_projspr[5];   // spit, momma spit, nihilanth zap, controller ball, teleport ball
 static void draw_bills(bool view)
 {
+    // model-less projectiles as glowing billboards
+    for (int i = 0; !view && i < MAX_PROJ; i++) {
+        proj_t *p = &projs[i];
+        if (p->kind == P_NONE || p->model) continue;
+        int si; float rad; uint8_t r = 255, g = 255, b = 255;
+        switch (p->kind) {
+        case P_SPIT: si = 0; rad = 6; r = 170; g = 230; b = 60; break;
+        case P_MORTAR: si = 1; rad = 14; r = 160; g = 255; b = 120; break;
+        case P_NIHZAP: si = 2; rad = 14; break;
+        case P_BALL: si = 3; rad = 10; break;
+        case P_TELEBALL: si = 4; rad = 24; break;
+        default: continue;
+        }
+        sprite_t *sp = fx_projspr[si];
+        if (!sp) continue;
+        float x, y, x2, y2;
+        if (!project(p->o, &x, &y)) continue;
+        float z = proj_z;
+        float up3[3] = {p->o[0] + fx_up[0] * rad, p->o[1] + fx_up[1] * rad, p->o[2] + fx_up[2] * rad};
+        if (!project(up3, &x2, &y2)) continue;
+        float rr = sqrtf((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
+        if (rr < 2) rr = 2;
+        if (rr > 120) rr = 120;
+        rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (TEX0, 0, PRIM, 0)));
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_zbuf(true, false);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_upload(TILE0, sp, NULL);
+        rdpq_set_prim_color(RGBA32(r, g, b, 255));
+        float tw = sp->width, th = sp->height;
+        float v0[6] = {x - rr, y - rr, z, 0, 0, 1}, v1[6] = {x + rr, y - rr, z, tw, 0, 1};
+        float v2[6] = {x - rr, y + rr, z, 0, th, 1}, v3[6] = {x + rr, y + rr, z, tw, th, 1};
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+    }
     for (int i = 0; i < MAX_BILLS; i++) {
         bill_t *bl = &bills[i];
         float age = wtime - bl->start;
@@ -1830,6 +1910,8 @@ void weapons_hud_init(void)
     for (int k = 0; k < 8; k++) { snprintf(path, sizeof(path), "rom:/ui/fx_expl%d.sprite", k); fx_expl[k] = sprite_load(path); }
     for (int k = 0; k < 3; k++) { snprintf(path, sizeof(path), "rom:/ui/fx_muzzle%d.sprite", k + 1); fx_muzzle[k] = sprite_load(path); }
     for (int k = 0; k < 11; k++) { snprintf(path, sizeof(path), "rom:/ui/fx_xspark%d.sprite", k); fx_xspark[k] = sprite_load(path); }
+    static const char *pn[5] = {"fx_spit", "fx_mspit", "fx_nball", "fx_cball", "fx_tball"};
+    for (int k = 0; k < 5; k++) { snprintf(path, sizeof(path), "rom:/ui/%s.sprite", pn[k]); fx_projspr[k] = sprite_load(path); }
 }
 static float ammo_fade;
 static int last_clip = -1, last_ammo = -1;

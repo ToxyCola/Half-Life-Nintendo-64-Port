@@ -209,6 +209,8 @@ static void special_use(entity_t *e);
 static void ambient_use(entity_t *e);
 static void play_cd_track(int track);
 static void spark_sound(entity_t *e);
+typedef struct { int16_t ia, ib; uint8_t c[4]; bool laser, init; } beam_cache_t;
+static beam_cache_t beam_cache[MAX_ENTITIES];   // env_beam endpoints, resolved on first use
 void pm_set_ontrain(bool on);
 void pm_set_velocity(const float *v);
 
@@ -374,13 +376,25 @@ static void mover_reached(entity_t *e)
 
 
 // ------------------------------------------------------------------ masters (multisource)
+#define MAX_PUSHABLES 64
+static int num_pushables;   // func_pushables in the map (triggers that pushables can set off)
+static uint16_t pushable_list[MAX_PUSHABLES];
+static int16_t master_cache[MAX_ENTITIES];   // 0 unresolved, -1 no master, else the multisource
 static bool master_ok(entity_t *e)
 {
-    const char *m = ent_value(e, "master");
-    if (!m || !m[0]) return true;
-    char name[48];
-    str_copy(name, m, sizeof(name));
-    int i = ents_find_targetname(name, 1);
+    int ei = (int)(e - entities);
+    int i = master_cache[ei];
+    if (i == 0) {
+        const char *m = ent_value(e, "master");
+        if (!m || !m[0]) i = -1;
+        else {
+            char name[48];
+            str_copy(name, m, sizeof(name));
+            i = ents_find_targetname(name, 1);
+            if (i <= 0) i = -1;
+        }
+        master_cache[ei] = i;
+    }
     if (i < 0) return true;   // "Master was null or not a master!" -> treated as triggered
     entity_t *ms = &entities[i];
     if (ms->type != ENT_MULTISOURCE) return true;
@@ -765,10 +779,63 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
 
 void game_effect_blood(const float *o);
 void game_effect_particles(const float *o, int count, float speed, int r, int g, int b, float life, float grav);
+// CMonsterMaker::MakeMonster: one of "monstertype" at the maker, named "netname", if there is room
+// and the live/total limits allow it; fires the maker's target
+extern int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker);
+static void maker_make(entity_t *e)
+{
+    if (e->maker_count == 0) { e->active = false; return; }
+    if (e->maker_maxlive > 0 && e->maker_live >= e->maker_maxlive) return;
+    const char *type = ent_value(e, "monstertype");
+    if (!type || !type[0]) return;
+    if (!strcasecmp(type, "monster_snark")) {   // a snark from a nest: the hunting projectile
+        extern int proj_spawn_snark(const float *origin, float yaw);
+        if (proj_spawn_snark(e->origin, e->angles[1]) < 0) return;
+    } else {
+        const char *nn = ent_value(e, "netname");
+        if (npc_spawn_monster(type, e->origin, e->angles[1], nn ? nn : "", (int)(e - entities)) < 0) return;
+    }
+    if (e->maker_count > 0) e->maker_count--;
+    if (e->target[0]) fire_entity_target(e);
+    if (e->maker_count == 0) e->active = false;
+}
+// a trigger_teleport's effect on the player without touching it (the Nihilanth's teleport balls call
+// the trigger's Touch directly)
+bool ents_teleport_player(const char *name)
+{
+    for (int t = ents_find_targetname(name, 1); t >= 0; t = ents_find_targetname(name, t + 1)) {
+        entity_t *e = &entities[t];
+        if (e->removed || e->type != ENT_TRIGGER_TELEPORT) continue;
+        int d = ents_find_targetname(e->target, 1);
+        if (d < 0) return false;
+        float o[3], pmins[3], pmaxs[3];
+        pm_get_hull(pmins, pmaxs);
+        memcpy(o, entities[d].origin, 12);
+        o[2] += -pmins[2] + 1;
+        pm_set_origin(o);
+        float zero[3] = {0, 0, 0};
+        pm_set_velocity(zero);
+        game_set_view_angles(entities[d].angles);
+        ents_player_teleported();
+        return true;
+    }
+    return false;
+}
+
+void ents_maker_child_died(int maker)
+{
+    if (maker > 0 && maker < num_entities && entities[maker].type == ENT_MONSTERMAKER && entities[maker].maker_live > 0)
+        entities[maker].maker_live--;
+}
+
 static void ent_use(entity_t *e)
 {
     if (e->removed) return;
     { extern bool lights_use(entity_t *e); if (lights_use(e)) return; }   // light switches
+    if (e->type == ENT_OTHER && !strncasecmp(e->classname, "monster_", 8)) {   // waking a boss
+        extern bool npc_used(int ent);
+        if (npc_used((int)(e - entities))) return;
+    }
     if (!strcasecmp(e->classname, "gibshooter")) {
         // CGibShooter: a burst of human gibs (blood splats + flying chunks here)
         int n = (int)ent_float(e, "m_iGibs", 3);
@@ -903,6 +970,11 @@ static void ent_use(entity_t *e)
     case ENT_GLOBAL_BEAM:
         e->active = !e->active;
         break;
+    case ENT_MONSTERMAKER:
+        // CMonsterMaker::CyclicUse makes one per use; ToggleUse switches the timed maker on and off
+        if (e->spawnflags & 4) maker_make(e);
+        else { e->active = !e->active; if (e->active) e->nextthink = g_time; }
+        break;
     default:
         break;
     }
@@ -934,7 +1006,7 @@ static enttype_t classify(const char *cn)
         {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_WALL}, {"func_friction", ENT_INVISIBLE_BRUSH},
         {"trigger_autosave", ENT_INVISIBLE_BRUSH}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
         {"ambient_generic", ENT_AMBIENT}, {"speaker", ENT_SPEAKER}, {"env_shake", ENT_ENV_SHAKE},
-        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"env_explosion", ENT_ENV_EXPLOSION},
+        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_explosion", ENT_ENV_EXPLOSION},
         {"trigger_monsterjump", ENT_INVISIBLE_BRUSH}, {"trigger_gravity", ENT_INVISIBLE_BRUSH},
         {"trigger_transition", ENT_INVISIBLE_BRUSH}, {"func_vehiclecontrols", ENT_INVISIBLE_BRUSH},
         {"trigger", ENT_INVISIBLE_BRUSH},
@@ -1110,6 +1182,8 @@ static void spawn_entity(entity_t *e)
         // CPushable: breakable only with SF_PUSH_BREAKABLE; it falls to the floor or floats in water
         e->maxhealth = (e->spawnflags & 128) ? e->health : 0;
         if (e->model > 0) pushable_settle_pending = true;
+        if (num_pushables < MAX_PUSHABLES) pushable_list[num_pushables] = (uint16_t)(e - entities);
+        num_pushables++;
         break;
     case ENT_BREAKABLE:
         // func_breakable.cpp: health 0 = unbreakable by damage (SF_BREAK_TRIGGER_ONLY is 1)
@@ -1221,6 +1295,16 @@ static void spawn_entity(entity_t *e)
     case ENT_GLOBAL_BEAM:
         e->active = (e->spawnflags & 1) || !e->targetname[0];
         break;
+    case ENT_MONSTERMAKER:
+        e->maker_count = (int)ent_float(e, "monstercount", -1);
+        e->maker_maxlive = (int)ent_float(e, "m_imaxlivechildren", -1);
+        e->maker_live = 0;
+        e->delay = ent_float(e, "delay", 1);
+        if (e->delay <= 0) e->delay = 1;
+        // SF_MONSTERMAKER_START_ON, or no name to be triggered by
+        e->active = !(e->spawnflags & 4) && ((e->spawnflags & 1) || !e->targetname[0]);
+        e->nextthink = e->active ? g_time + e->delay : 0;
+        break;
     case ENT_ENV_SPARK:
         e->active = !(e->spawnflags & 32) || (e->spawnflags & 64);
         e->nextthink = e->active ? 0.1f + (rand() % 100) / 100.0f * ent_float(e, "MaxDelay", 0) : 0;
@@ -1234,8 +1318,13 @@ static void spawn_entity(entity_t *e)
     }
 }
 
+static int ents_gen;   // bumped for every map (and saved game) spawn
 void ents_spawn_all(void)
 {
+    ents_gen++;
+    memset(beam_cache, 0, sizeof(beam_cache));
+    memset(master_cache, 0, sizeof(master_cache));
+    num_pushables = 0;
     memset(entities, 0, sizeof(entities));
     num_entities = 0;
     driving = -1;
@@ -1648,6 +1737,20 @@ static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
     memcpy(oldorg, e->origin, 12);
     for (int i = 0; i < 3; i++) e->origin[i] += delta[i];
     e->angles[1] = fmodf(e->angles[1] + dyaw + 360.0f, 360.0f);
+    if (!riding && e->model > 0) {
+        // nowhere near the player: nothing to push or carry (skip rebuilding the player's collision)
+        bmodel_t *bm = &world.bmodels[e->model];
+        bool rot = e->angles[0] != 0 || e->angles[1] != 0 || e->angles[2] != 0 || dyaw != 0;
+        float r = 0;
+        if (rot) for (int j = 0; j < 3; j++) r = fmaxf(r, fmaxf(fabsf(bm->mins[j]), fabsf(bm->maxs[j]))) * 1.74f;
+        bool far = false;
+        for (int k = 0; k < 3 && !far; k++) {
+            float lo = (rot ? e->origin[k] - r : e->origin[k] + bm->mins[k]) - fabsf(delta[k]) - 96;
+            float hi = (rot ? e->origin[k] + r : e->origin[k] + bm->maxs[k]) + fabsf(delta[k]) + 96;
+            far = porg[k] < lo || porg[k] > hi;
+        }
+        if (far) return;
+    }
     pm_build_physents(); // collision must see the mover at its new position
     if (riding || (e->solid == SOLID_BSP && pm_player_in_entity(idx, porg))) {
         float rel[3] = {porg[0] - oldorg[0], porg[1] - oldorg[1], porg[2] - oldorg[2]};
@@ -2094,15 +2197,40 @@ void ents_think(float dt)
     pm_get_hull(pmins, pmaxs);
 
 #ifdef PROFX
-    static uint32_t pt[128]; static int pframes; uint32_t tlast = TICKS_READ(); int ptype = 127;
-#define PROFX_STEP(ty) do { uint32_t _n = TICKS_READ(); pt[ptype & 127] += TICKS_DISTANCE(tlast, _n); tlast = _n; ptype = (ty); } while (0)
+    static uint32_t pt[MAX_ENTITIES]; static int pframes; uint32_t tlast = TICKS_READ(); int ptype = 0;
+    static uint32_t ploop; uint32_t tloop0 = tlast;
+#define PROFX_STEP(ty) do { uint32_t _n = TICKS_READ(); pt[ptype] += TICKS_DISTANCE(tlast, _n); tlast = _n; ptype = (ty); } while (0)
 #else
 #define PROFX_STEP(ty)
 #endif
-    for (int i = 1; i < num_entities; i++) {
+    // only the entity types that do something every frame (a map has hundreds of others)
+    static uint16_t think_list[MAX_ENTITIES];
+    static int num_think, think_built = -1;
+    static int think_gen = -1;
+    if (think_built != num_entities || think_gen != ents_gen) {
+        num_think = 0;
+        for (int i = 1; i < num_entities; i++) {
+            switch (entities[i].type) {
+            case ENT_AMBIENT: case ENT_BUTTON: case ENT_CAMERA: case ENT_CDAUDIO: case ENT_DOOR: case ENT_DOOR_ROTATING:
+            case ENT_ENDSECTION: case ENT_ENV_SPARK: case ENT_GLOBAL_BEAM: case ENT_HEALTHCHARGER: case ENT_MONSTERMAKER:
+            case ENT_PLAT: case ENT_PUSHABLE: case ENT_RECHARGE: case ENT_ROTATING: case ENT_ROT_BUTTON: case ENT_SENTENCE:
+            case ENT_SPEAKER: case ENT_TARGET_CDAUDIO: case ENT_TRACKAUTO: case ENT_TRACKTRAIN: case ENT_TRAIN:
+            case ENT_TRIGGER_AUTO: case ENT_TRIGGER_CHANGELEVEL: case ENT_TRIGGER_HURT: case ENT_TRIGGER_MULTIPLE:
+            case ENT_TRIGGER_ONCE: case ENT_TRIGGER_PUSH: case ENT_TRIGGER_TELEPORT:
+                think_list[num_think++] = i;
+                break;
+            default:
+                break;
+            }
+        }
+        think_built = num_entities;
+        think_gen = ents_gen;
+    }
+    for (int ti = 0; ti < num_think; ti++) {
+        int i = think_list[ti];
         entity_t *e = &entities[i];
         if (e->removed) continue;
-        PROFX_STEP(e->type);
+        PROFX_STEP(i);
         switch (e->type) {
         case ENT_DOOR:
         case ENT_DOOR_ROTATING:
@@ -2226,25 +2354,42 @@ void ents_think(float dt)
             // env_beam / env_laser (effects.cpp): drawn while on (StartOn = 1, or toggled by use)
             if (e->active && g_time >= e->ltime2) {
                 e->ltime2 = g_time + 0.1f;
-                char a[48], b[48];
-                str_copy(a, ent_value(e, "LightningStart"), sizeof(a));
-                str_copy(b, ent_value(e, !strcasecmp(e->classname, "env_laser") ? "LaserTarget" : "LightningEnd"), sizeof(b));
+                beam_cache_t *bc = &beam_cache[i];
+                if (!bc->init) {   // resolve the endpoints and colour once (string lookups are slow)
+                    char a[48], b[48];
+                    str_copy(a, ent_value(e, "LightningStart"), sizeof(a));
+                    bc->laser = !strcasecmp(e->classname, "env_laser");
+                    str_copy(b, ent_value(e, bc->laser ? "LaserTarget" : "LightningEnd"), sizeof(b));
+                    bc->ia = a[0] ? ents_find_targetname(a, 1) : -1;
+                    bc->ib = b[0] ? ents_find_targetname(b, 1) : -1;
+                    parse_color(e, "rendercolor", bc->c, 3);
+                    if (!bc->c[0] && !bc->c[1] && !bc->c[2]) { bc->c[0] = 255; bc->c[1] = 255; bc->c[2] = 255; }
+                    bc->init = true;
+                }
+                if (bc->ib < 0) break;
                 float pa[3], pb[3];
                 memcpy(pa, e->origin, 12);
-                int ia = a[0] ? ents_find_targetname(a, 1) : -1, ib = b[0] ? ents_find_targetname(b, 1) : -1;
-                if (ia >= 0) ents_sound_origin(ia, pa);
-                if (ib < 0) break;
-                ents_sound_origin(ib, pb);
-                uint8_t c[4];
-                parse_color(e, "rendercolor", c, 3);
-                if (!c[0] && !c[1] && !c[2]) { c[0] = 255; c[1] = 255; c[2] = 255; }
-                if (!strcasecmp(e->classname, "env_laser")) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, pb, c[0], c[1], c[2]); }
-                else game_effect_lightning(pa, pb, c[0], c[1], c[2]);
+                if (bc->ia >= 0) ents_sound_origin(bc->ia, pa);
+                ents_sound_origin(bc->ib, pb);
+                // nobody sees a beam on the other side of the map: skip making the effect
+                float da = 0, db = 0;
+                for (int k = 0; k < 3; k++) { da += (pa[k] - porg[k]) * (pa[k] - porg[k]); db += (pb[k] - porg[k]) * (pb[k] - porg[k]); }
+                if (da > 2500.0f * 2500.0f && db > 2500.0f * 2500.0f) break;
+                if (bc->laser) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, pb, bc->c[0], bc->c[1], bc->c[2]); }
+                else game_effect_lightning(pa, pb, bc->c[0], bc->c[1], bc->c[2]);
+            }
+            break;
+        case ENT_MONSTERMAKER:
+            if (e->active && g_time >= e->nextthink) {
+                e->nextthink = g_time + e->delay;
+                maker_make(e);
             }
             break;
         case ENT_ENV_SPARK:
             if (e->active && e->nextthink > 0 && g_time >= e->nextthink) {
-                spark_sound(e);
+                float dd = 0;
+                for (int k = 0; k < 3; k++) dd += (e->origin[k] - porg[k]) * (e->origin[k] - porg[k]);
+                if (dd < 1500.0f * 1500.0f) spark_sound(e);   // out of earshot and sight: just keep the timer
                 e->nextthink = g_time + 0.1f + (rand() % 100) / 100.0f * ent_float(e, "MaxDelay", 0);
             }
             break;
@@ -2288,10 +2433,10 @@ void ents_think(float dt)
                 fire_entity_target(e);
                 if (e->type == ENT_TRIGGER_ONCE) e->removed = true;
                 else e->nextthink = g_time + e->wait;
-            } else if (e->model > 0 && (e->spawnflags & 4 /* SF_TRIGGER_PUSHABLES */) && g_time >= e->nextthink && master_ok(e)) {
+            } else if (num_pushables > 0 && e->model > 0 && (e->spawnflags & 4 /* SF_TRIGGER_PUSHABLES */) && g_time >= e->nextthink && master_ok(e)) {
                 // the specimen cart rolling into the spectrometer beam starts the resonance cascade
-                for (int i = 1; i < num_entities; i++) {
-                    entity_t *p = &entities[i];
+                for (int pi = 0; pi < num_pushables && pi < MAX_PUSHABLES; pi++) {
+                    entity_t *p = &entities[pushable_list[pi]];
                     if (p->type != ENT_PUSHABLE || p->removed || p->model <= 0) continue;
                     if (!player_touches(e, p->origin, world.bmodels[p->model].mins, world.bmodels[p->model].maxs)) continue;
                     fire_entity_target(e);
@@ -2344,10 +2489,11 @@ void ents_think(float dt)
         }
     }
 #ifdef PROFX
-    PROFX_STEP(127);
+    PROFX_STEP(0);
+    ploop += TICKS_DISTANCE(tloop0, TICKS_READ());
     if (++pframes >= 30) {
-        debugf("  ents prof (us/frame):");
-        for (int k = 0; k < 128; k++) if (pt[k] / pframes > TICKS_FROM_US(150)) debugf(" type%d=%d", k, (int)TICKS_TO_US(pt[k] / pframes));
+        debugf("  ents prof loop %d us (us/frame):", (int)TICKS_TO_US(ploop / pframes)); ploop = 0;
+        for (int k = 1; k < num_entities; k++) if (pt[k] / pframes > TICKS_FROM_US(40)) debugf(" %s[%s]=%d", entities[k].classname, entities[k].targetname, (int)TICKS_TO_US(pt[k] / pframes));
         debugf("\n");
         memset(pt, 0, sizeof(pt)); pframes = 0;
     }

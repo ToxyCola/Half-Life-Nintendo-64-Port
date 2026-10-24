@@ -38,6 +38,9 @@ typedef struct studio_s {
     sevent_t *events;
     satt_t *att;           int numatt;
     void **texblocks;      // rspq_block_t* per texture
+    int16_t *strip_idx;    // tiny3d strip index lists (DMEM format), per chunk: strips [cs_first, +cs_count)
+    uint32_t *strip_ofs;   // per strip: offset (int16 units) << 8 | count
+    uint16_t *cs_first, *cs_count;
 } studio_t;
 
 studio_t *studio_get(const char *name);      // load (cached per map) "scientist" -> rom:/models/scientist.hlm

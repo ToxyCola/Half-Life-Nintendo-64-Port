@@ -94,7 +94,10 @@ You need Linux or WSL, Python 3 with `numpy` and `Pillow`, and your Half-Life in
 # 1. Toolchain + libraries
 #    libdragon "preview" branch (toolchain .deb from its GitHub releases), then:
 export N64_INST=/opt/libdragon
-git clone -b preview https://github.com/DragonMinded/libdragon && make -C libdragon install tools-install
+git clone -b preview https://github.com/DragonMinded/libdragon
+#    bigger RSP command queue: lets the CPU run game logic while the RSP/RDP draws (~+30% fps in big maps)
+git -C libdragon apply ../tools/libdragon-rspq-buffer.patch
+make -C libdragon install tools-install
 git clone https://github.com/HailToDodongo/tiny3d && (cd tiny3d && ./build.sh)
 
 # 2. Convert your game data (maps, node graphs, textures, skies, models, fonts, sounds, music) into filesystem/

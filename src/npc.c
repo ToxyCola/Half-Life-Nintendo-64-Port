@@ -133,11 +133,11 @@ static const mdef_t defs[] = {
     {"monster_miniturret", "miniturret", {-16, -16, -16}, {16, 16, 16}, NF_NODROP | NF_STATIC, "sk_miniturret_health", 40, C_MACHINE, 0, NULL, R_BULLET, 0, 1200, "sk_9mm_bullet", 0.1f, &S_TURRET},
     {"monster_turret", "turret", {-32, -32, -32}, {32, 32, 32}, NF_NODROP | NF_STATIC, "sk_turret_health", 50, C_MACHINE, 0, NULL, R_BULLET, 0, 1200, "sk_12mm_bullet", 0.1f, &S_TURRET},
     {"monster_tentacle", "tentacle2", {-32, -32, 0}, {32, 32, 64}, NF_NODROP | NF_STATIC | NF_INVULN, NULL, 75, C_ALIEN, 380, "sk_gargantua_dmg_slash", R_NONE, 0, 0, NULL, 0, &S_TENTACLE},
-    {"monster_apache", "apache", {-300, -300, -172}, {300, 300, 8}, NF_NODROP | NF_NOTSOLID | NF_NOAI, "sk_apache_health", 250, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
-    {"monster_osprey", "osprey", {-400, -400, -100}, {400, 400, 100}, NF_NODROP | NF_NOTSOLID | NF_NOAI, NULL, 400, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_apache", "apache", {-160, -160, -80}, {160, 160, 24}, NF_NODROP | NF_FLY, "sk_apache_health", 250, C_MILITARY, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_osprey", "osprey", {-240, -240, -60}, {240, 240, 60}, NF_NODROP | NF_FLY, NULL, 400, C_MILITARY, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_hevsuit_dead", "player", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
-    {"monster_bigmomma", "big_mom", {-32, -32, 0}, {32, 32, 64}, NF_NOAI, NULL, 1000, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
-    {"monster_nihilanth", "nihilanth", {-32, -32, 0}, {32, 32, 64}, NF_NODROP | NF_NOAI | NF_INVULN, NULL, 800, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_bigmomma", "big_mom", {-32, -32, 0}, {32, 32, 64}, 0, NULL, 150, C_ALIEN, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_nihilanth", "nihilanth", {-160, -160, 0}, {160, 160, 420}, NF_NODROP | NF_FLY, "sk_nihilanth_health", 800, C_ALIEN, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_flyer_flock", "boid", {-8, -8, 0}, {8, 8, 8}, NF_NODROP | NF_NOTSOLID | NF_NOAI, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     // items (items.cpp / weapons.cpp / ammo): touched by the player to pick up
     {"item_suit", "w_suit", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
@@ -391,6 +391,15 @@ static void spawn_one(int i, const char *cls_override)
     if (!strcmp(mname, "scientist") && n->body == 2) n->skin = 1;   // HEAD_LUTHER
     if (!strcmp(mname, "hgrunt") && !ent_value(e, "body")) n->body = 0;
     n->pitch = head_pitch(n);
+    n->bkind = !strcmp(mname, "nihilanth") ? 1 : !strcmp(mname, "big_mom") ? 2 : !strcmp(mname, "apache") ? 3 : !strcmp(mname, "osprey") ? 4 : 0;
+    if (!strcmp(mname, "hgrunt") && !(n->flags & NF_DEAD)) {
+        // CHGrunt::Spawn: weapons 0 means MP5 + hand grenades; a shotgun shows in the gun bodygroup
+        const char *w = ent_value(e, "weapons");
+        n->weapons = w ? atoi(w) : 0;
+        if (n->weapons == 0) n->weapons = 1 | 2;
+        if ((n->weapons & 8) && m->numbodyparts > 2) n->body += m->bodyparts[2].base;
+    }
+
     // cyclers, env_models and furniture keep their placement (MOVETYPE_NONE); monsters drop
     // holograms (renderfx 16, the training-room Gina) float where the mapper put them, on
     // emitters that aren't solid to monsters: dropping them sank her into the pedestal
@@ -403,6 +412,7 @@ static void spawn_one(int i, const char *cls_override)
     n->health = n->maxhealth = d ? (d->hp ? skill_get(d->hp) : d->hpdef) : 100;
     if (n->health <= 0) n->health = n->maxhealth = d && d->hpdef > 0 ? d->hpdef : 20;
     if (e->health > 0 && !(n->flags & NF_ITEM)) n->health = n->maxhealth = e->health;
+    if (n->bkind == 2) n->health = n->maxhealth = 150 * fmaxf(skill_get("sk_bigmomma_health_factor"), 1);
 
     // starting animation
     int seq = -1;
@@ -443,7 +453,12 @@ static void set_anim_filter(void)
                                ACT_COMBAT_IDLE, ACT_RUN_SCARED};
     static const char *fixed[] = {"lying_on_back", "lying_on_stomach", "lying_on_side", "dead_sitting", "dead_hang",
                                   "dead_table1", "dead_table2", "dead_table3", "deadstomach", "deadside", "deadsitting",
-                                  "deadback", "deadtable", "sitting2", "sitlookleft"};
+                                  "deadback", "deadtable", "sitting2", "sitlookleft",
+                                  // bosses
+                                  "float", "attack1", "attack1_open", "float_open", "recharge", "die1", "idle1", "mortar",
+                                  "spawn", "claw", "angry1", "angry2", "angry3", "breakwall", "falldeath", "walk", "run", "death",
+                                  // grunt grenades
+                                  "throwgrenade", "launchgrenade"};
     int n = 0;
     for (unsigned i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++) { strcpy(names[n], fixed[i]); n++; }
     for (int i = 1; i < num_entities && n < 158; i++) {
@@ -460,9 +475,11 @@ static void set_anim_filter(void)
     studio_set_filter(ptrs, n, acts, sizeof(acts) / sizeof(acts[0]));
 }
 
+static int pvs_leaf = -1;   // player leaf whose PVS is in pvs_buf
 void npcs_spawn_all(void)
 {
     num_npcs = 0;
+    pvs_leaf = -1;
     talk_wait_time = 0;
     set_anim_filter();
     game_trace_begin_frame();
@@ -477,7 +494,71 @@ void npcs_spawn_all(void)
         }
         spawn_one(i, NULL);
     }
+    // monstermakers: load their monsters' models now (a model loaded mid-map splits the heap)
+    for (int i = 1; i < num_entities; i++) {
+        entity_t *e = &entities[i];
+        if (e->type != ENT_MONSTERMAKER) continue;
+        const char *t = ent_value(e, "monstertype");
+        int di = t ? def_for_class(t) : -1;
+        if (di >= 0) studio_get(defs[di].model);
+        else if (t && !strcasecmp(t, "monster_snark")) studio_get("w_squeak");
+    }
+    // and what grunts and bosses will throw or make during the fight
+    for (int i = 0; i < num_npcs; i++) {
+        npc_t *n = &npcs[i];
+        if (n->weapons & 2) studio_get("w_grenade");
+        if (n->weapons & 4) studio_get("grenade");
+        if (n->bkind == 2) studio_get("baby_headcrab");
+        if (n->bkind == 3) studio_get("rpgrocket");
+        if (n->bkind == 4) { studio_get("hgrunt"); studio_get("w_grenade"); }
+    }
     debugf("npcs: %d spawned\n", num_npcs);
+}
+
+// CMonsterMaker::MakeMonster: a monster appearing during play (alien slaves teleporting in, ...)
+int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker)
+{
+    if (num_entities >= MAX_ENTITIES || num_npcs >= MAX_NPCS) return -1;
+    int di = def_for_class(classname);
+    if (di < 0) return -1;
+    // room for it? (the PC maker checks for anything in the box first)
+    {
+        npc_t tmp;
+        memset(&tmp, 0, sizeof(tmp));
+        memcpy(tmp.mins, defs[di].mins, 12); memcpy(tmp.maxs, defs[di].maxs, 12);
+        gtrace_t tr;
+        game_trace(origin, origin, tmp.mins, tmp.maxs, 0, -1, &tr);
+        if (tr.startsolid) return -1;
+        float pmn[3], pmx[3], po[3];
+        pm_get_hull(pmn, pmx); pm_get_origin(po);
+        bool overlap = true;
+        for (int k = 0; k < 3; k++)
+            if (po[k] + pmx[k] <= origin[k] + tmp.mins[k] || po[k] + pmn[k] >= origin[k] + tmp.maxs[k]) overlap = false;
+        if (overlap) return -1;
+    }
+    static char kvpool[32][64];
+    static int kvnext;
+    char *kv = kvpool[kvnext++ & 31];
+    snprintf(kv, 64, "\"classname\" \"%s\" }", classname);
+    entity_t *e = &entities[num_entities];
+    memset(e, 0, sizeof(*e));
+    e->kv = kv;
+    strncpy(e->classname, classname, sizeof(e->classname) - 1);
+    if (targetname) strncpy(e->targetname, targetname, sizeof(e->targetname) - 1);
+    e->type = ENT_OTHER;
+    e->model = -1;
+    e->renderamt = 255;
+    memcpy(e->origin, origin, 12);
+    e->angles[1] = yaw;
+    int idx = num_entities++;
+    int before = num_npcs;
+    spawn_one(idx, NULL);
+    if (num_npcs == before) { e->removed = true; return -1; }
+    npc_t *n = &npcs[num_npcs - 1];
+    n->maker = maker;
+    if (maker > 0) entities[maker].maker_live++;
+    n->next_look = 0;   // looks around straight away
+    return num_npcs - 1;
 }
 
 // an item created during play (from a crate, or dropped by a dead soldier)
@@ -962,6 +1043,9 @@ void npc_script_use(int sci)
 static void scripts_retry(void)
 {
     float now = game_time();
+    static float next;
+    if (now < next && now >= next - 1) return;   // a few times a second is plenty (and survives map changes)
+    next = now + 0.2f;
     for (int i = 1; i < num_entities; i++) {
         entity_t *sc = &entities[i];
         if (sc->type != ENT_SCRIPTED || !sc->charge_on || sc->removed || now < sc->ltime2) continue;
@@ -1017,9 +1101,15 @@ static float player_pos[3], player_eye[3];
 static bool player_in_pvs(npc_t *n)
 {
     if (!pvs_ok) return true;
-    float c[3];
-    npc_center(n, c);
-    int l = bsp_leaf_for_point(c);
+    int l;
+    if (n->leaf_cache > 0 && n->leaf_org[0] == n->origin[0] && n->leaf_org[1] == n->origin[1] && n->leaf_org[2] == n->origin[2]) l = n->leaf_cache;
+    else {
+        float c[3];
+        npc_center(n, c);
+        l = bsp_leaf_for_point(c);
+        memcpy(n->leaf_org, n->origin, 12);
+        n->leaf_cache = l;
+    }
     if (l <= 0) return true;
     return pvs_buf[(l - 1) >> 3] & (1 << ((l - 1) & 7));
 }
@@ -1158,6 +1248,7 @@ static void npc_gib(npc_t *n)
     if (!npc_bleeds(n)) game_effect_particles(o, 24, 220, 200, 180, 120, 1.0f, 600);   // machines: sparks
     else game_spawn_gibs(o, 8, npc_alien(n), 200);
     snd_emit(n->ent, CHAN_BODY, "common/bodysplat.wav", 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+    if (n->maker) { extern void ents_maker_child_died(int maker); ents_maker_child_died(n->maker); n->maker = 0; }
     entities[n->ent].removed = true;
     n->solid = false;
     n->flags |= NF_DEAD | NF_NOTSOLID;
@@ -1177,6 +1268,11 @@ static void ai_trigger(npc_t *n, int cond)
 static float hit_point[3];
 static bool hit_valid;
 void npc_set_hitpoint(const float *p) { memcpy(hit_point, p, 12); hit_valid = true; }
+static bool nihilanth_damage(npc_t *n, float dmg, int attacker);
+static bool heli_damage(npc_t *n, float dmg, int dmgtype);
+static bool osprey_damage(npc_t *n, float dmg, int dmgtype);
+static void bigmomma_damage(npc_t *n, float *dmg, int dmgtype);
+static void grunt_take_cover(npc_t *n);
 void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attacker)
 {
     if (i < 0 || i >= num_npcs) return;
@@ -1200,6 +1296,10 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
         return;
     }
     if (!npc_alive(i) || (n->flags & NF_INVULN)) return;
+    if (n->bkind == 1) { nihilanth_damage(n, dmg, attacker); return; }
+    if (n->bkind == 3) { heli_damage(n, dmg, dmgtype); return; }
+    if (n->bkind == 4) { osprey_damage(n, dmg, dmgtype); return; }
+    if (n->bkind == 2) bigmomma_damage(n, &dmg, dmgtype);
     const mdef_t *d = D(n);
     // the gargantua shrugs off everything but explosives and energy
     if (d && !strcmp(d->model, "garg") && !(dmgtype & (DMG_BLAST | DMG_ENERGYBEAM | DMG_SHOCK))) dmg *= 0.05f;
@@ -1218,6 +1318,7 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
     }
     if (n->health <= -30 && npc_bleeds(n) && !(n->flags & NF_STATIC)) { npc_die(n, dmgtype, dir); npc_gib(n); return; }
     if (n->health <= 0) { npc_die(n, dmgtype, dir); return; }
+    if (n->weapons && n->ai == AI_COMBAT && dmg >= 8 && rand() % 2 == 0) grunt_take_cover(n);
     // pain: sound, flinch now and then
     if (game_time() > n->pain_time) {
         n->pain_time = game_time() + 0.5f + (rand() % 100) / 100.0f;
@@ -1243,6 +1344,7 @@ static void npc_die(npc_t *n, int dmgtype, const float *dir)
     n->ai = AI_DYING;
     n->enemy = -1;
     n->following = false;
+    if (n->maker) { extern void ents_maker_child_died(int maker); ents_maker_child_died(n->maker); n->maker = 0; }
     if (n->script >= 0) { n->script = -1; n->sstate = NS_IDLE; }
     snd_stop(n->ent, CHAN_VOICE, NULL);
     int act = ACT_DIESIMPLE;
@@ -1340,6 +1442,13 @@ static void attack_hit(npc_t *n)
         bool grunt = !strcmp(d->model, "hgrunt");
         bool turret = (n->flags & NF_STATIC) != 0;
         if (!strcmp(d->model, "barney")) snd_emit(n->ent, CHAN_WEAPON, "barney/ba_attack2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+        else if (grunt && (n->weapons & 8)) {   // CHGrunt::Shotgun: a spread of buckshot
+            snd_emit(n->ent, CHAN_WEAPON, "weapons/sbarrel1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+            int pel = (int)skill_get("sk_hgrunt_pellets");
+            fire_bullet_at(n, t, 5, 0.13f, pel > 0 ? pel : 5);
+            npc_hear(n->origin, 600, (n - npcs) + 1);
+            break;
+        }
         else if (grunt) { char s[32]; snprintf(s, sizeof(s), "hgrunt/gr_mgun%d.wav", 1 + rand() % 3); snd_emit(n->ent, CHAN_WEAPON, s, 1, ATTN_NORM, PITCH_NORM, NULL); }
         else if (turret) snd_emit(n->ent, CHAN_WEAPON, "turret/tu_fire1.wav", 0.6f, 0.6f, PITCH_NORM, NULL);
         else snd_emit(n->ent, CHAN_WEAPON, "weapons/pl_gun1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
@@ -1418,7 +1527,8 @@ static bool try_attack(npc_t *n, float dist, bool visible)
         if (d->snd && d->snd->atk && d->ranged != R_LEAP) npc_sound(n, CHAN_VOICE, d->snd->atk, d->snd->nat, 1, ATTN_IDLE);
         return true;
     }
-    if (d->ranged != R_NONE && dist >= d->rmin && dist <= d->rmax) {
+    float rmax = (n->weapons & 8) ? 640 : d->rmax;   // shotgun grunts close in
+    if (d->ranged != R_NONE && dist >= d->rmin && dist <= rmax) {
         int act = ACT_RANGE_ATTACK1;
         if (d->ranged == R_LEAP && !n->onground) return false;
         if (!set_activity(n, act) && !set_activity(n, ACT_MELEE_ATTACK1)) {
@@ -1621,6 +1731,66 @@ static void ai_idle(npc_t *n, float dt)
     (void)i;
 }
 
+static void lob_velocity(const float *from, const float *to, float peak_above, float g, float *vel);
+int proj_spawn_vel(int kind, const float *origin, const float *vel, int owner, int target);
+// CHGrunt: a grenade (hand thrown or from the launcher) at an enemy that is hiding or bunched up
+static bool grunt_grenade(npc_t *n, int t, bool vis, float dist)
+{
+    float now = game_time();
+    if (!(n->weapons & (2 | 4)) || now < n->next_grenade || now < n->bt[1]) return false;
+    n->bt[1] = now + 1.0f;   // decide once a second
+    float d_ls = dist3(n->origin, n->last_seen);
+    bool launcher = (n->weapons & 4) != 0;
+    if (d_ls < 220 || d_ls > (launcher ? 1200 : 800)) return false;
+    bool hiding = !vis && now - n->bt[0] < 5;
+    if (!hiding && !(vis && rand() % 4 == 0)) return false;
+    float src[3], vel[3];
+    npc_eye(n, src);
+    float to[3] = {n->last_seen[0], n->last_seen[1], n->last_seen[2] - (t == 0 ? 30 : 0)};
+    if (launcher) lob_velocity(src, to, 96, 400, vel);
+    else lob_velocity(src, to, 128, 800, vel);
+    // the arc must not hit the ceiling right away (VecCheckToss)
+    float peak[3] = {src[0] + vel[0] * 0.3f, src[1] + vel[1] * 0.3f, src[2] + vel[2] * 0.3f};
+    if (!game_visible(src, peak)) return false;
+    proj_spawn_vel(launcher ? 2 /* P_ARGRENADE */ : 1 /* P_HGRENADE */, src, vel, (n - npcs) + 1, -1);
+    if (launcher) snd_emit(n->ent, CHAN_WEAPON, "weapons/glauncher.wav", 0.8f, ATTN_NORM, PITCH_NORM, NULL);
+    if (ok_to_speak(n)) npc_say(n, launcher ? "HG_THROW" : "HG_GREN", 2, 1, ATTN_NORM);
+    if (!set_activity(n, ACT_RANGE_ATTACK2)) set_activity(n, ACT_RANGE_ATTACK1);
+    restart_seq(n, n->seq);
+    n->ai = AI_ATTACK;
+    n->attack_kind = 3;
+    n->attack_hit_done = true;
+    n->npath = 0;
+    n->next_attack = now + 1.0f;
+    n->next_grenade = now + 6 + rand() % 4;
+    (void)dist;
+    return true;
+}
+// CHGrunt: hurt in a fight -> run for a spot the enemy can't see (bits_COND_HEAVY_DAMAGE -> TAKE_COVER)
+static void grunt_take_cover(npc_t *n)
+{
+    float now = game_time();
+    if (n->enemy < 0 || now < n->cover_until + 2 || n->script >= 0) return;
+    float ep[3];
+    target_pos(n->enemy, ep);
+    ep[2] += n->enemy == 0 ? 28 : 0;
+    int best = -1;
+    float bd = 1e9f;
+    for (int k = 0; k < nav_num_nodes(); k++) {
+        const float *o = nav_node_origin(k);
+        float dn = dist3(o, n->origin);
+        if (dn > 640 || dn < 96 || fabsf(o[2] - n->origin[2]) > 96) continue;
+        if (dn >= bd) continue;
+        float eye[3] = {o[0], o[1], o[2] + 40};
+        if (game_visible(eye, ep)) continue;
+        bd = dn; best = k;
+    }
+    if (best < 0) return;
+    start_moving(n, nav_node_origin(best), true);
+    n->cover_until = now + 4;
+    if (ok_to_speak(n)) npc_say(n, "HG_COVER", 2, 1, ATTN_NORM);
+}
+
 static void ai_combat(npc_t *n, float dt)
 {
     const mdef_t *d = D(n);
@@ -1640,6 +1810,15 @@ static void ai_combat(npc_t *n, float dt)
     float dist = target_dist(n, t);
     // scientists run from danger
     if (klass(n) == C_ALLY && (n->flags & NF_SCI)) { n->ai = AI_FLEE; n->fear_time = now; return; }
+    if (n->weapons) {   // human grunts
+        if (vis) n->bt[0] = now;
+        if (now < n->cover_until && n->npath > 0) {   // running for cover
+            if (!set_activity(n, ACT_RUN)) set_activity(n, ACT_WALK);
+            if (follow_route(n, n->speed, dt, 16)) { n->npath = 0; set_activity(n, ACT_IDLE); }
+            return;
+        }
+        if (grunt_grenade(n, t, vis, dist)) return;
+    }
     // face the enemy while attacking / standing
     if (try_attack(n, dist, vis)) {
         n->yaw = yaw_to(n->origin, tp);
@@ -1647,7 +1826,7 @@ static void ai_combat(npc_t *n, float dt)
     }
     if (n->flags & NF_STATIC) { face_yaw(n, yaw_to(n->origin, tp), 180, dt); return; }
     // chase (or keep distance for ranged attackers that can see us)
-    bool ranged_ok = d && d->ranged != R_NONE && d->ranged != R_LEAP && vis && dist <= d->rmax && dist >= d->rmin;
+    bool ranged_ok = d && d->ranged != R_NONE && d->ranged != R_LEAP && vis && dist <= ((n->weapons & 8) ? 640 : d->rmax) && dist >= d->rmin;
     if (ranged_ok) {
         face_yaw(n, yaw_to(n->origin, tp), 240, dt);
         if (!set_activity(n, ACT_COMBAT_IDLE) && !set_activity(n, ACT_IDLE_ANGRY)) set_activity(n, ACT_IDLE);
@@ -1737,6 +1916,488 @@ static void barnacle_think(npc_t *n, float dt)
     n->ctl0 = -(n->alt - 100);                 // SetBoneController(0, -(m_flAltitude + m_flTongueAdj)), adj = -100
 }
 
+// ---------------------------------------------------------------- bosses
+// nihilanth.cpp, bigmomma.cpp, apache.cpp, osprey.cpp: the PC behaviour in a simpler form
+int proj_spawn_vel(int kind, const float *origin, const float *vel, int owner, int target);
+void game_spawn_gibs(const float *o, int count, bool alien, float speed);
+static float key_float(int ent, const char *key, float def) { const char *v = ent_value(&entities[ent], key); return v ? atof(v) : def; }
+static int find_named(const char *name) { return name && name[0] ? ents_find_targetname(name, 1) : -1; }
+static bool play_named(npc_t *n, const char *name, bool restart)
+{
+    int s = studio_find_seq(n->model, name);
+    if (s < 0) return false;
+    if (restart || s != n->seq) restart_seq(n, s);
+    return true;
+}
+// a lob that lands on `to` (VecCheckToss with a fixed peak above both ends)
+static void lob_velocity(const float *from, const float *to, float peak_above, float g, float *vel)
+{
+    float peak = fmaxf(from[2], to[2]) + peak_above;
+    float up = sqrtf(2 * g * fmaxf(peak - from[2], 1)), t1 = up / g, t2 = sqrtf(2 * fmaxf(peak - to[2], 1) / g);
+    float T = t1 + t2;
+    vel[0] = (to[0] - from[0]) / T; vel[1] = (to[1] - from[1]) / T; vel[2] = up;
+}
+static void boss_explode(npc_t *n, int count)
+{
+    for (int k = 0; k < count; k++) {
+        float o[3] = {n->origin[0] + (rand() % 200 - 100), n->origin[1] + (rand() % 200 - 100), n->origin[2] + (rand() % 100)};
+        game_effect_explosion(o, 180);
+    }
+    snd_emit(-1, CHAN_AUTO, "weapons/mortarhit.wav", 1, 0.3f, PITCH_NORM, n->origin);
+    float c[3];
+    npc_center(n, c);
+    game_spawn_gibs(c, 10, false, 400);
+}
+
+// ---- Nihilanth: floats in his column (n_min..n_max) at the player's height, throws zap balls and,
+// every third volley, a teleport ball that sends the player to the next arena (n_teleport1..4).
+// The recharger crystals (n_recharger1..3) restore him; with them gone his health runs out, the
+// head opens, and only shots from above (into the brain) can finish him.
+static int nih_index = -1;
+void npc_teleball_hit(void)
+{
+    if (nih_index < 0 || nih_index >= num_npcs) return;
+    npc_t *n = &npcs[nih_index];
+    extern bool ents_teleport_player(const char *name);
+    for (; n->bi[1] <= 4; n->bi[1]++) {
+        char tn[24], ln[24];
+        snprintf(tn, sizeof(tn), "n_teleport%d", n->bi[1]);
+        snprintf(ln, sizeof(ln), "n_leaving%d", n->bi[1]);
+        if (ents_teleport_player(tn)) { ents_fire_targets(ln); n->bi[1]++; return; }
+    }
+}
+static int nih_rechargers(int *which)
+{
+    int c = 0;
+    for (int k = 1; k <= 3; k++) {
+        char nm[16];
+        snprintf(nm, sizeof(nm), "n_recharger%d", k);
+        int e = find_named(nm);
+        if (e > 0 && !entities[e].removed) { c++; if (which) *which = k; }
+    }
+    return c;
+}
+static void nihilanth_think(npc_t *n, float dt)
+{
+    float now = game_time();
+    nih_index = n - npcs;
+    bool open = n->bi[2] >= 2;
+    if (n->bstate == 0) {   // asleep until the map wakes him (trigger_auto "nihilanth")
+        play_named(n, "float", false);
+        n->bt[3] += dt;
+        n->origin[2] += sinf(n->bt[3]) * 6 * dt;
+        return;
+    }
+    if (n->bstate == 3) {   // dying: the death animation, then the end (n_dead) and the last teleport
+        if (now > n->bt[0] && n->bi[3] == 0) {
+            n->bi[3] = 1;
+            boss_explode(n, 4);
+            ents_fire_targets("n_dead");
+            extern bool ents_teleport_player(const char *name);
+            ents_teleport_player("n_ending");
+            entities[n->ent].removed = true;
+        }
+        return;
+    }
+    if (!n->bi[0]) {
+        int mn = find_named("n_min"), mx = find_named("n_max");
+        n->bt[1] = mn > 0 ? entities[mn].origin[2] : n->origin[2] - 200;
+        n->bt[2] = mx > 0 ? entities[mx].origin[2] : n->origin[2] + 2000;
+        n->bi[0] = 1; n->bi[1] = 1;
+        n->next_attack = now + 4;
+    }
+    // follow the player's height (his eyes level with the player), turn to face them
+    float want = fminf(fmaxf(player_pos[2] - 220, n->bt[1]), n->bt[2] - 420);
+    float dz = want - n->origin[2];
+    n->origin[2] += fmaxf(fminf(dz, 80 * dt), -80 * dt) + sinf(now * 1.3f) * 10 * dt;
+    face_yaw(n, yaw_to(n->origin, player_pos), 25, dt);
+    // regain strength from a crystal (n_draw beams) when hurt
+    int which = 0;
+    int rech = nih_rechargers(&which);
+    if (n->health < n->maxhealth * 0.5f && rech > 0 && now > n->bt[0]) {
+        char dn[16];
+        snprintf(dn, sizeof(dn), "n_draw%d", which);
+        ents_fire_targets(dn);
+        play_named(n, "recharge", true);
+        snd_emit(n->ent, CHAN_VOICE, "x/x_recharge1.wav", 1, 0.2f, PITCH_NORM, NULL);
+        n->health = fminf(n->maxhealth, n->health + n->maxhealth * 0.5f);
+        n->bt[0] = now + 15;
+    }
+    if (now >= n->next_attack && player_alive()) {
+        play_named(n, open ? "attack1_open" : "attack1", true);
+        float src[3] = {n->origin[0], n->origin[1], n->origin[2] + 300};
+        float dir[3] = {player_pos[0] - src[0], player_pos[1] - src[1], player_pos[2] - src[2]};
+        float l = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        for (int k = 0; k < 3; k++) dir[k] /= l > 1 ? l : 1;
+        bool tele = (++n->bi[3] % 3 == 0) && n->bi[1] <= 4;
+        if (tele) {
+            proj_spawn(14 /* P_TELEBALL */, src, dir, (n - npcs) + 1, 0);
+            snd_emit(n->ent, CHAN_WEAPON, "x/x_teleattack1.wav", 1, 0.2f, PITCH_NORM, NULL);
+        } else {
+            for (int b = 0; b < 2 + (open ? 1 : 0); b++) {
+                float s2[3] = {src[0] + (b - 1) * 120.0f * cosf((n->yaw + 90) * (float)M_PI / 180), src[1] + (b - 1) * 120.0f * sinf((n->yaw + 90) * (float)M_PI / 180), src[2]};
+                proj_spawn(15 /* P_NIHZAP */, s2, dir, (n - npcs) + 1, 0);
+            }
+            snd_emit(n->ent, CHAN_WEAPON, "x/x_ballattack1.wav", 1, 0.2f, PITCH_NORM, NULL);
+        }
+        n->next_attack = now + 3.0f + (rand() % 100) / 50.0f;
+    }
+    if (n->seq_done) play_named(n, open ? "float_open" : "float", false);
+}
+static bool nihilanth_damage(npc_t *n, float dmg, int attacker)
+{
+    if (n->bstate == 0) n->bstate = 1;
+    if (n->bstate == 3) return true;
+    float now = game_time();
+    if (n->bi[2] < 2) {
+        if (n->health - dmg < 1) {
+            n->health = 1;
+            if (nih_rechargers(NULL) == 0) {   // nothing left to heal him: the head opens
+                n->bi[2] = 2;
+                play_named(n, "float_open", true);
+                snd_emit(n->ent, CHAN_VOICE, "x/x_pain2.wav", 1, 0.2f, PITCH_NORM, NULL);
+            }
+        } else n->health -= dmg;
+    } else {
+        // the PC only counts hits on the brain: from up level with or above his open skull
+        if (attacker == 0 && player_pos[2] < n->origin[2] + 260) return true;
+        n->health -= dmg;
+        if (n->health <= 0) {
+            n->bstate = 3;
+            n->solid = false;
+            play_named(n, "die1", true);
+            snd_emit(n->ent, CHAN_VOICE, "x/x_die1.wav", 1, 0.1f, PITCH_NORM, NULL);
+            n->bt[0] = now + studio_seq_duration(n->model, n->seq) + 0.5f;
+            n->bi[3] = 0;
+            return true;
+        }
+    }
+    if (now > n->pain_time) { n->pain_time = now + 2; snd_emit(n->ent, CHAN_VOICE, rand() & 1 ? "x/x_pain1.wav" : "x/x_pain2.wav", 1, 0.2f, PITCH_NORM, NULL); }
+    return true;
+}
+
+// ---- Big Momma (the Gonarch): walks a chain of info_bigmomma nodes from "netname". At a node
+// she takes its health, fires its reachtarget, plays its reachsequence and waits reachdelay;
+// with no health at a node she moves straight on, otherwise she stays and fights until hurt
+// enough. Mortar lobs, baby headcrabs and claws; she can only die once the path is finished.
+static void bm_node_start(npc_t *n, const char *name)
+{
+    int t = find_named(name);
+    if (t <= 0 || strcasecmp(entities[t].classname, "info_bigmomma")) { n->bstate = 3; n->npath = 0; return; }
+    n->bi[0] = t;
+    n->bstate = 1;
+    bool run = ((int)key_float(t, "spawnflags", 0) & 1) || (entities[t].spawnflags & 1);
+    n->running = run;
+    n->speed = move_speed(n, run);
+    start_moving(n, entities[t].origin, run);
+    set_activity(n, run ? ACT_RUN : ACT_WALK);
+    const char *pre = ent_value(&entities[t], "presequence");
+    n->bt[0] = 0;
+    if (pre && play_named(n, pre, true)) n->bt[0] = game_time() + studio_seq_duration(n->model, n->seq);
+    n->stuck_count = 0;
+}
+static void bm_node_reach(npc_t *n)
+{
+    int t = n->bi[0];
+    float now = game_time();
+    float h = key_float(t, "health", 0);
+    if (h > 0) n->health = n->maxhealth = h * fmaxf(skill_get("sk_bigmomma_health_factor"), 1);
+    const char *rt = ent_value(&entities[t], "reachtarget");
+    if (rt) ents_fire_targets(rt);
+    const char *rs = ent_value(&entities[t], "reachsequence");
+    float wait = key_float(t, "reachdelay", 0);
+    if (rs && play_named(n, rs, true)) wait += studio_seq_duration(n->model, n->seq);
+    else set_seq(n, n->idle_seq);
+    n->bt[0] = now + wait;
+    n->bstate = 2;
+    n->npath = 0;
+    n->bi[1] = h == 0 ? 1 : 0;   // advance straight on when the node has no health
+}
+static void bm_fight(npc_t *n, float dt)
+{
+    float now = game_time();
+    if (!player_alive()) return;
+    bool vis = can_see(n, 0, false);
+    face_yaw(n, yaw_to(n->origin, player_pos), 90, dt);
+    if (n->attack_hit_time > 0 && now >= n->attack_hit_time) {
+        n->attack_hit_time = 0;
+        if (dist3(n->origin, player_pos) < 190) damage_target(n, 0, skill_get("sk_bigmomma_dmg_slash"), DMG_SLASH);
+    }
+    if (now < n->next_attack || !vis) return;
+    float d = dist3(n->origin, player_pos);
+    if (d < 160) {
+        play_named(n, "claw", true);
+        n->attack_hit_time = now + 0.4f;
+        n->next_attack = now + 1.5f;
+        snd_emit(n->ent, CHAN_WEAPON, "gonarch/gon_attack1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+    } else if (n->bi[2] < 20 && now >= n->bt[2] && d < 800) {
+        // CBigMomma::LayHeadcrab
+        play_named(n, "spawn", true);
+        float a = n->yaw * (float)M_PI / 180;
+        float o[3] = {n->origin[0] + cosf(a) * 64, n->origin[1] + sinf(a) * 64, n->origin[2] + 16};
+        int c = npc_spawn_monster("monster_babycrab", o, n->yaw, "", 0);
+        if (c >= 0) n->bi[2]++;
+        snd_emit(n->ent, CHAN_WEAPON, "gonarch/gon_birth1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+        n->bt[2] = now + 8 + rand() % 5;
+        n->next_attack = now + 2;
+    } else if (now >= n->bt[1] && d < 1600) {
+        // CBigMomma::LaunchMortar: an acid lob at the player
+        play_named(n, "mortar", true);
+        float src[3] = {n->origin[0], n->origin[1], n->origin[2] + 150}, vel[3];
+        float to[3] = {player_pos[0], player_pos[1], player_pos[2] - 36};
+        lob_velocity(src, to, 200, 800, vel);
+        proj_spawn_vel(13 /* P_MORTAR */, src, vel, (n - npcs) + 1, -1);
+        snd_emit(n->ent, CHAN_WEAPON, "gonarch/gon_sack1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+        n->bt[1] = now + 4 + rand() % 3;
+        n->next_attack = now + 1.5f;
+    }
+}
+static void bigmomma_think(npc_t *n, float dt)
+{
+    float now = game_time();
+    if (n->bstate == 0) {
+        const char *nn = ent_value(&entities[n->ent], "netname");
+        n->bt[1] = now + 3; n->bt[2] = now + 6;
+        bm_node_start(n, nn);
+        return;
+    }
+    if (n->bstate == 1) {   // walking to the node
+        if (now < n->bt[0]) return;   // its presequence first
+        if (n->seq_done || (n->seq != studio_find_activity(n->model, n->running ? ACT_RUN : ACT_WALK))) set_activity(n, n->running ? ACT_RUN : ACT_WALK);
+        float radius = key_float(n->bi[0], "radius", 64);
+        bool arrived = follow_route(n, n->speed, dt, radius) || dist2d(n->origin, entities[n->bi[0]].origin) < radius;
+        if (!arrived && n->stuck_time > 1.5f) {
+            n->stuck_time = 0;
+            if (++n->stuck_count >= 3) { memcpy(n->origin, entities[n->bi[0]].origin, 12); arrived = true; }
+            else route_to(n, entities[n->bi[0]].origin);
+        }
+        if (arrived) bm_node_reach(n);
+        gravity(n, dt);
+        npc_relight(n, now);
+        return;
+    }
+    if (n->bstate == 2) {   // at a node
+        if ((n->bi[1] & 1) && now >= n->bt[0]) {
+            const char *next = ent_value(&entities[n->bi[0]], "target");
+            bm_node_start(n, next);
+            return;
+        }
+        if (now >= n->bt[0]) { bm_fight(n, dt); if (n->seq_done) set_seq(n, n->idle_seq); }
+        gravity(n, dt);
+        return;
+    }
+    // path finished: fight it out
+    bm_fight(n, dt);
+    if (n->seq_done) set_seq(n, n->idle_seq);
+    gravity(n, dt);
+}
+static void bigmomma_damage(npc_t *n, float *dmg, int dmgtype)
+{
+    if (dmgtype & DMG_ACID) { *dmg = 0; return; }   // her own mortar
+    if (n->bstate != 3 && n->health <= *dmg) {
+        // not before the end of her path: reaching zero sends her to the next node instead
+        n->health = *dmg + 1;
+        n->bi[1] |= 1;
+        if (n->bstate == 2) n->bt[0] = fminf(n->bt[0], game_time());
+    }
+}
+
+// ---- Apache: waits for a trigger (spawnflags 4/64), then flies its path_corner chain; when it
+// sees the player it closes in, strafes with the chaingun and fires rockets. Armoured against
+// bullets; going down it spins, falls and blows up.
+static void heli_move(npc_t *n, const float *goal, float maxspeed, float accel, float dt)
+{
+    float d[3] = {goal[0] - n->origin[0], goal[1] - n->origin[1], goal[2] - n->origin[2]};
+    float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    float want = fminf(maxspeed, l * 1.5f);
+    for (int k = 0; k < 3; k++) {
+        float tv = l > 1 ? d[k] / l * want : 0;
+        float dv = tv - n->bv[k], mx = accel * dt;
+        n->bv[k] += fmaxf(fminf(dv, mx), -mx);
+    }
+    float to[3] = {n->origin[0] + n->bv[0] * dt, n->origin[1] + n->bv[1] * dt, n->origin[2] + n->bv[2] * dt};
+    static const float smn[3] = {-48, -48, -48}, smx[3] = {48, 48, 24};
+    gtrace_t tr;
+    game_trace(n->origin, to, smn, smx, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, n - npcs, &tr);
+    if (tr.startsolid) memcpy(n->origin, to, 12);   // squeezed: fly through rather than stick
+    else {
+        memcpy(n->origin, tr.endpos, 12);
+        if (tr.fraction < 1) { float vn = n->bv[0] * tr.normal[0] + n->bv[1] * tr.normal[1] + n->bv[2] * tr.normal[2]; for (int k = 0; k < 3; k++) n->bv[k] -= vn * tr.normal[k]; }
+    }
+    memcpy(entities[n->ent].origin, n->origin, 12);
+}
+static void heli_next_corner(npc_t *n)
+{
+    int c = n->bi[0];
+    const char *t = c > 0 ? entities[c].target : entities[n->ent].target;
+    int nx = find_named(t);
+    n->bi[0] = nx > 0 ? nx : 0;
+}
+static void apache_think(npc_t *n, float dt)
+{
+    float now = game_time();
+    entity_t *e = &entities[n->ent];
+    if (n->bstate == 0) {
+        if (e->spawnflags & (4 | 64)) { play_named(n, "idle", false); return; }   // SF_WAITFORTRIGGER
+        n->bstate = 1;
+    }
+    if (n->bstate == 2) {   // shot down: spin and fall, explode on impact
+        n->bv[2] -= 400 * dt;
+        n->yaw += 300 * dt;
+        float to[3] = {n->origin[0] + n->bv[0] * dt, n->origin[1] + n->bv[1] * dt, n->origin[2] + n->bv[2] * dt};
+        gtrace_t tr;
+        static const float smn[3] = {-32, -32, -32}, smx[3] = {32, 32, 16};
+        game_trace(n->origin, to, smn, smx, TR_IGNORE_MONSTERS, n - npcs, &tr);
+        memcpy(n->origin, tr.endpos, 12);
+        if (tr.fraction < 1 || tr.startsolid || now > n->bt[0]) {
+            boss_explode(n, 3);
+            game_radius_damage(n->origin, 300, 400, n - npcs, DMG_BLAST);
+            snd_stop(n->ent, CHAN_STATIC, NULL);
+            e->removed = true;
+            n->solid = false;
+        }
+        return;
+    }
+    if (!n->bi[3]) { n->bi[3] = 1; heli_next_corner(n); snd_emit(n->ent, CHAN_STATIC, "apache/ap_rotor2.wav", 1, 0.3f, PITCH_NORM, NULL); }
+    play_named(n, "idle", false);
+    bool vis = player_alive() && dist3(n->origin, player_pos) < 3000 && can_see(n, 0, false);
+    float goal[3];
+    if (vis) {
+        // circle the player at a distance, a little above (CApache::HuntThink m_posDesired)
+        n->bt[1] += dt * 0.4f;
+        float r = 520;
+        goal[0] = player_pos[0] + cosf(n->bt[1]) * r; goal[1] = player_pos[1] + sinf(n->bt[1]) * r; goal[2] = player_pos[2] + 260;
+        memcpy(n->last_seen, player_pos, 12);
+    } else if (n->bi[0] > 0) {
+        memcpy(goal, entities[n->bi[0]].origin, 12);
+        if (dist3(goal, n->origin) < 160) heli_next_corner(n);
+    } else memcpy(goal, n->origin, 12);
+    heli_move(n, goal, vis ? 300 : 400, 250, dt);
+    // face the player when fighting, else the way we fly
+    float sp = sqrtf(n->bv[0] * n->bv[0] + n->bv[1] * n->bv[1]);
+    float wy = vis ? yaw_to(n->origin, player_pos) : (sp > 40 ? atan2f(n->bv[1], n->bv[0]) * 180 / (float)M_PI : n->yaw);
+    face_yaw(n, wy, 80, dt);
+    if (!vis) return;
+    float aim = fabsf(angle_diff(yaw_to(n->origin, player_pos), n->yaw));
+    // chaingun bursts
+    if (aim < 25 && now >= n->next_attack) {
+        if (n->bi[2] <= 0) { n->bi[2] = 8 + rand() % 8; }
+        if (--n->bi[2] <= 0) n->next_attack = now + 1.5f + (rand() % 100) / 100.0f;
+        else n->next_attack = now + 0.1f;
+        snd_emit(n->ent, CHAN_WEAPON, "turret/tu_fire1.wav", 0.8f, 0.3f, PITCH_NORM, NULL);
+        fire_bullet_at(n, 0, skill_get("sk_12mm_bullet") > 0 ? skill_get("sk_12mm_bullet") : 8, 0.08f, 1);
+    }
+    // rockets now and then
+    if (aim < 15 && now >= n->bt[2]) {
+        n->bt[2] = now + 4 + rand() % 3;
+        float a = (n->yaw + (n->bi[1] ^= 1 ? 90 : -90)) * (float)M_PI / 180;
+        float src[3] = {n->origin[0] + cosf(a) * 64, n->origin[1] + sinf(a) * 64, n->origin[2] - 32};
+        float dir[3] = {player_pos[0] - src[0], player_pos[1] - src[1], player_pos[2] - src[2]};
+        float l = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        for (int k = 0; k < 3; k++) dir[k] /= l > 1 ? l : 1;
+        proj_spawn(3 /* P_ROCKET */, src, dir, (n - npcs) + 1, -1);
+        snd_emit(n->ent, CHAN_ITEM, "weapons/rocketfire1.wav", 1, 0.5f, PITCH_NORM, NULL);
+    }
+}
+static bool heli_damage(npc_t *n, float dmg, int dmgtype)
+{
+    if (n->bstate == 2) return true;
+    if (n->bstate == 0) n->bstate = 1;
+    if (dmgtype & DMG_BLAST) dmg *= 2;               // CApache::TakeDamage
+    else if (!(dmgtype & (DMG_ENERGYBEAM | DMG_SHOCK))) dmg *= 0.15f;   // small arms barely scratch it
+    n->health -= dmg;
+    if (n->health <= 0) {
+        n->bstate = 2;
+        n->bt[0] = game_time() + 5;
+        n->bv[2] = fminf(n->bv[2], 0);
+        ai_trigger(n, 4);   // AITRIGGER_DEATH
+    }
+    return true;
+}
+
+// ---- Osprey: flies its path_corner chain; at a corner with speed 0 it hovers and drops four
+// grunts (CBaseMonster *MakeGrunt on ropes), then flies on and leaves at the end of the path.
+static void osprey_think(npc_t *n, float dt)
+{
+    float now = game_time();
+    entity_t *e = &entities[n->ent];
+    if (n->bstate == 0) {
+        if (e->spawnflags & 64) { play_named(n, "rotor", false); return; }
+        n->bstate = 1;
+    }
+    play_named(n, "rotor", false);
+    if (n->bstate == 4) {   // shot down
+        n->bv[2] -= 400 * dt;
+        for (int k = 0; k < 3; k++) n->origin[k] += n->bv[k] * dt;
+        gtrace_t tr;
+        float dn[3] = {n->origin[0], n->origin[1], n->origin[2] - 32};
+        game_trace(n->origin, dn, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, n - npcs, &tr);
+        if (tr.fraction < 1 || now > n->bt[0]) { boss_explode(n, 4); snd_stop(n->ent, CHAN_STATIC, NULL); e->removed = true; n->solid = false; }
+        return;
+    }
+    if (!n->bi[3]) { n->bi[3] = 1; heli_next_corner(n); snd_emit(n->ent, CHAN_STATIC, "apache/ap_rotor4.wav", 1, 0.3f, 90, NULL); }
+    if (n->bstate == 2) {   // hovering over the drop point
+        if (n->bi[2] == 0 && now >= n->bt[0] - 3) {
+            n->bi[2] = 1;
+            static const float ofs[4][2] = {{-40, -40}, {40, -40}, {-40, 40}, {40, 40}};
+            for (int k = 0; k < 4; k++) {
+                float o[3] = {n->origin[0] + ofs[k][0], n->origin[1] + ofs[k][1], n->origin[2] - 80};
+                float dn[3] = {o[0], o[1], o[2] - 2048};
+                gtrace_t tr;
+                static const float gmn[3] = {-16, -16, 0}, gmx[3] = {16, 16, 72};
+                game_trace(o, dn, gmn, gmx, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+                if (!tr.startsolid) npc_spawn_monster("monster_human_grunt", tr.endpos, n->yaw, "", 0);
+            }
+        }
+        if (now >= n->bt[0]) { n->bstate = 1; heli_next_corner(n); }
+        for (int k = 0; k < 3; k++) n->bv[k] *= 0.9f;
+        return;
+    }
+    if (n->bi[0] <= 0) { snd_stop(n->ent, CHAN_STATIC, NULL); e->removed = true; n->solid = false; return; }   // flew off
+    entity_t *c = &entities[n->bi[0]];
+    float spd = key_float(n->bi[0], "speed", 0);
+    heli_move(n, c->origin, spd > 0 ? spd : 300, 200, dt);
+    float sp = sqrtf(n->bv[0] * n->bv[0] + n->bv[1] * n->bv[1]);
+    if (sp > 40) face_yaw(n, atan2f(n->bv[1], n->bv[0]) * 180 / (float)M_PI, 45, dt);
+    if (dist3(c->origin, n->origin) < 96) {
+        if (spd == 0 && n->bi[2] == 0) { n->bstate = 2; n->bt[0] = now + 6; }
+        else heli_next_corner(n);
+    }
+}
+static bool osprey_damage(npc_t *n, float dmg, int dmgtype)
+{
+    if (n->bstate == 4) return true;
+    if (!(dmgtype & (DMG_BLAST | DMG_ENERGYBEAM))) dmg *= 0.1f;
+    n->health -= dmg;
+    if (n->health <= 0) { n->bstate = 4; n->bt[0] = game_time() + 5; }
+    return true;
+}
+
+// a map trigger aimed at a boss: wakes it (CNihilanth/CApache/COsprey use functions)
+bool npc_used(int ent)
+{
+    int i = npc_for_entity(ent);
+    if (i < 0) return false;
+    npc_t *n = &npcs[i];
+    if (!n->bkind) return false;
+    if (n->bkind != 2 && n->bstate == 0) n->bstate = 1;
+    return true;
+}
+static bool boss_think(npc_t *n, float dt)
+{
+#ifdef BOSSDEBUG
+    { static float nd[MAX_NPCS]; int i = n - npcs; if (game_time() > nd[i]) { nd[i] = game_time() + 1;
+      debugf("boss %d state %d hp %.0f pos %.0f %.0f %.0f seq %d bi %d %d %d %d\n", n->bkind, n->bstate, n->health, n->origin[0], n->origin[1], n->origin[2], n->seq, n->bi[0], n->bi[1], n->bi[2], n->bi[3]); } }
+#endif
+    switch (n->bkind) {
+    case 1: nihilanth_think(n, dt); return true;
+    case 2: if (n->ai == AI_DYING || n->ai == AI_DEAD) return false; bigmomma_think(n, dt); return true;
+    case 3: apache_think(n, dt); return true;
+    case 4: osprey_think(n, dt); return true;
+    }
+    return false;
+}
+
 // tentacles strike at things that make noise nearby (CTentacle, simplified)
 static void tentacle_think(npc_t *n, float dt)
 {
@@ -1784,10 +2445,13 @@ void npcs_think(float dt)
     player_get_eye(player_eye);
     // the player's PVS, for "can the player see me" checks (FIND_CLIENT_IN_PVS)
     int pl = bsp_leaf_for_point(player_eye);
-    const uint8_t *pvs = pl > 0 ? bsp_leaf_pvs(pl) : NULL;
-    int bytes = (world.numleafs + 7) / 8;
-    pvs_ok = pvs && bytes <= (int)sizeof(pvs_buf);
-    if (pvs_ok) memcpy(pvs_buf, pvs, bytes);
+    if (pl != pvs_leaf) {   // decompress only when the player changes leaf (reset at map start)
+        pvs_leaf = pl;
+        const uint8_t *pvs = pl > 0 ? bsp_leaf_pvs(pl) : NULL;
+        int bytes = (world.numleafs + 7) / 8;
+        pvs_ok = pvs && bytes <= (int)sizeof(pvs_buf);
+        if (pvs_ok) memcpy(pvs_buf, pvs, bytes);
+    }
     scripts_retry();
 #ifdef NPCDEBUG
     { static float nd; if (now > nd) { nd = now + 1; for (int i = 0; i < num_npcs; i++) if (npcs[i].script >= 0 || npcs[i].following || npcs[i].ai)
@@ -1871,6 +2535,7 @@ void npcs_think(float dt)
             continue;
         }
         if (n->flags & (NF_NOAI | NF_DEAD)) continue;
+        if (n->bkind && boss_think(n, dt)) continue;
 
         // AI triggers that need the player in sight (SEEPLAYER_*), checked a few times a second
         if ((n->trig_cond == 1 || n->trig_cond == 10 || n->trig_cond == 11) && now >= n->trig_check) {
@@ -1931,6 +2596,7 @@ void npcs_think(float dt)
                         if (n->following && klass(n) == C_ALLY && !(n->flags & NF_SCI)) {}
                         if (d && d->snd && d->snd->alert) npc_sound(n, CHAN_VOICE, d->snd->alert, d->snd->na, 1, ATTN_NORM);
                         else if (d && !strcmp(d->model, "barney") && ok_to_speak(n)) npc_say(n, "BA_ATTACK", 2, 1, ATTN_NORM);
+                        else if (n->weapons && ok_to_speak(n)) npc_say(n, e == 0 ? "HG_ALERT" : "HG_MONST", 2, 1, ATTN_NORM);
                         if (n->flags & NF_SCI) { n->ai = AI_FLEE; n->fear_time = now; n->said &= ~32; }
                     }
                 } else if (e >= 0 && e != n->enemy) {

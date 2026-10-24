@@ -124,6 +124,67 @@ static uint8_t *compact_anims(uint8_t *buf, int *size)
     return nb ? nb : buf;
 }
 
+// triangle lists -> tiny3d strips (as the world's chunks, render.c build_strips): one command per
+// strip instead of one per triangle keeps the RSP command queue from filling up behind characters.
+// Two passes (count, then fill) so the only allocations are the final, exact-size ones.
+static void strip_pass(studio_t *m, int16_t *idx, uint32_t *st, uint16_t *cf, uint16_t *cc, int *out_nidx, int *out_nst)
+{
+    int nidx = 0, nst = 0;
+    for (int c = 0; c < m->numchunks; c++) {
+        schunk_t *ch = &m->chunks[c];
+        const uint8_t *tri = m->tris + ch->firsttri * 3;
+        int nv = 0;
+        for (int i = 0; i < ch->numtris * 3; i++) if (tri[i] + 1 > nv) nv = tri[i] + 1;
+        int limit = ((T3D_VERTEX_CACHE_SIZE - nv) * 36) / 2 - 8;
+        if (limit > 240) limit = 240;
+        if (limit < 6) limit = 6;
+        if (cf) { cf[c] = nst; cc[c] = 0; }
+        int start = -1, a = -1, b = -1;
+#define PUT(v) do { if (idx) idx[nidx] = (v); nidx++; } while (0)
+        for (int i = 0; i < ch->numtris; i++) {
+            int t0 = tri[i * 3], t1 = tri[i * 3 + 1], t2 = tri[i * 3 + 2];
+            int ext = -1;
+            if (start >= 0 && nidx - start + 1 <= limit) {
+                int v[3] = {t0, t1, t2};
+                for (int k = 0; k < 3; k++) {
+                    int x = v[k], y = v[(k + 1) % 3], z = v[(k + 2) % 3];
+                    if ((y == a && z == b) || (y == b && z == a)) { ext = x; break; }
+                }
+            }
+            if (ext >= 0) { PUT(ext); a = b; b = ext; continue; }
+            if (start < 0 || nidx - start + 3 > limit) {
+                if (start >= 0) { if (st) st[nst - 1] |= (nidx - start); while (nidx & 3) PUT(0); }
+                start = nidx;
+                if (st) st[nst] = (uint32_t)nidx << 8;
+                nst++;
+                if (cc) cc[c]++;
+                PUT(t0); PUT(t1); PUT(t2);
+            } else {
+                PUT((int16_t)(t0 | 0x8000)); PUT(t1); PUT(t2);
+            }
+            a = t1; b = t2;
+        }
+        if (start >= 0) { if (st) st[nst - 1] |= (nidx - start); while (nidx & 3) PUT(0); }
+#undef PUT
+    }
+    *out_nidx = nidx; *out_nst = nst;
+}
+static void build_model_strips(studio_t *m)
+{
+    m->strip_idx = NULL; m->strip_ofs = NULL; m->cs_first = m->cs_count = NULL;
+    int nidx, nst;
+    strip_pass(m, NULL, NULL, NULL, NULL, &nidx, &nst);
+    int16_t *idx = memalign(16, nidx * sizeof(int16_t) + 16);
+    uint32_t *st = malloc(nst * sizeof(uint32_t) + 4);
+    uint16_t *cf = malloc(m->numchunks * sizeof(uint16_t) * 2 + 4);
+    if (!idx || !st || !cf) { free(idx); free(st); free(cf); return; }
+    uint16_t *cc = cf + m->numchunks;
+    strip_pass(m, idx, st, cf, cc, &nidx, &nst);
+    for (int i = 0; i < nst; i++) t3d_indexbuffer_convert(&idx[st[i] >> 8], st[i] & 0xff);
+    data_cache_hit_writeback(idx, nidx * sizeof(int16_t));
+    m->strip_idx = idx; m->strip_ofs = st; m->cs_first = cf; m->cs_count = cc;
+}
+
 studio_t *studio_get(const char *name)
 {
     for (int i = 0; i < num_cached; i++)
@@ -206,6 +267,7 @@ studio_t *studio_get(const char *name)
     }
     data_cache_hit_writeback(buf, size);
     record_textures(m);
+    build_model_strips(m);
     cache[num_cached++] = m;
     debugf("studio: %s %d bones %d seqs %d chunks (%d KB) at %p tex %p\n", name, m->numbones, m->numseqs, m->numchunks, size / 1024, buf, m->texdata);
     return m;
@@ -220,6 +282,7 @@ void studio_free(studio_t *m)
         rspq_wait();
         for (int t = 0; t < m->numtex; t++) if (m->texblocks[t]) rspq_block_free(m->texblocks[t]);
         free(m->texblocks);
+        free(m->strip_idx); free(m->strip_ofs); free(m->cs_first);
         free(m->base);
         free(m);
         cache[i] = cache[--num_cached];
@@ -234,6 +297,7 @@ void studio_free_all(void)
         studio_t *m = cache[i];
         for (int t = 0; t < m->numtex; t++) if (m->texblocks[t]) rspq_block_free(m->texblocks[t]);
         free(m->texblocks);
+        free(m->strip_idx); free(m->strip_ofs); free(m->cs_first);
         free(m->base);
         free(m);
     }
@@ -331,6 +395,9 @@ void studio_draw(const studio_draw_t *d)
     float bonemat[128][3][4];
     float inv = 1.0f / m->posscale;
     T3DMat4FP *out = &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used];
+#ifdef PROFX
+    uint32_t pb0 = TICKS_READ();
+#endif
     for (int b = 0; b < m->numbones && b < 128; b++) {
         float qa[4], qb[4], q[4], p[3], dot = 0;
         const float qs = 1.0f / 32767.0f;
@@ -392,6 +459,9 @@ void studio_draw(const studio_draw_t *d)
         t3d_mat4_to_fixed_3x4(&out[b], &tm);
     }
     pool_used += m->numbones;
+#ifdef PROFX
+    uint32_t pb1 = TICKS_READ();
+#endif
     for (int a = 0; a < d->att_n && a < m->numatt; a++) {
         satt_t *at = &m->att[a];
         if (at->bone < 0 || at->bone >= m->numbones || at->bone >= 128) continue;
@@ -429,13 +499,24 @@ void studio_draw(const studio_draw_t *d)
                 t3d_matrix_set(&out[ld->bone], true);
                 t3d_vert_load(&m->verts[ld->vofs >> 1], ld->cofs, ld->cnt);
             }
-            const uint8_t *tri = m->tris + ch->firsttri * 3;
-            for (int i = 0; i < ch->numtris; i++, tri += 3) t3d_tri_draw(tri[0], tri[1], tri[2]);
+            if (m->strip_idx) {
+                for (int k = 0; k < m->cs_count[c]; k++) {
+                    uint32_t so = m->strip_ofs[m->cs_first[c] + k];
+                    t3d_tri_draw_strip(&m->strip_idx[so >> 8], so & 0xff);
+                }
+            } else {
+                const uint8_t *tri = m->tris + ch->firsttri * 3;
+                for (int i = 0; i < ch->numtris; i++, tri += 3) t3d_tri_draw(tri[0], tri[1], tri[2]);
+            }
             t3d_tri_sync();
             rstats.tris += ch->numtris;
         }
     }
     t3d_matrix_pop(1);
+#ifdef PROFX
+    { static uint32_t ab, as; static int an, nb; ab += TICKS_DISTANCE(pb0, pb1); as += TICKS_DISTANCE(pb1, TICKS_READ()); nb += m->numbones;
+      if (++an == 120) { debugf("  studio: bones %d us/model (%d bones avg), submit %d us/model\n", (int)TICKS_TO_US(ab / an), nb / an, (int)TICKS_TO_US(as / an)); ab = as = an = nb = 0; } }
+#endif
     if (cur_alpha == 1) rdpq_mode_alphacompare(0);
     uint8_t white[4] = {0xff, 0xff, 0xff, 0xff};
     t3d_light_set_ambient(white);

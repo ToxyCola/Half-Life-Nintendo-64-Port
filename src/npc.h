@@ -62,6 +62,12 @@ typedef struct {
     float tongue_len;        // barnacle: distance to the floor (traced once)
     float next_dormant, think_dt;   // dormant (idle, out of the player's PVS): AI a few times a second
     float light_pos[3], light_time;
+    float leaf_org[3]; int leaf_cache;
+    int maker;               // monstermaker entity that made it (0 none)
+    int bkind, bstate, bi[4];    // bosses (nihilanth, big momma, apache, osprey): kind, state, ints
+    float bt[4], bv[3];          //   timers, flying velocity
+    int weapons;                 // human grunt "weapons" bits (1 mp5, 2 hand grenades, 4 launcher, 8 shotgun)
+    float next_grenade, cover_until;   // BSP leaf at leaf_org (PVS checks)
 } npc_t;
 
 typedef struct { float origin[3], mins[3], maxs[3]; } npc_box_t;

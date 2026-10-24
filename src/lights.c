@@ -56,7 +56,7 @@ static void group_records(void)
         total += two ? 4 : 3;
     }
     for (int g = 0, o = 0; g < 65; g++) { grp_ofs[g] = o; o += words[g]; }
-    uint32_t *tmp = malloc(total * 4);
+    uint32_t *tmp = malloc(total * 4);   // freed again straight away
     if (!tmp) { grp_ofs[0] = 0; grp_cnt[0] = 0; numrec = -numrec; return; }   // fall back: walk everything
     uint32_t fill[65];
     memcpy(fill, grp_ofs, sizeof(fill));
@@ -113,6 +113,8 @@ void lights_think(float dt)
     }
     if (!any) return;
     const uint8_t *gamma = world.lightstyles;
+    int ival[64];
+    for (int k = 0; k < 64; k++) ival[k] = (int)(val[k] * 256);
     const uint32_t *base_r = (const uint32_t *)(world.lightstyles + 1024);
     uint8_t *vb = (uint8_t *)world.verts;
     int nupd = 0;
@@ -130,10 +132,10 @@ void lights_think(float dt)
             r += two ? 4 : 3;
             if (!changed[s0] && !(two && changed[s1])) continue;
             nupd++;
-            float v0 = val[s0], v1 = two ? val[s1] : 0;
-            int rr = (base >> 20 & 1023) + (int)((c0 >> 20 & 1023) * v0) + (int)((c1 >> 20 & 1023) * v1);
-            int gg = (base >> 10 & 1023) + (int)((c0 >> 10 & 1023) * v0) + (int)((c1 >> 10 & 1023) * v1);
-            int bb = (base & 1023) + (int)((c0 & 1023) * v0) + (int)((c1 & 1023) * v1);
+            int v0 = ival[s0], v1 = two ? ival[s1] : 0;   // 8.8 fixed point
+            int rr = (base >> 20 & 1023) + (((c0 >> 20 & 1023) * v0 + (c1 >> 20 & 1023) * v1) >> 8);
+            int gg = (base >> 10 & 1023) + (((c0 >> 10 & 1023) * v0 + (c1 >> 10 & 1023) * v1) >> 8);
+            int bb = (base & 1023) + (((c0 & 1023) * v0 + (c1 & 1023) * v1) >> 8);
             uint8_t *col = vb + (vi >> 1) * 32 + 16 + (vi & 1) * 4;
             col[0] = gamma[clamp_light(rr)];
             col[1] = gamma[clamp_light(gg)];

@@ -896,6 +896,9 @@ int main(void)
 #ifdef TESTDUCK
     { extern void pm_set_ducked(void); pm_set_ducked(); }
 #endif
+#ifdef TESTNOCLIP
+    settings.cheats = true; dbg_noclip = true; dbg_god = true; player.suit = true; dbg_give_all = true;
+#endif
 #endif
 #endif
 
