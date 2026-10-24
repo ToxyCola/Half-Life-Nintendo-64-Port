@@ -860,6 +860,8 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
 }
 
 T3DViewport *render_viewport(void) { return &viewport; }
+// is this BSP leaf in the camera's PVS this frame? (effects culling)
+bool render_leaf_visible(int leaf) { return numvisleafs <= 0 || (leaf > 0 && leaf < world.numleafs && leaf_inpvs[leaf]); }
 
 // release everything that belongs to the current map (call before loading the next one)
 void render_free_map(void)

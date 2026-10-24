@@ -1,3 +1,4 @@
+#include <ctype.h>
 // HL64 - a small subset of the Half-Life game DLL (dlls/) entity logic:
 // doors, buttons, plats, triggers, relays, multi_managers, level changes.
 // Behaviour follows the SDK sources (doors.cpp, buttons.cpp, triggers.cpp, plats.cpp)
@@ -279,6 +280,8 @@ static void path_link_all(void);
 static void trackchange_find(entity_t *e);
 static bool master_ok(entity_t *e);
 static void special_use(entity_t *e);
+void game_spawn_gibs(const float *o, int count, bool alien, float speed);
+void game_effect_particles(const float *o, int count, float speed, int r, int g, int b, float life, float grav);
 static void ambient_use(entity_t *e);
 static void play_cd_track(int track);
 static void spark_sound(entity_t *e);
@@ -735,6 +738,40 @@ static void special_use(entity_t *e)
         else if (d < rad) game_shake(amp * (1 - d / rad), freq, dur);
         break;
     }
+    case ENT_ENV_SHOOTER: {
+        // effects.cpp CGibShooter/CEnvShooter: a burst of gibs or material debris
+        int n = (int)ent_float(e, "m_iGibs", 3);
+        float v = ent_float(e, "m_flVelocity", 200);
+        const char *mdl = ent_value(e, "shootmodel");
+        int mat = (int)ent_float(e, "shootsounds", -1);
+        if (n < 1) n = 1;
+        if (n > 12) n = 12;
+        if (mdl && strstr(mdl, "gibs") && (strstr(mdl, "hgib") || strstr(mdl, "agib") || mat == 3))
+            game_spawn_gibs(e->origin, n > 4 ? 4 : n, strstr(mdl, "agib") != NULL, v * 0.6f);
+        else {
+            static const uint8_t col[5][3] = {{180, 210, 230}, {140, 100, 60}, {150, 150, 150}, {150, 20, 20}, {120, 110, 100}};
+            int m = mat >= 0 && mat < 5 ? mat : 4;
+            if (mdl && strstr(mdl, "glass")) m = 0;
+            else if (mdl && (strstr(mdl, "wood") || strstr(mdl, "crate"))) m = 1;
+            else if (mdl && (strstr(mdl, "metal") || strstr(mdl, "computer"))) m = 2;
+            game_effect_particles(e->origin, n * 4, v * 0.8f, col[m][0], col[m][1], col[m][2], 1.2f, 600);
+            if (mdl && strstr(mdl, "spr")) game_effect_sparks(e->origin);
+        }
+        static const char *ms[5] = {"debris/glass1.wav", "debris/wood1.wav", "debris/metal1.wav", "debris/flesh1.wav", "debris/concrete1.wav"};
+        if (mat >= 0 && mat < 5) snd_emit(-1, CHAN_AUTO, ms[mat], 0.8f, 0.8f, PITCH_NORM, e->origin);
+        if (!(e->spawnflags & 1)) e->removed = true;     // SF_GIBSHOOTER_REPEATABLE
+        break;
+    }
+    case ENT_BEVERAGE: {
+        // CEnvBeverage: each use drops a can worth 1 health; "health" cans in the machine
+        if (e->health <= 0) e->health = ent_float(e, "health", 10) > 0 ? ent_float(e, "health", 10) : 10;
+        if (e->wait > 0 || g_time < e->ltime) break;
+        e->ltime = g_time + 1.0f;
+        if (--e->health <= 0) e->wait = 1;
+        snd_emit(-1, CHAN_AUTO, "items/smallmedkit1.wav", 1.0f, 0.8f, PITCH_NORM, e->origin);
+        player_take_health(1, 0);
+        break;
+    }
     case ENT_WEAPONSTRIP:
         player.weapons &= (1u << 31);    // keep the suit bit
         player.cur_weapon = 0;
@@ -866,6 +903,7 @@ void game_effect_particles(const float *o, int count, float speed, int r, int g,
 // player (SF_TANK_ACTIVE + SF_TANK_PLAYER) and fires when on target; with SF_TANK_CANCONTROL the
 // player can man it from its func_tankcontrols
 static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs);
+static int ents_gen;   // bumped for every map (and saved game) spawn
 static int tank_driven = -1;   // the tank the player is using
 static int tank_ctrl = -1;     // and the controls they are standing in
 static bool tank_fire_held;
@@ -955,6 +993,23 @@ static void tank_think(entity_t *e, int idx, float dt, const float *porg)
     }
 }
 bool ents_tank_driving(void) { return tank_driven >= 0; }
+// the glow sprites that are switched on (weapons.c draws them)
+int ents_sprites(int *out, int max)
+{
+    static int16_t list[512];
+    static int nlist, gen = -1, built = -1;
+    if (gen != ents_gen || built != num_entities) {
+        nlist = 0;
+        for (int i = 1; i < num_entities && nlist < 512; i++) if (entities[i].type == ENT_SPRITE) list[nlist++] = i;
+        gen = ents_gen; built = num_entities;
+    }
+    int n = 0;
+    for (int k = 0; k < nlist && n < max; k++) {
+        entity_t *e = &entities[list[k]];
+        if (e->active && !e->removed && (e->code == 0 || e->code == 3)) out[n++] = list[k];
+    }
+    return n;
+}
 // the player's input while manning a gun (main.c): view angles aim it, attack fires
 void ents_tank_input(const float *view, bool fire)
 {
@@ -1187,6 +1242,8 @@ static void ent_use(entity_t *e)
     case ENT_WEAPONSTRIP:
     case ENT_ENV_SPARK:
     case ENT_ENV_EXPLOSION:
+    case ENT_ENV_SHOOTER:
+    case ENT_BEVERAGE:
         special_use(e);
         break;
     case ENT_GLOBAL_BEAM:
@@ -1220,6 +1277,14 @@ static void ent_use(entity_t *e)
     case ENT_TANK:
         e->active = !e->active;   // CFuncTank::Use: TankActivate / TankDeactivate
         break;
+    case ENT_SPRITE: {
+        float sc = ent_float(e, "scale", 1);
+        if (sc <= 0) sc = 1;
+        if (e->code == 1) game_effect_explosion(e->origin, 60 * sc);
+        else if (e->code == 2) { extern void game_effect_flash(const float *o, float rad); game_effect_flash(e->origin, 24 * sc); }
+        else e->active = !e->active;
+        break;
+    }
     case ENT_MORTAR_FIELD: {
         // CFuncMortarField::FieldUse: shells come down inside the field (m_iCount, m_flSpread)
         if (e->model <= 0) break;
@@ -1275,7 +1340,7 @@ static enttype_t classify(const char *cn)
         {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_MOMENTARY_BUTTON}, {"func_friction", ENT_FRICTION},
         {"trigger_autosave", ENT_AUTOSAVE}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
         {"ambient_generic", ENT_AMBIENT}, {"speaker", ENT_SPEAKER}, {"env_shake", ENT_ENV_SHAKE},
-        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_global", ENT_ENV_GLOBAL}, {"player_loadsaved", ENT_LOADSAVED}, {"func_pendulum", ENT_PENDULUM}, {"env_explosion", ENT_ENV_EXPLOSION},
+        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_global", ENT_ENV_GLOBAL}, {"env_sprite", ENT_SPRITE}, {"env_glow", ENT_SPRITE}, {"env_shooter", ENT_ENV_SHOOTER}, {"env_beverage", ENT_BEVERAGE}, {"player_loadsaved", ENT_LOADSAVED}, {"func_pendulum", ENT_PENDULUM}, {"env_explosion", ENT_ENV_EXPLOSION},
         {"trigger_monsterjump", ENT_INVISIBLE_BRUSH}, {"trigger_gravity", ENT_TRIGGER_GRAVITY},
         {"trigger_transition", ENT_INVISIBLE_BRUSH}, {"func_vehiclecontrols", ENT_INVISIBLE_BRUSH},
         {"trigger", ENT_INVISIBLE_BRUSH},
@@ -1616,6 +1681,23 @@ static void spawn_entity(entity_t *e)
         e->visible = false;
         e->solid = SOLID_NOT;
         break;
+    case ENT_SPRITE: {
+        // env_sprite / env_glow: glows and flares stay up (SF_SPRITE_STARTON, or no name); the
+        // explosion / flash kinds play once when triggered (SF_SPRITE_ONCE)
+        const char *m = ent_value(e, "model");
+        char nm[48] = "";
+        if (m) for (int k = 0; m[k] && k < 47; k++) nm[k] = tolower((unsigned char)m[k]), nm[k + 1] = 0;
+        if (strstr(nm, "flare1") || strstr(nm, "flare3") || strstr(nm, "glow0") || strstr(nm, "flare2")) e->code = 0;
+        else if (strstr(nm, "xplo") || strstr(nm, "blast") || strstr(nm, "explode")) e->code = 1;
+        else if (strstr(nm, "xflare") || strstr(nm, "xspark") || strstr(nm, "muzzleflash") || strstr(nm, "stmbal")) e->code = 2;
+        else if (strstr(nm, "enter1") || strstr(nm, "exit1")) e->code = 3;
+        else e->code = 4;   // smoke and other animated sheets: not drawn
+        bool once = !strcasecmp(e->classname, "env_sprite") && (e->spawnflags & 2);
+        if (once && e->code < 1) e->code = 2;
+        e->active = !once && (!strcasecmp(e->classname, "env_glow") || !e->targetname[0] || (e->spawnflags & 1));
+        e->visible = false; e->solid = SOLID_NOT; e->leaf = 0;
+        break;
+    }
     case ENT_MONSTERMAKER:
         e->maker_count = (int)ent_float(e, "monstercount", -1);
         e->maker_maxlive = (int)ent_float(e, "m_imaxlivechildren", -1);
@@ -1639,7 +1721,6 @@ static void spawn_entity(entity_t *e)
     }
 }
 
-static int ents_gen;   // bumped for every map (and saved game) spawn
 void ents_spawn_all(void)
 {
     ents_gen++;
@@ -2720,6 +2801,8 @@ void ents_think(float dt)
             if (e->model > 0 && player_touches(e, porg, pmins, pmaxs)) {
                 extern void pm_set_gravity(float g);
                 float g = ent_float(e, "gravity", 1);
+                extern float pm_get_gravity(void);
+                if (pm_get_gravity() != (g > 0 ? g : 1)) debugf("gravity %.2f\n", g > 0 ? g : 1);
                 pm_set_gravity(g > 0 ? g : 1);
             }
             break;

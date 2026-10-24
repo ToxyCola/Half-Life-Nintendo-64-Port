@@ -245,6 +245,7 @@ static void add_view_flash(float rad)
     add_bill(1 + rand() % 3, vm_att[0], rad, 0.06f, 255, 255, 255);
     bills[(bill_next - 1) % MAX_BILLS].view = true;
 }
+void game_effect_flash(const float *o, float rad) { add_bill(4, o, rad, 0.5f, 255, 255, 255); }
 void game_effect_muzzleflash(const float *o, float rad) { add_bill(1 + rand() % 3, o, rad, 0.06f, 255, 255, 255); }
 typedef struct { float o[3]; float end, size; } flash_t;
 static flash_t flashes[8];
@@ -1523,8 +1524,60 @@ bool weapons_hidden;   // manning a func_tank: no view model
 // billboards (explosions, muzzle flashes, the gluon flare): one sprite upload per billboard.
 // view = the first-person gun's own flashes, drawn over the view model at its muzzle
 static sprite_t *fx_projspr[5];   // spit, momma spit, nihilanth zap, controller ball, teleport ball
+static sprite_t *fx_flare;
+// env_glow / env_sprite flares: one shared glow texture tinted with the entity's rendercolor
+static void draw_env_sprites(void)
+{
+    if (!fx_flare) return;
+    extern int ents_sprites(int *out, int max);
+    extern bool render_leaf_visible(int leaf);
+    int list[96];
+    int n = ents_sprites(list, 96), drawn = 0;
+    bool up = false;
+    for (int i = 0; i < n && drawn < 32; i++) {
+        entity_t *e = &entities[list[i]];
+        float dx = e->origin[0] - fx_eye[0], dy = e->origin[1] - fx_eye[1], dz = e->origin[2] - fx_eye[2];
+        if (dx * dx + dy * dy + dz * dz > 1800.0f * 1800.0f) continue;
+        if (e->leaf == 0) e->leaf = bsp_leaf_for_point(e->origin);
+        if (!render_leaf_visible(e->leaf)) continue;
+        float sc = e->ltime > 0 ? e->ltime : (e->ltime = fmaxf(ent_value(e, "scale") ? atof(ent_value(e, "scale")) : 1.0f, 0.1f));
+        float rad = (e->code == 3 ? 40 : 14) * sc;
+        float x, y, x2, y2;
+        if (!project(e->origin, &x, &y)) continue;
+        float z = proj_z;
+        float up3[3] = {e->origin[0] + fx_up[0] * rad, e->origin[1] + fx_up[1] * rad, e->origin[2] + fx_up[2] * rad};
+        if (!project(up3, &x2, &y2)) continue;
+        float rr = sqrtf((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
+        if (rr < 1.5f) continue;
+        if (rr > 100) rr = 100;
+        sprite_t *sp = e->code == 3 ? fx_projspr[4] : fx_flare;
+        if (!sp) continue;
+        if (!up || e->code == 3) {
+            rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
+            rdpq_set_mode_standard();
+            rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (TEX0, 0, PRIM, 0)));
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_zbuf(true, false);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_upload(TILE0, sp, NULL);
+            up = e->code != 3;
+        }
+        uint8_t c[3] = {255, 255, 255};
+        const char *rc = ent_value(e, "rendercolor");
+        if (rc) { int r, g, b; if (sscanf(rc, "%d %d %d", &r, &g, &b) == 3 && (r | g | b)) { c[0] = r; c[1] = g; c[2] = b; } }
+        int a = e->renderamt > 0 ? e->renderamt : 255;
+        rdpq_set_prim_color(RGBA32(c[0], c[1], c[2], a));
+        float tw = sp->width, th = sp->height;
+        float v0[6] = {x - rr, y - rr, z, 0, 0, 1}, v1[6] = {x + rr, y - rr, z, tw, 0, 1};
+        float v2[6] = {x - rr, y + rr, z, 0, th, 1}, v3[6] = {x + rr, y + rr, z, tw, th, 1};
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+        drawn++;
+    }
+}
 static void draw_bills(bool view)
 {
+    if (!view) draw_env_sprites();
     // model-less projectiles as glowing billboards
     for (int i = 0; !view && i < MAX_PROJ; i++) {
         proj_t *p = &projs[i];
@@ -1942,6 +1995,7 @@ void weapons_hud_init(void)
     for (int k = 0; k < 11; k++) { snprintf(path, sizeof(path), "rom:/ui/fx_xspark%d.sprite", k); fx_xspark[k] = sprite_load(path); }
     static const char *pn[5] = {"fx_spit", "fx_mspit", "fx_nball", "fx_cball", "fx_tball"};
     for (int k = 0; k < 5; k++) { snprintf(path, sizeof(path), "rom:/ui/%s.sprite", pn[k]); fx_projspr[k] = sprite_load(path); }
+    fx_flare = sprite_load("rom:/ui/fx_flare.sprite");
 }
 static float ammo_fade;
 static int last_clip = -1, last_ammo = -1;
