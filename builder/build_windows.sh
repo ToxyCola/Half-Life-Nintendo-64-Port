@@ -12,7 +12,9 @@ REPO=$(pwd)
 : "${N64_INST:=/opt/libdragon}"
 : "${T3D_INST:?set T3D_INST to your tiny3d checkout}"
 : "${LIBDRAGON_SRC:?set LIBDRAGON_SRC to the libdragon source tree (for the Windows tools)}"
-PY_VER=3.13.12
+# Python 3.12 + numpy 1.26: numpy 2.x needs ucrtbase's crealf at import, which Wine doesn't have,
+# so this combination also runs under Wine (it's how the builder is tested)
+PY_VER=3.12.10
 OUT=$REPO/builder/out
 WORK=$OUT/work
 STAGE=$WORK/stage
@@ -42,8 +44,8 @@ echo "== Python $PY_VER (embeddable) + numpy + Pillow"
 [ -f "$WORK/dl/python-$PY_VER.zip" ] || curl -sfo "$WORK/dl/python-$PY_VER.zip" "https://www.python.org/ftp/python/$PY_VER/python-$PY_VER-embed-amd64.zip"
 mkdir -p "$STAGE/python/Lib/site-packages"
 python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$WORK/dl/python-$PY_VER.zip" "$STAGE/python"
-pip download -q --only-binary=:all: --platform win_amd64 --python-version 3.13 --implementation cp \
-    "numpy==2.5.*" "pillow==12.3.0" -d "$WORK/dl/wheels"
+pip download -q --only-binary=:all: --platform win_amd64 --python-version 3.12 --implementation cp \
+    "numpy==1.26.4" "pillow==12.3.0" -d "$WORK/dl/wheels"
 for w in "$WORK"/dl/wheels/*.whl; do
     python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$w" "$STAGE/python/Lib/site-packages"
 done
