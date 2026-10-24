@@ -236,7 +236,23 @@ bool npc_pose_final(int i)
     return (n->ai == AI_DEAD || (n->flags & NF_DEAD)) && n->sstate == NS_IDLE && n->script < 0;
 }
 bool npc_alive(int i) { return i >= 0 && i < num_npcs && !is_dead(&npcs[i]) && !(npcs[i].flags & NF_ITEM) && !entities[npcs[i].ent].removed; }
+static bool npc_bleeds(npc_t *n);
 bool npc_is_item(int i) { return npcs[i].flags & NF_ITEM; }
+// a body weapons can hit (TASK_DIE: UTIL_SetSize to a flat box once the death animation ends; the
+// placed sitting / hanging / table bodies keep some height)
+bool npc_corpse_box(int i, float *mn, float *mx)
+{
+    npc_t *n = &npcs[i];
+    if (!is_dead(n) || (n->flags & NF_ITEM) || entities[n->ent].removed || !npc_bleeds(n)) return false;
+    float h = 24;   // a lying body's hitboxes (head, chest) stand about this high; a standing crowbar swing aimed down reaches it
+    if (n->model && n->seq >= 0 && n->seq < n->model->numseqs) {
+        const char *sn = n->model->seqs[n->seq].name;
+        if (strstr(sn, "sit") || strstr(sn, "hang") || strstr(sn, "table") || strstr(sn, "seat")) h = 44;
+    }
+    mn[0] = fminf(n->mins[0], -16); mn[1] = fminf(n->mins[1], -16); mn[2] = n->mins[2];
+    mx[0] = fmaxf(n->maxs[0], 16); mx[1] = fmaxf(n->maxs[1], 16); mx[2] = n->mins[2] + h;
+    return true;
+}
 float npc_eye_height(int i) { npc_t *n = &npcs[i]; return n->maxs[2] * 0.9f; }
 
 static void npc_eye(npc_t *n, float *o)
@@ -1316,9 +1332,15 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
     // explosion turns them into gibs (CBaseMonster::TakeDamage on a DEAD_DEAD monster -> GibMonster)
     bool corpse = strstr(ne->classname, "_dead") != NULL || is_dead(n);
     if (corpse) {
-        if (ne->removed || (n->flags & NF_ITEM)) return;
-        n->health -= dmg;
-        if (n->health <= -10 || (dmgtype & (DMG_ENERGYBEAM | DMG_BLAST | DMG_ALWAYSGIB_N64)) || dmg >= 30) npc_gib(n);   // about three crowbar hits
+        if (ne->removed || (n->flags & NF_ITEM) || !npc_bleeds(n)) return;
+        // CBaseMonster::DeadTakeDamage: only DMG_GIB_CORPSE damage (crowbar, explosions, crushing,
+        // falls, sonic) destroys a body: at once if the hit is at least what is left of it, otherwise
+        // a tenth of it wears the body down. Bullets only draw blood.
+        if (n->corpse_hp <= 0) n->corpse_hp = strstr(ne->classname, "_dead") ? 8 : fmaxf(n->maxhealth * 0.5f, 1);
+        if (dmgtype & (DMG_CRUSH | DMG_FALL | DMG_BLAST | DMG_SONIC | DMG_CLUB | DMG_ALWAYSGIB_N64)) {
+            if (n->corpse_hp <= dmg) npc_gib(n);
+            else n->corpse_hp -= dmg * 0.1f;
+        }
         return;
     }
     if (!npc_alive(i) || (n->flags & NF_INVULN)) return;

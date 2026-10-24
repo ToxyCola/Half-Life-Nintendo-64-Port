@@ -27,6 +27,7 @@ typedef struct {
     // AI
     int ai;                  // AI state
     float health, maxhealth;
+    float corpse_hp;        // CBaseMonster::BecomeDead: max_health / 2 (placed bodies 8), worn down by DMG_GIB_CORPSE
     int enemy;               // -1 none, 0 player, n+1 = npc n
     float next_think, next_attack, next_look, pain_time, attack_hit_time;
     bool attack_hit_done;

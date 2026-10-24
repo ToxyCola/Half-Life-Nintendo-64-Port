@@ -814,14 +814,21 @@ void game_trace(const float *start, const float *end, const float *mins, const f
     if (!(flags & (TR_IGNORE_MONSTERS | TR_WORLD_ONLY))) {
         for (int i = 0; i < num_npcs; i++) {
             npc_t *n = &npcs[i];
-            if (i == ignore_npc || !n->solid || entities[n->ent].removed) continue;
+            if (i == ignore_npc || entities[n->ent].removed) continue;
+            const float *nmn = n->mins, *nmx = n->maxs;
+            float cmn[3], cmx[3];
+            if (!n->solid) {
+                extern bool npc_corpse_box(int i, float *mn, float *mx);
+                if (!(flags & TR_HIT_CORPSES) || !npc_corpse_box(i, cmn, cmx)) continue;
+                nmn = cmn; nmx = cmx;
+            }
             bool hit = true;
             for (int k = 0; k < 3 && hit; k++)
-                if (bmax[k] < n->origin[k] + n->mins[k] || bmin[k] > n->origin[k] + n->maxs[k]) hit = false;
+                if (bmax[k] < n->origin[k] + nmn[k] || bmin[k] > n->origin[k] + nmx[k]) hit = false;
             if (!hit) continue;
             float bmn[3], bmx[3], ls[3], le[3];
             for (int k = 0; k < 3; k++) {
-                bmn[k] = n->mins[k] - mx0[k]; bmx[k] = n->maxs[k] - mn0[k];
+                bmn[k] = nmn[k] - mx0[k]; bmx[k] = nmx[k] - mn0[k];
                 ls[k] = start[k] - n->origin[k]; le[k] = end[k] - n->origin[k];
             }
             hull_t *h = hull_for_box(bmn, bmx);

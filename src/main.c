@@ -856,7 +856,7 @@ static void test_keys(float t, joypad_inputs_t *in, joypad_buttons_t *pressed)
         if (sscanf(p, "%f:%3[A-Z]%n", &at, key, &n) < 2) break;
         p += n;
         if (*p == ':') { int m = 0; sscanf(p + 1, "%f%n", &hold, &m); p += 1 + m; }
-        while (*p == ' ') p++;
+        while (*p == ' ' || *p == ',') p++;
         bool down = t >= at && t < at + hold;
         bool edge = last_t < at && t >= at;
 #define K(name, field) if (!strcmp(key, name)) { if (down) in->btn.field = 1; if (edge) pressed->field = 1; }
@@ -1087,6 +1087,29 @@ int main(void)
         { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); { char tl[128]; strncpy(tl, TESTFIRE, 127); tl[127] = 0; for (char *t = strtok(tl, ","); t; t = strtok(NULL, ",")) ents_fire_targets(t); } } }
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;
             for (int i = 0; i < num_npcs; i++) if (entities[npcs[i].ent].targetname[0]) debugf("NPC %s %.0f %.0f %.0f hp %.0f ai %d script %d %s\n", entities[npcs[i].ent].targetname, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].health, npcs[i].ai, npcs[i].script, entities[npcs[i].ent].removed ? "GONE" : ""); } }
+#endif
+#ifdef TESTCROWBAR
+        { extern void weapons_test_select(int id); static bool sel; if (in_game && game_clock > 2 && !sel) { sel = true; weapons_test_select(WEAPON_CROWBAR); } }
+        { static float nt; if (in_game && game_clock > nt) { nt = game_clock + 1; for (int i = 0; i < num_npcs; i++) if (!strcmp(entities[npcs[i].ent].classname, "monster_scientist_dead")) debugf("BODY %d %.0f %.0f %s\n", i, npcs[i].origin[0], npcs[i].origin[1], entities[npcs[i].ent].removed ? "GONE" : "there"); } }
+#endif
+#ifdef TESTCORPSE
+        {   // weapons reach corpses: a downward trace onto each body, then crowbar hits until it gibs
+            static float nt = 3; static int k;
+            if (in_game && game_clock > nt && k < 12) {
+                nt = game_clock + 0.4f; k++;
+                for (int i = 0; i < num_npcs; i++) {
+                    entity_t *e = &entities[npcs[i].ent];
+                    if (e->removed || npc_alive(i)) continue;
+                    float a[3] = {npcs[i].origin[0] + 4, npcs[i].origin[1] + 4, npcs[i].origin[2] + 60};
+                    float b[3] = {a[0], a[1], npcs[i].origin[2] - 10};
+                    gtrace_t tr;
+                    game_trace(a, b, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
+                    if (tr.npc != i) { debugf("TESTCORPSE %d %s: trace missed (npc %d)\n", i, e->classname, tr.npc); continue; }
+                    npc_take_damage(i, 10, DMG_CLUB, NULL, 0);
+                    debugf("TESTCORPSE %d %s hit %d hp %.1f %s\n", i, e->classname, k, npcs[i].corpse_hp, e->removed ? "GIBBED" : "");
+                }
+            }
+        }
 #endif
 #ifdef TESTDMG
         { static float nt = 4; static int k; if (in_game && game_clock > nt && k < 4) { nt = game_clock + 0.5f; k++;

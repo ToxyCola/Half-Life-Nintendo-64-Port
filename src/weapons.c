@@ -283,8 +283,12 @@ void game_radius_damage(const float *origin, float damage, float radius, int att
     }
     for (int i = 0; i < num_npcs; i++) {
         npc_t *n = &npcs[i];
-        if (!npc_alive(i)) continue;
-        float c[3] = {n->origin[0], n->origin[1], n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f};
+        // corpses too: an explosion gibs the bodies around it (DeadTakeDamage, DMG_BLAST)
+        extern bool npc_corpse_box(int i, float *mn, float *mx);
+        float cmn[3], cmx[3];
+        bool body = !npc_alive(i);
+        if (body && !npc_corpse_box(i, cmn, cmx)) continue;
+        float c[3] = {n->origin[0], n->origin[1], n->origin[2] + (body ? (cmn[2] + cmx[2]) * 0.5f : (n->mins[2] + n->maxs[2]) * 0.5f)};
         float dd = sqrtf((c[0] - origin[0]) * (c[0] - origin[0]) + (c[1] - origin[1]) * (c[1] - origin[1]) + (c[2] - origin[2]) * (c[2] - origin[2]));
         if (dd >= radius) continue;
         float o[3] = {origin[0], origin[1], origin[2] + 1};
@@ -916,7 +920,7 @@ static void fire_bullets(int shots, float spread_x, float spread_y, float dmg, f
         for (int k = 0; k < 3; k++) d[k] = dir[k] + x * spread_x * r[k] + y * spread_y * u[k];
         float end[3] = {eye[0] + d[0] * range, eye[1] + d[1] * range, eye[2] + d[2] * range};
         gtrace_t tr;
-        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
         if (tr.fraction >= 1) continue;
         if (tr.npc >= 0) { { extern void npc_set_hitpoint(const float *p); npc_set_hitpoint(tr.endpos); } npc_take_damage(tr.npc, dmg, type, d, 0); }
         else { if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, type, d); effect_sprite(tr.endpos, 1, 200, 200, 190, 0.5f); game_effect_particles(tr.endpos, 2, 70, 255, 220, 140, 0.3f, 300); }
@@ -982,13 +986,16 @@ static void crowbar_swing(void)
     player_get_eye(eye);
     float end[3] = {eye[0] + aim_dir[0] * 32, eye[1] + aim_dir[1] * 32, eye[2] + aim_dir[2] * 32};
     gtrace_t tr;
-    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
     if (tr.fraction >= 1) {
         static const float mn[3] = {-16, -16, -18}, mx[3] = {16, 16, 18};
-        game_trace(eye, end, mn, mx, TR_IGNORE_PLAYER, -1, &tr);
+        game_trace(eye, end, mn, mx, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
     }
     static int swing;
     swing++;
+#ifdef TESTCROWBAR
+    debugf("SWING eye %.0f %.0f %.0f frac %.2f npc %d ent %d\n", eye[0], eye[1], eye[2], tr.fraction, tr.npc, tr.ent);
+#endif
     if (tr.fraction >= 1) {
         // v_crowbar: attack1 = 1 hit, attack1miss, attack2 = 2 miss, attack2hit, attack3 = 3 miss, attack3hit
         play_vseq(swing % 3 == 0 ? "attack1miss" : (swing % 3 == 1 ? "attack2" : "attack3"));
@@ -1109,7 +1116,7 @@ static void primary(const wdef_t *w)
         snd_emit(0, CHAN_WEAPON, "weapons/gauss2.wav", 0.5f + (rand() % 30) / 100.0f, ATTN_NORM, 85 + rand() % 15, NULL);
         float end[3] = {eye[0] + aim_dir[0] * 8192, eye[1] + aim_dir[1] * 8192, eye[2] + aim_dir[2] * 8192};
         gtrace_t tr;
-        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
         float from[3] = {eye[0], eye[1], eye[2] - 6};
         add_beam(from, tr.endpos, 255, 128, 0, 0.1f, 2);
         if (tr.npc >= 0) npc_take_damage(tr.npc, skill_get("sk_plr_gauss"), DMG_BULLET, aim_dir, 0);
@@ -1165,7 +1172,7 @@ static void primary(const wdef_t *w)
         if (player.ammo[w->ammo1] <= 0) return;
         float end[3] = {eye[0] + aim_dir[0] * 128, eye[1] + aim_dir[1] * 128, eye[2] + aim_dir[2] * 128};
         gtrace_t tr;
-        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
         if (tr.fraction >= 1 || tr.npc >= 0) return;
         player.ammo[w->ammo1]--;
         float o[3] = {tr.endpos[0] + tr.normal[0] * 8, tr.endpos[1] + tr.normal[1] * 8, tr.endpos[2] + tr.normal[2] * 8};
@@ -1283,7 +1290,7 @@ static void gauss_release(const wdef_t *w)
     play_vseq("fire");
     float end[3] = {eye[0] + aim_dir[0] * 8192, eye[1] + aim_dir[1] * 8192, eye[2] + aim_dir[2] * 8192};
     gtrace_t tr;
-    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
     float from[3] = {eye[0], eye[1], eye[2] - 6};
     add_beam(from, tr.endpos, 255, 255, 255, 0.15f, 4);
     if (tr.npc >= 0) npc_take_damage(tr.npc, dmg, DMG_BULLET | DMG_ALWAYSGIB, aim_dir, 0);
@@ -1317,7 +1324,7 @@ static void egon_fire(const wdef_t *w, float dt)
     if (wtime >= egon_ammo_time) { player.ammo[w->ammo1]--; egon_ammo_time = wtime + 0.2f; }   // EGON_PULSE_INTERVAL-ish
     float end[3] = {eye[0] + aim_dir[0] * 2048, eye[1] + aim_dir[1] * 2048, eye[2] + aim_dir[2] * 2048};
     gtrace_t tr;
-    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
     // CEgon::CreateEffect: a wide noisy blue beam (lgtning) around a bright core (laserbeam), a
     // flare where it hits and sparks
     float from[3];
