@@ -10,7 +10,7 @@ Produces:
   filesystem/textures.pak       shared de-duplicated CI8 textures + palettes
   filesystem/sound/...          wav64 sounds (via libdragon's audioconv64) + materials.txt
 """
-import os, sys, glob, argparse, subprocess, shutil
+import os, sys, glob, argparse, subprocess, shutil, tempfile
 from multiprocessing import Pool
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bsp2n64
@@ -42,7 +42,7 @@ EXTRA_SEQS = ['retract', 'delpoy', 'hide', 'spin', 'lying_on_back', 'lying_on_st
 
 def npc_model_table():
     """classname -> model, read from src/npc.c so the table lives in one place"""
-    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'npc.c')).read()
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'npc.c'), encoding='latin1').read()
     return dict(re.findall(r'\{"(\w+)", "([\w()]+)", \{', src))
 
 
@@ -119,8 +119,11 @@ def build_models(a, maps):
 def build_nav(a, maps):
     """monster node graphs (tools/navgen.c, built here with the host compiler)"""
     here = os.path.dirname(os.path.abspath(__file__))
-    exe = os.path.join(a.tmp if hasattr(a, 'tmp') else '/tmp', 'hl64_navgen')
-    subprocess.run(['cc', '-O2', '-o', exe, os.path.join(here, 'navgen.c'), '-lm'], check=True)
+    # a prebuilt navgen (the Windows builder ships navgen.exe), else compile it with the host compiler
+    exe = os.environ.get('HL64_NAVGEN') or shutil.which('navgen')
+    if not exe:
+        exe = os.path.join(tempfile.gettempdir(), 'hl64_navgen')
+        subprocess.run(['cc', '-O2', '-o', exe, os.path.join(here, 'navgen.c'), '-lm'], check=True)
     n = 0
     for m in maps:
         r = subprocess.run([exe, os.path.join(a.valve, 'maps', m + '.bsp'), os.path.join(a.out, 'maps', m + '.nav')],
@@ -192,7 +195,7 @@ def build_arrivals(a, maps):
                 break
         if best:
             out.append('%s %s %.0f %.0f %.0f %s %s' % (m, best[0], *best[1], best[2], best[3]))
-    open(os.path.join(a.out, 'maps', 'arrive.txt'), 'w').write('\n'.join(out) + '\n')
+    open(os.path.join(a.out, 'maps', 'arrive.txt'), 'w', newline='\n').write('\n'.join(out) + '\n')
     print('arrivals: %d' % len(out))
 
 
@@ -207,7 +210,7 @@ def build_chapters(a, maps):
         text = titles.get(key.upper(), '').strip() if key else ''
         if text:
             out.append('%s %s' % (m, text.replace('\n', ' ')))
-    open(os.path.join(a.out, 'maps', 'chapters.txt'), 'w', encoding='latin1').write('\n'.join(out) + '\n')
+    open(os.path.join(a.out, 'maps', 'chapters.txt'), 'w', encoding='latin1', newline='\n').write('\n'.join(out) + '\n')
     print('chapters: %d' % len(out))
 
 
@@ -235,7 +238,7 @@ def main():
         build_sounds(a)
         return
     if a.ui_only:
-        ui2n64.build(a.valve, a.out, '/tmp/ui2n64')
+        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'))
         spr2n64.build(a.valve, a.out, maps)
         build_chapters(a, maps)
         build_arrivals(a, maps)
@@ -263,7 +266,7 @@ def main():
             list(ex.map(comp, [c for c in chunks if c]))
         csize = sum(os.path.getsize(f) for f in files)
         print('compressed maps: %.1f MB' % (csize / 1048576))
-    open(os.path.join(a.out, 'maps', 'maplist.txt'), 'w').write('\n'.join(maps) + '\n')
+    open(os.path.join(a.out, 'maps', 'maplist.txt'), 'w', newline='\n').write('\n'.join(maps) + '\n')
     build_nav(a, maps)
     shutil.copy(os.path.join(a.valve, 'skill.cfg'), os.path.join(a.out, 'skill.cfg'))
     print('maps: %d, %.1f MB; texture pack: %d textures, %.1f MB' % (
@@ -289,7 +292,7 @@ def main():
     print('skies: %d' % nsky)
 
     build_models(a, maps)
-    ui2n64.build(a.valve, a.out, '/tmp/ui2n64')
+    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'))
     spr2n64.build(a.valve, a.out, maps)
     build_chapters(a, maps)
     build_arrivals(a, maps)

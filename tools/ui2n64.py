@@ -179,4 +179,4 @@ def parse_titles(path):
 
 
 if __name__ == '__main__':
-    build(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else '/tmp/ui2n64')
+    build(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else os.path.join(__import__('tempfile').gettempdir(), 'ui2n64'))

@@ -4,3 +4,4 @@ filesystem/
 *.ram
 __pycache__/
 *.pyc
+builder/out/

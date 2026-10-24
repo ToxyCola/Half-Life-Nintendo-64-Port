@@ -90,7 +90,30 @@ cartridge's 32 KB SRAM (set the save type to SRAM 256k on a flashcart or emulato
   EverDrive-64 X7/V3, 64drive). The ROM uses libdragon's open-source IPL3 boot code, so no CIC
   setting is needed.
 
-## Building
+## Building the ROM on Windows (the easy way)
+
+Download **HL64Builder.exe** from this repository's
+[Releases](../../releases) page and run it. It needs Half-Life installed through Steam (or any
+copy of the game's `valve` folder) and nothing else: the N64 engine (compiled from this
+repository for that release), libdragon's asset tools and a private copy of Python are packed
+inside it, and no Valve game data is.
+
+1. Run `HL64Builder.exe`. It finds Half-Life through Steam (every Steam library is checked). If it
+   can't, drag your `Half-Life` folder onto the window (or onto the .exe) and press Enter.
+2. It converts the maps, textures, models, sprites, sounds and music (30–90 minutes, most of it
+   compressing the maps), then writes **`hl64.z64` next to the .exe**.
+3. Run it again later and it reuses the converted data, so only the ROM is rebuilt;
+   `HL64Builder.exe --clean` converts everything again.
+
+The first run unpacks the tools to `%LOCALAPPDATA%\HL64Builder` (about 85 MB) and works in
+`%LOCALAPPDATA%\HL64Builder\work` (about 200 MB). Windows SmartScreen may warn that the program
+is unrecognised (it isn't code-signed): choose "More info" → "Run anyway". The ROM contains
+Half-Life's game data, so keep it for yourself and don't share it.
+
+To make HL64Builder.exe yourself (on Linux, with mingw-w64): `builder/build_windows.sh`
+(see the comments at its top).
+
+## Building from source
 
 You need Linux or WSL, Python 3 with `numpy` and `Pillow`, and your Half-Life install.
 
@@ -172,6 +195,7 @@ src/weapons.c     weapons, projectiles, view model, ammo HUD, effects and env_sp
 src/skill.c       skill.cfg
 valve_sdk/        files from Valve's Half-Life SDK (see valve_sdk/LICENSE)
 tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, spr2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py
+builder/          HL64Builder.exe: Windows launcher (hl64builder.c), packer, build_windows.sh
 test/             PC test harness: runs the same game code on a converted map
 ```
 

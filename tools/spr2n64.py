@@ -158,7 +158,9 @@ def convert(path, name, outdir, tmp):
     return len(conv), fw, fh, ow, oh, typ, texfmt, fmt, tint, n
 
 
-def build(valve, out, maps, tmp='/tmp/spr2n64'):
+def build(valve, out, maps, tmp=None):
+    import tempfile
+    tmp = tmp or os.path.join(tempfile.gettempdir(), 'spr2n64')
     outdir = os.path.join(out, 'spr')
     os.makedirs(outdir, exist_ok=True)
     os.makedirs(tmp, exist_ok=True)
@@ -176,7 +178,7 @@ def build(valve, out, maps, tmp='/tmp/spr2n64'):
             done[src] = convert(find_spr(valve, src), src, outdir, tmp)
         nf, fw, fh, ow, oh, typ, texfmt, fmt, tint, srcn = done[src]
         lines.append('%s %s %d %d %d %d %d %d %d %s %d %d %d %d' % (name, src, nf, fw, fh, ow, oh, typ, texfmt, fmt, tint[0], tint[1], tint[2], srcn))
-    open(os.path.join(outdir, 'index.txt'), 'w').write('\n'.join(lines) + '\n')
+    open(os.path.join(outdir, 'index.txt'), 'w', newline='\n').write('\n'.join(lines) + '\n')
     size = sum(os.path.getsize(os.path.join(outdir, s + '.sprite')) for s in done)
     print('env sprites: %d referenced, %d converted (%d KB), %d substituted, %d not drawn: %s' % (
         len(names), len(done), size // 1024, sum(1 for l in lines if l.split()[0] != l.split()[1]), len(missing), ' '.join(missing)))
