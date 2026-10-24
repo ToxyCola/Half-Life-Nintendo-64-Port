@@ -1126,6 +1126,10 @@ int main(void)
         pm_unstick(dt);
         uint32_t tp1 = TICKS_READ();
         TR("L"); player_think(dt); game_autosave_tick(); TR("W");
+        { extern bool ents_tank_driving(void); extern void ents_tank_input(const float *view, bool fire);
+          extern bool weapons_hidden;
+          weapons_hidden = ents_tank_driving();
+          if (weapons_hidden) { ents_tank_input(view_angles, weapon_fire); weapon_fire = weapon_fire2 = false; } }
         weapons_think(dt, view_angles, weapon_fire && cam_ent < 0, weapon_fire2 && cam_ent < 0, weapon_reload, weapon_select,
                       cam_ent < 0 && !ents_player_driving() && !noclip);
         prof_pm += TICKS_DISTANCE(tp0, tp1); prof_play += TICKS_DISTANCE(tp1, TICKS_READ());

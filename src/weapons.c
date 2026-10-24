@@ -374,6 +374,35 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
     return s;
 }
 
+// func_tank shots (func_tank.cpp: CFuncTankGun / Laser / Rocket / Mortar) from a barrel along dir
+void game_tank_fire(int kind, const float *from, const float *dir, float spread, float dmg, bool by_player)
+{
+    float o[3] = {from[0] + dir[0] * 8, from[1] + dir[1] * 8, from[2] + dir[2] * 8};
+    game_effect_muzzleflash(o, kind == 2 ? 14 : 9);
+    if (kind == 2) {   // rocket
+        proj_spawn(P_ROCKET, o, dir, by_player ? 0 : -1, -1);
+        snd_emit(-1, CHAN_AUTO, "weapons/rocketfire1.wav", 1, ATTN_NORM, PITCH_NORM, o);
+        return;
+    }
+    float r[3] = {dir[1], -dir[0], 0}, rl = sqrtf(r[0] * r[0] + r[1] * r[1]);
+    if (rl < 0.01f) { r[0] = 1; r[1] = 0; rl = 1; }
+    r[0] /= rl; r[1] /= rl;
+    float u[3] = {r[1] * dir[2] - r[2] * dir[1], r[2] * dir[0] - r[0] * dir[2], r[0] * dir[1] - r[1] * dir[0]};
+    float x = ((rand() % 1000) / 1000.0f - 0.5f) * spread, y = ((rand() % 1000) / 1000.0f - 0.5f) * spread;
+    float d[3];
+    for (int k = 0; k < 3; k++) d[k] = dir[k] + x * r[k] + y * u[k];
+    float end[3] = {o[0] + d[0] * 4096, o[1] + d[1] * 4096, o[2] + d[2] * 4096};
+    gtrace_t tr;
+    game_trace(o, end, NULL, NULL, by_player ? TR_IGNORE_PLAYER : 0, -1, &tr);
+    if (kind == 1) { beam_tex_next = 2; add_beam(o, tr.endpos, 255, 60, 60, 0.15f, 5); beam_tex_next = 0; snd_emit(-1, CHAN_AUTO, "weapons/electro4.wav", 1, ATTN_NORM, PITCH_NORM, o); }
+    else if (kind == 3) { explode(tr.endpos, dmg > 0 ? dmg : 200, by_player ? 0 : -1); return; }
+    else { snd_emit(-1, CHAN_AUTO, "weapons/hks1.wav", 0.8f, ATTN_NORM, PITCH_NORM, o); if (rand() % 2 == 0) game_effect_tracer(o, tr.endpos); }
+    if (tr.fraction >= 1) return;
+    if (tr.player) { if (!by_player) player_take_damage(dmg, kind == 1 ? DMG_ENERGYBEAM : DMG_BULLET, o, -1); }
+    else if (tr.npc >= 0) { extern void npc_set_hitpoint(const float *p); npc_set_hitpoint(tr.endpos); npc_take_damage(tr.npc, dmg, kind == 1 ? DMG_ENERGYBEAM : DMG_BULLET, d, by_player ? 0 : -1); }
+    else { if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, DMG_BULLET, d); game_effect_particles(tr.endpos, 2, 70, 255, 220, 140, 0.3f, 300); }
+}
+
 // a projectile with a given velocity (lobs: grenades, Big Momma's mortar)
 int proj_spawn_vel(int kind, const float *origin, const float *vel, int owner, int target)
 {
@@ -1490,6 +1519,7 @@ static bool project(const float *p, float *sx, float *sy)
 
 // world-space projectiles (models) and the first-person weapon; called by the renderer
 static float fx_eye[3], fx_angles[3], fx_up[3] = {0, 0, 1};
+bool weapons_hidden;   // manning a func_tank: no view model
 // billboards (explosions, muzzle flashes, the gluon flare): one sprite upload per billboard.
 // view = the first-person gun's own flashes, drawn over the view model at its muzzle
 static sprite_t *fx_projspr[5];   // spit, momma spit, nihilanth zap, controller ball, teleport ball
@@ -1622,7 +1652,7 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
 #ifdef NOVIEWMODEL
     return;
 #endif
-    if (!vmodel || !player_alive() || cur == 0) return;
+    if (!vmodel || !player_alive() || cur == 0 || weapons_hidden) return;
     // view model: at the eye, turned with the view (V_CalcRefdef), bobbing a little
     float sp = sinf(angles[0] * (float)M_PI / 180), cp = cosf(angles[0] * (float)M_PI / 180);
     float sy = sinf(angles[1] * (float)M_PI / 180), cy = cosf(angles[1] * (float)M_PI / 180);

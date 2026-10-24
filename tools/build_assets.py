@@ -34,7 +34,7 @@ def work(args):
 
 
 GENERIC_MODEL_CLASSES = ('monster_generic', 'cycler', 'monster_furniture', 'env_model', 'cycler_sprite')
-EXTRA_SEQS = ['lying_on_back', 'lying_on_stomach', 'lying_on_side', 'dead_sitting', 'dead_hang', 'dead_table1',
+EXTRA_SEQS = ['retract', 'delpoy', 'hide', 'spin', 'lying_on_back', 'lying_on_stomach', 'lying_on_side', 'dead_sitting', 'dead_hang', 'dead_table1',
               'dead_table2', 'dead_table3', 'deadstomach', 'deadside', 'deadsitting', 'deadback', 'deadtable',
               'sitting2', 'sitlookleft']
 
@@ -42,7 +42,7 @@ EXTRA_SEQS = ['lying_on_back', 'lying_on_stomach', 'lying_on_side', 'dead_sittin
 def npc_model_table():
     """classname -> model, read from src/npc.c so the table lives in one place"""
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'npc.c')).read()
-    return dict(re.findall(r'\{"(\w+)", "(\w+)", \{', src))
+    return dict(re.findall(r'\{"(\w+)", "([\w()]+)", \{', src))
 
 
 def model_conv(args):

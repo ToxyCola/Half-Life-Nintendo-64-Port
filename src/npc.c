@@ -138,6 +138,14 @@ static const mdef_t defs[] = {
     {"monster_hevsuit_dead", "player", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_bigmomma", "big_mom", {-32, -32, 0}, {32, 32, 64}, 0, NULL, 150, C_ALIEN, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_nihilanth", "nihilanth", {-160, -160, 0}, {160, 160, 420}, NF_NODROP | NF_FLY, "sk_nihilanth_health", 800, C_ALIEN, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    // Xen flora (xen.cpp): lights that pull in, hair, trees that swat, spore pods
+    {"xen_plantlight", "light", {-8, -8, 0}, {8, 8, 32}, NF_NODROP | NF_STATIC | NF_INVULN | NF_NOTSOLID, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"xen_hair", "hair", {-4, -4, 0}, {4, 4, 32}, NF_NODROP | NF_STATIC | NF_INVULN | NF_NOTSOLID, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"xen_tree", "tree", {-30, -30, 0}, {30, 30, 188}, NF_NODROP | NF_STATIC | NF_INVULN, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"xen_spore_small", "fungus(small)", {-16, -16, 0}, {16, 16, 64}, NF_NODROP | NF_STATIC | NF_INVULN, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"xen_spore_medium", "fungus", {-40, -40, 0}, {40, 40, 120}, NF_NODROP | NF_STATIC | NF_INVULN, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"xen_spore_large", "fungus(large)", {-88, -88, 0}, {88, 88, 256}, NF_NODROP | NF_STATIC | NF_INVULN, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"ammo_9mmARclip", "w_9mmarclip", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
     {"monster_flyer_flock", "boid", {-8, -8, 0}, {8, 8, 8}, NF_NODROP | NF_NOTSOLID | NF_NOAI, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     // items (items.cpp / weapons.cpp / ammo): touched by the player to pick up
     {"item_suit", "w_suit", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
@@ -398,7 +406,8 @@ static void spawn_one(int i, const char *cls_override)
     if (!strcmp(mname, "scientist") && n->body == 2) n->skin = 1;   // HEAD_LUTHER
     if (!strcmp(mname, "hgrunt") && !ent_value(e, "body")) n->body = 0;
     n->pitch = head_pitch(n);
-    n->bkind = !strcmp(mname, "nihilanth") ? 1 : !strcmp(mname, "big_mom") ? 2 : !strcmp(mname, "apache") ? 3 : !strcmp(mname, "osprey") ? 4 : 0;
+    n->bkind = !strcmp(mname, "nihilanth") ? 1 : !strcmp(mname, "big_mom") ? 2 : !strcmp(mname, "apache") ? 3 : !strcmp(mname, "osprey") ? 4 :
+               !strcmp(mname, "light") && !strcmp(cls, "xen_plantlight") ? 5 : !strcmp(mname, "tree") && !strcmp(cls, "xen_tree") ? 6 : 0;
     if (!strcmp(mname, "hgrunt") && !(n->flags & NF_DEAD)) {
         // CHGrunt::Spawn: weapons 0 means MP5 + hand grenades; a shotgun shows in the gun bodygroup
         const char *w = ent_value(e, "weapons");
@@ -2425,10 +2434,44 @@ bool npc_used(int ent)
     int i = npc_for_entity(ent);
     if (i < 0) return false;
     npc_t *n = &npcs[i];
-    if (!n->bkind) return false;
-    if (n->bkind != 2 && n->bstate == 0) n->bstate = 1;
+    if (n->bkind != 1 && n->bkind != 3 && n->bkind != 4) return false;
+    if (n->bstate == 0) n->bstate = 1;
     return true;
 }
+// Xen flora: CXenPLight pulls in when the player comes close, CXenTree swats at them
+static void xen_think(npc_t *n, float dt)
+{
+    float now = game_time();
+    float d = dist2d(n->origin, player_pos);
+    if (n->bkind == 5) {
+        bool near = d < 80 && player_alive();
+        if (near && n->bstate == 0) { play_named(n, "retract", true); n->bstate = 1; }
+        else if (n->bstate == 1 && n->seq_done) { play_named(n, "hide", true); n->bstate = 2; }
+        else if (!near && n->bstate == 2 && now > n->bt[0]) { play_named(n, "delpoy", true); n->bstate = 3; }
+        else if (n->bstate == 3 && n->seq_done) { play_named(n, "idle1", true); n->bstate = 0; }
+        if (near) n->bt[0] = now + 1.5f;
+        return;
+    }
+    // tree: a swat when the player is in front of it, within reach
+    float yaw = yaw_to(n->origin, player_pos);
+    bool infront = fabsf(angle_diff(yaw, n->yaw)) < 60;
+    if (n->bstate == 1) {
+        if (n->attack_hit_time > 0 && now >= n->attack_hit_time) {
+            n->attack_hit_time = 0;
+            if (d < 120 && infront && player_alive()) player_take_damage(25, DMG_CRUSH | DMG_SLASH, n->origin, n->ent);
+            snd_emit(n->ent, CHAN_WEAPON, rand() & 1 ? "zombie/claw_strike1.wav" : "zombie/claw_miss1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+        }
+        if (n->seq_done) { play_named(n, "idle1", true); n->bstate = 0; }
+        return;
+    }
+    if (d < 100 && infront && player_alive() && now > n->next_attack && fabsf(player_pos[2] - n->origin[2]) < 120) {
+        play_named(n, "attack", true);
+        n->bstate = 1;
+        n->attack_hit_time = now + 0.4f;
+        n->next_attack = now + 1.5f;
+    }
+}
+
 static bool boss_think(npc_t *n, float dt)
 {
 #ifdef BOSSDEBUG
@@ -2440,6 +2483,7 @@ static bool boss_think(npc_t *n, float dt)
     case 2: if (n->ai == AI_DYING || n->ai == AI_DEAD) return false; bigmomma_think(n, dt); return true;
     case 3: apache_think(n, dt); return true;
     case 4: osprey_think(n, dt); return true;
+    case 5: case 6: xen_think(n, dt); return true;
     }
     return false;
 }
@@ -2848,7 +2892,7 @@ void npcs_apply_snapshot(const uint8_t *b, int len)
         npc_t *c = &npcs[i];
         if (r.gone) { entities[c->ent].removed = true; c->solid = false; c->health = 0; c->flags |= NF_DEAD | NF_NOTSOLID; continue; }
         memcpy(c->origin, r.o, 12); c->yaw = r.yaw; c->health = r.health; c->following = r.following;
-        if (c->bkind && c->bkind != 2 && r.bstate) c->bstate = 1;   // a boss that was awake stays awake (path restarts)
+        if ((c->bkind == 1 || c->bkind == 3 || c->bkind == 4) && r.bstate) c->bstate = 1;   // a boss that was awake stays awake (path restarts)
         memcpy(entities[c->ent].origin, r.o, 12);
     }
     int nc = b[2];

@@ -862,6 +862,121 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
 
 void game_effect_blood(const float *o);
 void game_effect_particles(const float *o, int count, float speed, int r, int g, int b, float life, float grav);
+// ---- func_tank (func_tank.cpp): a mounted gun that turns within its yaw/pitch ranges toward the
+// player (SF_TANK_ACTIVE + SF_TANK_PLAYER) and fires when on target; with SF_TANK_CANCONTROL the
+// player can man it from its func_tankcontrols
+static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs);
+static int tank_driven = -1;   // the tank the player is using
+static int tank_ctrl = -1;     // and the controls they are standing in
+static bool tank_fire_held;
+static float tank_view[3];
+static float angle_wrap(float a) { while (a > 180) a -= 360; while (a < -180) a += 360; return a; }
+static void tank_barrel(entity_t *e, float *pos, float *dir)
+{
+    float p = e->angles[0] * (float)M_PI / 180, y = e->angles[1] * (float)M_PI / 180;
+    float f[3] = {cosf(p) * cosf(y), cosf(p) * sinf(y), -sinf(p)};
+    float r[3] = {sinf(y), -cosf(y), 0};
+    float u[3] = {f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]};
+    float bx = ent_float(e, "barrel", 0), by = ent_float(e, "barrely", 0), bz = ent_float(e, "barrelz", 0);
+    for (int k = 0; k < 3; k++) pos[k] = e->origin[k] + f[k] * bx - r[k] * by - u[k] * bz;
+    memcpy(dir, f, 12);
+}
+static void tank_fire(entity_t *e, bool by_player)
+{
+    float pos[3], dir[3];
+    tank_barrel(e, pos, dir);
+    int kind = !strcasecmp(e->classname, "func_tanklaser") ? 1 : !strcasecmp(e->classname, "func_tankrocket") ? 2 :
+               !strcasecmp(e->classname, "func_tankmortar") ? 3 : 0;
+    float dmg = ent_float(e, "bullet_damage", 0);
+    if (dmg <= 0) {
+        int b = (int)ent_float(e, "bullet", 0);
+        dmg = kind == 1 ? 30 : kind == 3 ? ent_float(e, "iMagnitude", 100) : skill_get(b == 3 ? "sk_12mm_bullet" : b == 2 ? "sk_9mmAR_bullet" : "sk_9mm_bullet");
+        if (dmg <= 0) dmg = 8;
+    }
+#ifdef BOSSDEBUG
+    debugf("tank %s fires (kind %d dmg %.0f) yaw %.0f pitch %.0f\n", e->targetname, kind, dmg, e->angles[1], e->angles[0]);
+#endif
+    static const float spreads[5] = {0, 0.025f, 0.05f, 0.1f, 0.2f};
+    int sp = (int)ent_float(e, "firespread", 0);
+    extern void game_tank_fire(int kind, const float *from, const float *dir, float spread, float dmg, bool by_player);
+    game_tank_fire(kind, pos, dir, spreads[sp < 0 ? 0 : sp > 4 ? 4 : sp], dmg, by_player);
+}
+static void tank_turn(entity_t *e, float want_yaw, float want_pitch, float dt)
+{
+    float yr = ent_float(e, "yawrange", 0), pr = ent_float(e, "pitchrange", 0);
+    float yrate = ent_float(e, "yawrate", 30), prate = ent_float(e, "pitchrate", 30);
+    float dy = angle_wrap(want_yaw - e->ang1[1]);
+    if (yr > 0 && yr < 180) dy = fminf(fmaxf(dy, -yr), yr);
+    float dp = angle_wrap(want_pitch - e->ang1[0]);
+    dp = fminf(fmaxf(dp, -pr), pr);
+    float cy = angle_wrap(e->angles[1] - e->ang1[1]), cp = angle_wrap(e->angles[0] - e->ang1[0]);
+    float sy = yrate * dt, spp = prate * dt;
+    cy += fminf(fmaxf(dy - cy, -sy), sy);
+    cp += fminf(fmaxf(dp - cp, -spp), spp);
+    e->angles[1] = e->ang1[1] + cy;
+    e->angles[0] = e->ang1[0] + cp;
+}
+static void tank_think(entity_t *e, int idx, float dt, const float *porg)
+{
+    float rate = ent_float(e, "firerate", 1);
+    if (rate <= 0) rate = 1;
+    if (idx == tank_driven) {
+        // manned: follow the view; the attack button fires; walking off the controls lets go
+        if (tank_ctrl > 0 && entities[tank_ctrl].model > 0) {
+            float mn[3], mx[3];
+            pm_get_hull(mn, mx);
+            if (!player_touches(&entities[tank_ctrl], porg, mn, mx)) { tank_driven = -1; return; }
+        }
+        tank_turn(e, tank_view[1], tank_view[0], dt * 3);
+        if (tank_fire_held && g_time >= e->ltime2) { e->ltime2 = g_time + 1 / rate; tank_fire(e, true); }
+        return;
+    }
+    if (!e->active || !(e->spawnflags & 2) || !player_alive() || pm_noclip_active()) return;
+    float pos[3], dir[3];
+    tank_barrel(e, pos, dir);
+    float eye[3];
+    player_get_eye(eye);
+    float d[3] = {eye[0] - pos[0], eye[1] - pos[1], eye[2] - 12 - pos[2]};
+    float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    float maxr = ent_float(e, "maxRange", 0), minr = ent_float(e, "minRange", 0);
+    if (l < 1 || (maxr > 0 && l > maxr) || l < minr) return;
+    if (g_time >= e->ltime) {   // line of sight a few times a second
+        e->ltime = g_time + 0.25f;
+        e->triggered = game_visible(pos, eye);
+    }
+    if (!e->triggered) return;
+    float wy = atan2f(d[1], d[0]) * 180 / (float)M_PI, wp = -asinf(d[2] / l) * 180 / (float)M_PI;
+    tank_turn(e, wy, wp, dt);
+    float tol = ent_float(e, "yawtolerance", 15);
+    bool on = fabsf(angle_wrap(e->angles[1] - wy)) <= (tol > 0 ? tol : 15);
+    if (on && g_time >= e->ltime2) {
+        e->ltime2 = g_time + 1 / rate;
+        tank_fire(e, false);
+    }
+}
+bool ents_tank_driving(void) { return tank_driven >= 0; }
+// the player's input while manning a gun (main.c): view angles aim it, attack fires
+void ents_tank_input(const float *view, bool fire)
+{
+    if (tank_driven < 0) return;
+    entity_t *e = &entities[tank_driven];
+    if (e->removed) { tank_driven = -1; return; }
+    memcpy(tank_view, view, 12);
+    tank_fire_held = fire;
+}
+static void tank_controls_use(entity_t *c)
+{
+    if (tank_driven >= 0) { tank_driven = -1; return; }   // let go
+    for (int t = ents_find_targetname(c->target, 1); t >= 0; t = ents_find_targetname(c->target, t + 1))
+        if (entities[t].type == ENT_TANK && (entities[t].spawnflags & 32)) {
+            tank_driven = t;
+            tank_ctrl = (int)(c - entities);
+            entities[t].active = false;   // CFuncTank::StartControl stops its own aiming
+            snd_emit(t, CHAN_ITEM, "plats/train_use1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+            return;
+        }
+}
+
 // CMomentaryRotButton::UpdateTarget: the button's position (0..1) drives its momentary doors; other
 // targets are used once when it starts turning
 static void momentary_update_targets(entity_t *b, bool first)
@@ -1102,6 +1217,9 @@ static void ent_use(entity_t *e)
     case ENT_PENDULUM:
         e->active = !e->active;
         break;
+    case ENT_TANK:
+        e->active = !e->active;   // CFuncTank::Use: TankActivate / TankDeactivate
+        break;
     case ENT_MORTAR_FIELD: {
         // CFuncMortarField::FieldUse: shells come down inside the field (m_iCount, m_flSpread)
         if (e->model <= 0) break;
@@ -1153,7 +1271,7 @@ static enttype_t classify(const char *cn)
         {"env_message", ENT_ENV_MESSAGE}, {"game_text", ENT_GAME_TEXT}, {"trigger_camera", ENT_CAMERA},
         {"scripted_sentence", ENT_SENTENCE}, {"env_render", ENT_ENV_RENDER}, {"trigger_endsection", ENT_ENDSECTION},
         {"func_guntarget", ENT_WALL}, {"func_mortar_field", ENT_MORTAR_FIELD},
-        {"func_tank", ENT_WALL}, {"func_tankcontrols", ENT_INVISIBLE_BRUSH}, {"func_recharge", ENT_RECHARGE},
+        {"func_tank", ENT_TANK}, {"func_tankcontrols", ENT_TANKCONTROLS}, {"func_recharge", ENT_RECHARGE},
         {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_MOMENTARY_BUTTON}, {"func_friction", ENT_FRICTION},
         {"trigger_autosave", ENT_AUTOSAVE}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
         {"ambient_generic", ENT_AMBIENT}, {"speaker", ENT_SPEAKER}, {"env_shake", ENT_ENV_SHAKE},
@@ -1161,8 +1279,8 @@ static enttype_t classify(const char *cn)
         {"trigger_monsterjump", ENT_INVISIBLE_BRUSH}, {"trigger_gravity", ENT_TRIGGER_GRAVITY},
         {"trigger_transition", ENT_INVISIBLE_BRUSH}, {"func_vehiclecontrols", ENT_INVISIBLE_BRUSH},
         {"trigger", ENT_INVISIBLE_BRUSH},
-        {"env_bubbles", ENT_INVISIBLE_BRUSH}, {"func_tankmortar", ENT_WALL}, {"func_tanklaser", ENT_WALL},
-        {"func_tankrocket", ENT_WALL},
+        {"env_bubbles", ENT_INVISIBLE_BRUSH}, {"func_tankmortar", ENT_TANK}, {"func_tanklaser", ENT_TANK},
+        {"func_tankrocket", ENT_TANK},
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (!strcasecmp(cn, tab[i].n)) return tab[i].t;
@@ -1488,6 +1606,16 @@ static void spawn_entity(entity_t *e)
         if (e->type == ENT_MOMENTARY_BUTTON && (e->spawnflags & 16)) e->solid = SOLID_NOT;
         if (e->type == ENT_PENDULUM) e->active = (e->spawnflags & 1) || !e->targetname[0];
         break;
+    case ENT_TANK:
+        // CFuncTank::Spawn: the base direction it turns about, active with SF_TANK_ACTIVE
+        memcpy(e->ang1, e->angles, 12);
+        e->active = (e->spawnflags & 1) != 0;
+        e->ltime2 = 0;
+        break;
+    case ENT_TANKCONTROLS:
+        e->visible = false;
+        e->solid = SOLID_NOT;
+        break;
     case ENT_MONSTERMAKER:
         e->maker_count = (int)ent_float(e, "monstercount", -1);
         e->maker_maxlive = (int)ent_float(e, "m_imaxlivechildren", -1);
@@ -1515,6 +1643,7 @@ static int ents_gen;   // bumped for every map (and saved game) spawn
 void ents_spawn_all(void)
 {
     ents_gen++;
+    tank_driven = -1;
     num_msrc = 0;
     memset(beam_cache, 0, sizeof(beam_cache));
     memset(master_cache, 0, sizeof(master_cache));
@@ -2422,7 +2551,7 @@ void ents_think(float dt)
             case ENT_TRIGGER_AUTO: case ENT_TRIGGER_CHANGELEVEL: case ENT_TRIGGER_HURT: case ENT_TRIGGER_MULTIPLE:
             case ENT_TRIGGER_ONCE: case ENT_TRIGGER_PUSH: case ENT_TRIGGER_TELEPORT:
             case ENT_TRIGGER_GRAVITY: case ENT_FRICTION: case ENT_AUTOSAVE: case ENT_MOMENTARY_DOOR:
-            case ENT_MOMENTARY_BUTTON: case ENT_PENDULUM:
+            case ENT_MOMENTARY_BUTTON: case ENT_PENDULUM: case ENT_TANK:
                 think_list[num_think++] = i;
                 break;
             default:
@@ -2624,6 +2753,9 @@ void ents_think(float dt)
             if (g_time - e->mlast > 0.15f && rs > 0 && e->mpos > 0) momentary_set(e, e->mpos - rs * dt / (e->dist > 0 ? e->dist : 90), false);
             break;
         }
+        case ENT_TANK:
+            tank_think(e, i, dt, porg);
+            break;
         case ENT_PENDULUM:
             if (e->active) {
                 // CPendulum::Swing: back and forth through "distance" degrees
@@ -2802,6 +2934,7 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
         entity_t *e = &entities[i];
         if (e->removed || e->model <= 0) continue;
         bool usable = e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_RECHARGE || e->type == ENT_MOMENTARY_BUTTON ||
+                      e->type == ENT_TANKCONTROLS ||
                       e->type == ENT_HEALTHCHARGER ||
                       ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !e->targetname[0]) ||
                       (e->type == ENT_PLAT && !e->targetname[0]);
@@ -2829,6 +2962,7 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
     if (best >= 0) {
         entity_t *e = &entities[best];
         if (e->type == ENT_RECHARGE || e->type == ENT_HEALTHCHARGER) { charger_use(e, best); return true; }
+        if (e->type == ENT_TANKCONTROLS) { if (pressed) tank_controls_use(e); return true; }
         if (e->type == ENT_MOMENTARY_BUTTON) {
             // held: keep turning; a new press turns it the other way (always forward with the door hack)
             bool first = pressed && e->mpos <= 0.001f;
