@@ -1804,16 +1804,23 @@ static void grunt_take_cover(npc_t *n)
     float ep[3];
     target_pos(n->enemy, ep);
     ep[2] += n->enemy == 0 ? 28 : 0;
-    int best = -1;
-    float bd = 1e9f;
+    // nearest few candidate nodes first, then at most 10 sight traces
+    int cand[10], nc = 0;
+    float cd[10];
     for (int k = 0; k < nav_num_nodes(); k++) {
         const float *o = nav_node_origin(k);
         float dn = dist3(o, n->origin);
         if (dn > 640 || dn < 96 || fabsf(o[2] - n->origin[2]) > 96) continue;
-        if (dn >= bd) continue;
+        if (nc == 10 && dn >= cd[9]) continue;
+        int j = nc < 10 ? nc++ : 9;
+        while (j > 0 && cd[j - 1] > dn) { cd[j] = cd[j - 1]; cand[j] = cand[j - 1]; j--; }
+        cd[j] = dn; cand[j] = k;
+    }
+    int best = -1;
+    for (int c = 0; c < nc && best < 0; c++) {
+        const float *o = nav_node_origin(cand[c]);
         float eye[3] = {o[0], o[1], o[2] + 40};
-        if (game_visible(eye, ep)) continue;
-        bd = dn; best = k;
+        if (!game_visible(eye, ep)) best = cand[c];
     }
     if (best < 0) return;
     start_moving(n, nav_node_origin(best), true);
