@@ -84,6 +84,24 @@ static bool has_angles(physent_t *pe)
 // trace against one brush physent, handling rotated models like GoldSrc does
 static void trace_physent(physent_t *pe, int usehull, const float *start, const float *end, btrace_t *tr)
 {
+    {   // quick reject: the swept player box doesn't touch the entity's bounds
+        int h = usehull & 3;
+        float amn[3], amx[3];
+        if (pe->model && pe->iuser4) { VectorCopy(pe->mins, amn); VectorCopy(pe->maxs, amx); }
+        else if (!pe->model) { for (int k = 0; k < 3; k++) { amn[k] = pe->origin[k] + pe->mins[k]; amx[k] = pe->origin[k] + pe->maxs[k]; } }
+        else goto full;
+        for (int k = 0; k < 3; k++) {
+            float lo = fminf(start[k], end[k]) + pm->player_mins[h][k] - 2, hi = fmaxf(start[k], end[k]) + pm->player_maxs[h][k] + 2;
+            if (hi < amn[k] || lo > amx[k]) {
+                memset(tr, 0, sizeof(*tr));
+                tr->fraction = 1.0f;
+                tr->inopen = true;
+                VectorCopy(end, tr->endpos);
+                return;
+            }
+        }
+    }
+full:;
     float offset[3], s[3], e[3];
     hull_t *hull = hull_for_physent(pe, usehull, offset);
     VectorSubtract(start, offset, s);
@@ -435,6 +453,20 @@ static void add_physent(physent_t *list, int *count, int max, int entindex, mode
     VectorCopy(origin, pe->origin);
     VectorCopy(angles, pe->angles);
     strcpy(pe->name, entindex == 0 ? "world" : "brush");
+    // world-space bounds (pm_shared never reads mins/maxs of brush physents): traces that can't
+    // reach this entity skip its hull walk
+    if (entindex > 0 && model) {
+        bmodel_t *bm = &world.bmodels[model - world.models];
+        bool rot = angles[0] != 0 || angles[1] != 0 || angles[2] != 0;
+        float r = 0;
+        if (rot) for (int j = 0; j < 3; j++) r = fmaxf(r, fmaxf(fabsf(bm->mins[j]), fabsf(bm->maxs[j])));
+        r *= 1.74f;
+        for (int k = 0; k < 3; k++) {
+            pe->mins[k] = rot ? origin[k] - r : origin[k] + bm->mins[k];
+            pe->maxs[k] = rot ? origin[k] + r : origin[k] + bm->maxs[k];
+        }
+        pe->iuser4 = 1;   // bounds valid
+    }
 }
 
 void pm_build_physents(void)

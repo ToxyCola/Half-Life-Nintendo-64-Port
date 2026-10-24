@@ -19,6 +19,11 @@ static T3DMat4FP *mat_pool;          // FB_COUNT * (1 + MAX_ENT_MATS), uncached
 static int frame_index;
 
 static int framecount = 1;
+#define ENT_MAX_LEAFS 40
+typedef struct { float org[3]; int16_t n; uint16_t leaf[ENT_MAX_LEAFS]; } ent_leafs_t;
+static ent_leafs_t *ent_leafs;
+static int ent_leafs_count;
+
 static int *face_visframe;
 static uint8_t *leaf_inpvs;   // 1 = leaf is in the PVS of the camera leaf
 static int32_t *tex_chain;           // head face per texture
@@ -60,6 +65,7 @@ static void free_texture_blocks(void);
 static void record_texture_blocks(void);
 static void build_strips(void);
 static void record_model_blocks(void);
+static int *model_tris;   // triangles per brush model (stats)
 static void free_model_blocks(void);
 
 void render_new_map(void)
@@ -78,6 +84,10 @@ void render_new_map(void)
     leaf_inpvs = calloc(world.numleafs, 1);
     free(vis_faces);
     vis_faces = malloc(world.numfaces * sizeof(int32_t));
+    free(ent_leafs);
+    ent_leafs_count = num_entities;
+    ent_leafs = malloc(sizeof(ent_leafs_t) * ent_leafs_count);
+    if (ent_leafs) for (int i = 0; i < ent_leafs_count; i++) ent_leafs[i].n = -2;
     free(face_box);
     face_box = malloc(world.numfaces * sizeof(*face_box));
     float inv = 1.0f / world.vertscale;
@@ -406,6 +416,14 @@ static void record_model_blocks(void)
         }
         model_blocks[m] = rspq_block_end();
     }
+    free(model_tris);
+    model_tris = calloc(world.nummodels, sizeof(int));
+    for (int m = 1; model_tris && m < world.nummodels; m++) {
+        bmodel_t *bmm = &world.bmodels[m];
+        for (int fi = bmm->firstface; fi < bmm->firstface + bmm->numfaces; fi++)
+            for (int c = 0; c < world.faces[fi].numchunks; c++)
+                model_tris[m] += world.chunks[world.faces[fi].firstchunk + c].numtris;
+    }
 }
 
 static void free_model_blocks(void)
@@ -442,6 +460,49 @@ static void build_entity_matrix(T3DMat4FP *out, const float *origin, const float
 #ifndef ENT_CULL
 #define ENT_CULL T3D_FLAG_CULL_FRONT
 #endif
+// brush entity PVS test (the PC client does it for every entity): the leafs an entity's box
+// touches (SV_FindTouchedLeafs) are gathered when it moves, and each frame one of them has to be in
+// the camera's PVS
+static void box_leafs_r(int node, const float *mn, const float *mx, ent_leafs_t *el)
+{
+    while (node >= 0) {
+        if (el->n < 0) return;
+        bnode_t *n = &world.nodes[node];
+        bplane_t *pl = &world.planes[n->planenum];
+        float dmin, dmax;
+        if (pl->type < 3) { dmin = mn[pl->type] - pl->dist; dmax = mx[pl->type] - pl->dist; }
+        else {
+            dmin = dmax = -pl->dist;
+            for (int k = 0; k < 3; k++) {
+                float a = pl->normal[k] * mn[k], b = pl->normal[k] * mx[k];
+                dmin += fminf(a, b); dmax += fmaxf(a, b);
+            }
+        }
+        if (dmin >= 0) node = n->children[0];
+        else if (dmax < 0) node = n->children[1];
+        else { box_leafs_r(n->children[0], mn, mx, el); node = n->children[1]; }
+    }
+    int leaf = -node - 1;
+    if (leaf <= 0 || el->n < 0) return;
+    if (el->n >= ENT_MAX_LEAFS) { el->n = -1; return; }   // too big: always drawn (frustum still applies)
+    el->leaf[el->n++] = leaf;
+}
+static bool ent_in_pvs(int i, const entity_t *e, const float *mn, const float *mx)
+{
+#ifdef NO_ENT_PVS
+    return true;
+#endif
+    if (numvisleafs <= 0 || !ent_leafs || i >= ent_leafs_count) return true;
+    ent_leafs_t *el = &ent_leafs[i];
+    if (el->n == -2 || el->org[0] != e->origin[0] || el->org[1] != e->origin[1] || el->org[2] != e->origin[2]) {
+        memcpy(el->org, e->origin, 12);
+        el->n = 0;
+        box_leafs_r(world.bmodels[0].headnode[0], mn, mx, el);
+    }
+    if (el->n < 0) return true;
+    for (int k = 0; k < el->n; k++) if (leaf_inpvs[el->leaf[k]]) return true;
+    return false;
+}
 static void draw_entities(const float *eye, T3DMat4FP *mats)
 {
     int used = 0;
@@ -463,6 +524,7 @@ static void draw_entities(const float *eye, T3DMat4FP *mats)
             }
         }
         if (box_culled(mn, mx)) continue;
+        if (!ent_in_pvs(i, e, mn, mx)) continue;
         T3DMat4FP *mat = &mats[used++];
         build_entity_matrix(mat, e->origin, e->angles, 1.0f / world.vertscale);
         flush_cache();
@@ -480,10 +542,7 @@ static void draw_entities(const float *eye, T3DMat4FP *mats)
         // back faces are culled by the RSP inside the recorded block (no per-face CPU test)
         if (model_blocks[e->model]) {
             rspq_block_run(model_blocks[e->model]);
-            bmodel_t *bmm = &world.bmodels[e->model];
-            for (int fi = bmm->firstface; fi < bmm->firstface + bmm->numfaces; fi++)
-                for (int c = 0; c < world.faces[fi].numchunks; c++)
-                    rstats.tris += world.chunks[world.faces[fi].firstchunk + c].numtris;
+            if (model_tris) rstats.tris += model_tris[e->model];
         }
         bound_tex = -1;
         bound_alpha = -1;
@@ -700,6 +759,9 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
 
     rdpq_attach(fb, display_get_zbuf());
     t3d_frame_start();
+#ifdef EXP_SCISSOR
+    rdpq_set_scissor(0, 0, 32, 24);
+#endif
     t3d_viewport_attach(&viewport);
     rdpq_set_fog_color(sky_color);
     t3d_fog_set_range(FOG_START, FOG_END);
@@ -733,9 +795,13 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
 #ifndef NO_ENTS
     draw_entities(eye, &mats[1]);
 #endif
+    uint32_t t5a = TICKS_READ();
     rstats.npcs = 0;
     studio_begin_frame(frame_index);
     draw_npcs(eye);
+    uint32_t t5b = TICKS_READ();
+    rstats.t_bents += TICKS_DISTANCE(t5, t5a);
+    rstats.t_npcs += TICKS_DISTANCE(t5a, t5b);
 #ifndef NOWHOOK
     {
         // projectiles and the first-person weapon (weapons.c)
@@ -786,5 +852,6 @@ void render_free_map(void)
     free(leaf_inpvs); leaf_inpvs = NULL;
     free(vis_faces); vis_faces = NULL;
     free(face_box); face_box = NULL;
+    free(ent_leafs); ent_leafs = NULL;
 }
 

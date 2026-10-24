@@ -59,6 +59,9 @@ typedef struct {
     float att_time;
     float ctl0;              // bone controller 0 (barnacle: tongue length)
     float alt;               // barnacle: how far down the tongue reaches
+    float tongue_len;        // barnacle: distance to the floor (traced once)
+    float next_dormant, think_dt;   // dormant (idle, out of the player's PVS): AI a few times a second
+    float light_pos[3], light_time;
 } npc_t;
 
 typedef struct { float origin[3], mins[3], maxs[3]; } npc_box_t;

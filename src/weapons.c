@@ -1426,6 +1426,12 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
 
 // ------------------------------------------------------------------ drawing
 static float proj_z;   // depth of the last project(), for z-tested effects
+#ifdef PROFX
+static uint32_t pst[5], pacc[5]; static int pn_;
+#define PSTAMP(i) (pst[i] = TICKS_READ())
+#else
+#define PSTAMP(i)
+#endif
 static bool project(const float *p, float *sx, float *sy)
 {
     T3DVec3 in = {{p[0], p[1], p[2]}}, out;
@@ -1512,7 +1518,19 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
         studio_draw(&d);
     }
     // particles / beams: drawn while the world depth is still in the z-buffer so walls hide them
+#ifdef PROFX
+    uint32_t wt0 = TICKS_READ();
+#endif
     weapons_draw_effects();
+#ifdef PROFX
+    uint32_t wt1 = TICKS_READ();
+    { pacc[0] += TICKS_DISTANCE(wt0, pst[0]); pacc[1] += TICKS_DISTANCE(pst[0], pst[1]); pacc[2] += TICKS_DISTANCE(pst[1], pst[2]); pacc[3] += TICKS_DISTANCE(pst[2], pst[3]);
+      if (++pn_ == 30) { debugf("  fx parts: flash %d tex %d bills %d parts %d\n", (int)TICKS_TO_US(pacc[0]/30), (int)TICKS_TO_US(pacc[1]/30), (int)TICKS_TO_US(pacc[2]/30), (int)TICKS_TO_US(pacc[3]/30)); memset(pacc, 0, sizeof(pacc)); pn_ = 0; } }
+    rspq_flush();
+    uint32_t wt2 = TICKS_READ();
+    { static uint32_t a, b; static int n; a += TICKS_DISTANCE(wt0, wt1); b += TICKS_DISTANCE(wt1, wt2);
+      if (++n == 30) { debugf("  wdraw effects %d us, flush %d us\n", (int)TICKS_TO_US(a / n), (int)TICKS_TO_US(b / n)); a = b = n = 0; } }
+#endif
     rdpq_sync_pipe();
     rdpq_set_mode_standard();
     rdpq_mode_begin();
@@ -1567,9 +1585,15 @@ void weapons_draw_effects(void)
 {
     // the RSP (tiny3d) has been drawing: rdpq's automatic syncs don't see that, so changing the
     // RDP mode or TMEM now without these hangs the real RDP (fine in emulators)
+#ifdef PROFX
+    uint32_t qa = TICKS_READ();
+#endif
     rdpq_sync_pipe();
     rdpq_sync_tile();
     rdpq_sync_load();
+#ifdef PROFX
+    { static uint32_t acc; static int n; acc += TICKS_DISTANCE(qa, TICKS_READ()); if (++n == 30) { debugf("  syncs %d us\n", (int)TICKS_TO_US(acc / n)); acc = n = 0; } }
+#endif
     // flashlight (GoldSrc EF_DIMLIGHT on the local player): a dynamic light placed where the view
     // trace hits, radius ~100 units, full brightness at its centre falling off to nothing at the edge.
     // Surfaces get an additive, smoothly shaded disc; characters inside the radius are lit (render.c).
@@ -1617,6 +1641,7 @@ void weapons_draw_effects(void)
             }
         }
     }
+    PSTAMP(0);
     // textured effects: beams with lgtning/laserbeam.spr, impact puffs and blood
     {
 
@@ -1696,9 +1721,11 @@ void weapons_draw_effects(void)
                 }
             }
         }
+        PSTAMP(1);
         draw_bills(false);
         rdpq_set_mode_standard();
     }
+    PSTAMP(2);
     // particles
     {
         bool anyp = false;
@@ -1711,15 +1738,21 @@ void weapons_draw_effects(void)
             float x, y;
             if (p->kind) continue;
             if (!project(p->o, &x, &y)) continue;
-            if (!anyp) { rdpq_set_mode_standard(); rdpq_mode_combiner(RDPQ_COMBINER_FLAT); rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY); rdpq_mode_zbuf(true, false); anyp = true; }
+            if (x < 0 || y < 0 || x > 318 || y > 238) continue;
+            if (!anyp) {
+                // 2x2 rectangles at a fixed depth (primitive Z) instead of two CPU-set-up triangles each
+                rdpq_set_mode_standard(); rdpq_mode_combiner(RDPQ_COMBINER_FLAT); rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+                rdpq_mode_zbuf(true, false); rdpq_mode_zoverride(true, 0, 0);
+                anyp = true;
+            }
             float a = (p->end - wtime) / p->life;
+            rdpq_set_prim_depth_raw((uint16_t)(proj_z * 0x7FFF), 0);
             rdpq_set_prim_color(RGBA32(p->r, p->g, p->b, (int)(255 * a)));
-            float z = proj_z, q0[3] = {x, y, z}, q1[3] = {x + 2, y, z}, q2[3] = {x, y + 2, z}, q3[3] = {x + 2, y + 2, z};
-            rdpq_triangle(&TRIFMT_ZBUF, q0, q1, q2);
-            rdpq_triangle(&TRIFMT_ZBUF, q1, q3, q2);
+            rdpq_fill_rectangle(x, y, x + 2, y + 2);
         }
         if (anyp) rdpq_set_mode_standard();
     }
+    PSTAMP(3);
     bool any = false;
     for (int i = 0; i < MAX_BEAMS; i++) if (beams[i].end >= wtime) any = true;
     for (int i = 0; i < 8; i++) if (flashes[i].end >= wtime) any = true;

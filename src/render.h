@@ -1,7 +1,7 @@
 #pragma once
 #include <libdragon.h>
 
-typedef struct { int tris, faces, ents, leaf, npcs; uint32_t t_wait, t_vis, t_world, t_ents, t_sky; } render_stats_t;
+typedef struct { int tris, faces, ents, leaf, npcs; uint32_t t_wait, t_vis, t_world, t_ents, t_sky, t_bents, t_npcs; } render_stats_t;
 extern render_stats_t rstats;
 extern color_t sky_color;
 

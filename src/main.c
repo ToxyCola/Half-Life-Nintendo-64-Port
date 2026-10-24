@@ -42,7 +42,7 @@ void pm_set_ontrain(bool on);
 
 // ------------------------------------------------------------------ state
 int trace_frames;
-static uint32_t prof_npc;
+static uint32_t prof_lights, prof_gtb, prof_npc, prof_ents, prof_pm, prof_play, prof_rend;
 static player_input_t input;
 static float view_angles[3];
 static bool noclip;
@@ -922,6 +922,15 @@ int main(void)
             debugf("t=%.1f ai %.1fms fps %.1f tris %d ents %d npcs %d leaf %d pos %.0f %.0f %.0f yaw %.0f%s\n", game_clock, TICKS_TO_US(prof_npc) / 1000.0f / (fps_frames ? fps_frames : 1), fps_value, rstats.tris,
                    rstats.ents, rstats.npcs, rstats.leaf, po[0], po[1], po[2], view_angles[1],
                    in_game ? "" : " (menu)");
+            {   // per-frame CPU milliseconds: game logic, then the renderer's parts (wait = for a free framebuffer)
+                float k = 1.0f / 1000.0f / (fps_frames ? fps_frames : 1);
+                debugf("  prof lights %.1f gtb %.1f ents %.1f npc %.1f pm %.1f play %.1f | rend %.1f: vis %.1f wait %.1f sky %.1f world %.1f mdl %.1f (brush %.1f npc %.1f)\n",
+                       TICKS_TO_US(prof_lights) * k, TICKS_TO_US(prof_gtb) * k, TICKS_TO_US(prof_ents) * k, TICKS_TO_US(prof_npc) * k, TICKS_TO_US(prof_pm) * k, TICKS_TO_US(prof_play) * k,
+                       TICKS_TO_US(prof_rend) * k, TICKS_TO_US(rstats.t_vis) * k, TICKS_TO_US(rstats.t_wait) * k, TICKS_TO_US(rstats.t_sky) * k,
+                       TICKS_TO_US(rstats.t_world) * k, TICKS_TO_US(rstats.t_ents) * k, TICKS_TO_US(rstats.t_bents) * k, TICKS_TO_US(rstats.t_npcs) * k);
+                prof_lights = prof_gtb = prof_ents = prof_pm = prof_play = prof_rend = 0;
+                rstats.t_vis = rstats.t_wait = rstats.t_sky = rstats.t_world = rstats.t_ents = rstats.t_bents = rstats.t_npcs = 0;
+            }
             fps_acc = 0; fps_frames = 0; prof_npc = 0;
         }
 
@@ -1069,15 +1078,22 @@ int main(void)
         }
         hud_dt = dt;
         pm_clear_basevelocity();
-        TR("E"); ents_think(dt); { extern void lights_think(float dt); lights_think(dt); }
+        uint32_t te0 = TICKS_READ();
+        TR("E"); ents_think(dt);
+        uint32_t te1 = TICKS_READ();
+        { extern void lights_think(float dt); lights_think(dt); }
+        prof_ents += TICKS_DISTANCE(te0, te1); prof_lights += TICKS_DISTANCE(te1, TICKS_READ());
 #ifndef NONPC
-        TR("N"); uint32_t tn0 = TICKS_READ(); game_trace_begin_frame(); npcs_think(dt); prof_npc += TICKS_DISTANCE(tn0, TICKS_READ());
+        TR("N"); uint32_t tn0 = TICKS_READ(); game_trace_begin_frame(); prof_gtb += TICKS_DISTANCE(tn0, TICKS_READ()); npcs_think(dt); prof_npc += TICKS_DISTANCE(tn0, TICKS_READ());
 #endif
+        uint32_t tp0 = TICKS_READ();
         TR("P"); pm_run(&input, dt);
         pm_unstick(dt);
+        uint32_t tp1 = TICKS_READ();
         TR("L"); player_think(dt); game_autosave_tick(); TR("W");
         weapons_think(dt, view_angles, weapon_fire && cam_ent < 0, weapon_fire2 && cam_ent < 0, weapon_reload, weapon_select,
                       cam_ent < 0 && !ents_player_driving() && !noclip);
+        prof_pm += TICKS_DISTANCE(tp0, tp1); prof_play += TICKS_DISTANCE(tp1, TICKS_READ());
 
         pm_get_origin(origin);
         pm_get_view_ofs(vofs);
@@ -1097,7 +1113,8 @@ int main(void)
         memcpy(last_eye, eye, 12);
         memcpy(last_ang, ang, 12);
 
-        TR("R"); render_frame(eye, ang, draw_hud); TR("r\n"); if (trace_frames > 0) trace_frames--;
+        uint32_t tr0 = TICKS_READ();
+        TR("R"); render_frame(eye, ang, draw_hud); prof_rend += TICKS_DISTANCE(tr0, TICKS_READ()); TR("r\n"); if (trace_frames > 0) trace_frames--;
         if (hud_end_of_game() || end_requested) { end_requested = false; leave_game(); continue; }
         if (pending_change) {
             render_frame(eye, ang, draw_hud_loading);

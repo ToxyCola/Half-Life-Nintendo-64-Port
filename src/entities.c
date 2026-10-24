@@ -2093,9 +2093,16 @@ void ents_think(float dt)
     pm_get_origin(porg);
     pm_get_hull(pmins, pmaxs);
 
+#ifdef PROFX
+    static uint32_t pt[128]; static int pframes; uint32_t tlast = TICKS_READ(); int ptype = 127;
+#define PROFX_STEP(ty) do { uint32_t _n = TICKS_READ(); pt[ptype & 127] += TICKS_DISTANCE(tlast, _n); tlast = _n; ptype = (ty); } while (0)
+#else
+#define PROFX_STEP(ty)
+#endif
     for (int i = 1; i < num_entities; i++) {
         entity_t *e = &entities[i];
         if (e->removed) continue;
+        PROFX_STEP(e->type);
         switch (e->type) {
         case ENT_DOOR:
         case ENT_DOOR_ROTATING:
@@ -2336,6 +2343,15 @@ void ents_think(float dt)
             break;
         }
     }
+#ifdef PROFX
+    PROFX_STEP(127);
+    if (++pframes >= 30) {
+        debugf("  ents prof (us/frame):");
+        for (int k = 0; k < 128; k++) if (pt[k] / pframes > TICKS_FROM_US(150)) debugf(" type%d=%d", k, (int)TICKS_TO_US(pt[k] / pframes));
+        debugf("\n");
+        memset(pt, 0, sizeof(pt)); pframes = 0;
+    }
+#endif
 }
 
 // h_battery.cpp CRecharge::Use / healthkit.cpp CWallHealth::Use (called every frame +use is held)

@@ -1024,6 +1024,16 @@ static bool player_in_pvs(npc_t *n)
     return pvs_buf[(l - 1) >> 3] & (1 << ((l - 1) & 7));
 }
 
+// floor light under the monster: only when it has moved or every so often (light styles)
+static void npc_relight(npc_t *n, float now)
+{
+    float d = fabsf(n->origin[0] - n->light_pos[0]) + fabsf(n->origin[1] - n->light_pos[1]) + fabsf(n->origin[2] - n->light_pos[2]);
+    if (d < 2 && now < n->light_time) return;
+    memcpy(n->light_pos, n->origin, 12);
+    n->light_time = now + 0.5f + (rand() % 100) / 400.0f;
+    bsp_light_at(n->origin, n->light);
+}
+
 static int klass(npc_t *n) { const mdef_t *d = D(n); return d ? d->klass : C_NONE; }
 
 // relationship table (monsters.cpp IRelationship, simplified): true = attack
@@ -1692,12 +1702,15 @@ static void ai_flee(npc_t *n, float dt)
 // touches it and reels them up into the mouth
 static void barnacle_think(npc_t *n, float dt)
 {
-    gtrace_t tr;
-    float st[3] = {n->origin[0], n->origin[1], n->origin[2] - 2};
-    float end[3] = {n->origin[0], n->origin[1], n->origin[2] - 2048};
-    game_trace(st, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, n - npcs, &tr);
-    if (n->ctl0 == 0) n->alt = fabsf(n->origin[2] - tr.endpos[2]);   // first think: already hanging down
-    float len = fabsf(n->origin[2] - tr.endpos[2]);
+    if (n->tongue_len <= 0) {   // the floor under it (traced once: barnacles never move)
+        gtrace_t tr;
+        float st[3] = {n->origin[0], n->origin[1], n->origin[2] - 2};
+        float end[3] = {n->origin[0], n->origin[1], n->origin[2] - 2048};
+        game_trace(st, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, n - npcs, &tr);
+        n->tongue_len = fmaxf(fabsf(n->origin[2] - tr.endpos[2]), 1);
+        n->alt = n->tongue_len;                 // already hanging down
+    }
+    float len = n->tongue_len;
     float dx = player_pos[0] - n->origin[0], dy = player_pos[1] - n->origin[1];
     float below = n->origin[2] - player_pos[2];
     // player hull top is 36 above the origin (standing): the tongue touches them when it reaches that
@@ -1782,8 +1795,17 @@ void npcs_think(float dt)
 #endif
 
     extern int trace_frames;
+#ifdef PROFX
+    static uint32_t pn[MAX_NPCS]; static int pframes; uint32_t tl = TICKS_READ(); int pi = -1;
+    static uint32_t ploop; uint32_t tloop0 = tl;
+#endif
+    const float frame_dt = dt;
     for (int i = 0; i < num_npcs; i++) {
         npc_t *n = &npcs[i];
+        dt = frame_dt;
+#ifdef PROFX
+        { uint32_t t = TICKS_READ(); if (pi >= 0) pn[pi] += TICKS_DISTANCE(tl, t); tl = t; pi = i; }
+#endif
         if (entities[n->ent].removed) continue;
         if (n->flags & NF_ITEM) { item_think(n, i); continue; }
         studio_t *m = n->model;
@@ -1799,6 +1821,17 @@ void npcs_think(float dt)
             else n->frame = s->numframes - 1;
         }
         if (n->sstate == NS_PLAYING || n->ai == AI_ATTACK) fire_anim_events(n, before, (int)n->frame);
+
+        // idle monsters the player can't see think a few times a second (HL: no Look() outside the
+        // PVS); scripts, combat, followers and anything moving keep full rate
+        n->think_dt += dt;
+        if (n->script < 0 && n->sstate == NS_IDLE && n->ai == AI_IDLE && !n->following && n->enemy < 0 && n->npath == 0 &&
+            n->onground && !player_in_pvs(n)) {
+            if (now < n->next_dormant) continue;
+            n->next_dormant = now + 0.25f + (rand() % 100) / 1000.0f;
+        }
+        dt = n->think_dt;
+        n->think_dt = 0;
 
         // ---- scripted sequences take priority
         if (n->script >= 0 || n->sstate != NS_IDLE) {
@@ -1818,7 +1851,7 @@ void npcs_think(float dt)
                     n->npath = 0;
                     set_seq(n, n->idle_seq);
                 }
-                bsp_light_at(n->origin, n->light);
+                npc_relight(n, now);
                 break;
             }
             case NS_TURNING: {
@@ -1870,7 +1903,7 @@ void npcs_think(float dt)
                 else if (tr.fraction < 1 && tr.normal[2] > 0.7f) { n->stuck_time = 0; n->onground = true; n->vz = 0; }
                 else if (tr.fraction < 1) { n->path[0][0] = n->path[0][1] = 0; }
                 if (n->stuck_time == 0) { n->ai = AI_COMBAT; set_seq(n, n->idle_seq); }
-                bsp_light_at(n->origin, n->light);
+                npc_relight(n, now);
                 continue;
             }
             if (n->seq_done) { n->ai = AI_COMBAT; set_seq(n, n->idle_seq); }
@@ -1916,8 +1949,18 @@ void npcs_think(float dt)
         default: break;
         }
         gravity(n, dt);
-        if (!(n->flags & NF_STATIC)) bsp_light_at(n->origin, n->light);
+        if (!(n->flags & NF_STATIC)) npc_relight(n, now);
     }
+#ifdef PROFX
+    { uint32_t t = TICKS_READ(); if (pi >= 0) pn[pi] += TICKS_DISTANCE(tl, t); ploop += TICKS_DISTANCE(tloop0, t); }
+    if (++pframes >= 30) {
+        debugf("  npc prof loop %d us/frame:", (int)TICKS_TO_US(ploop / pframes)); ploop = 0;
+        for (int k = 0; k < num_npcs; k++) if (pn[k] / pframes > TICKS_FROM_US(300))
+            debugf(" %s[%s ai%d ss%d]=%d", entities[npcs[k].ent].classname + 8, entities[npcs[k].ent].targetname, npcs[k].ai, npcs[k].sstate, (int)TICKS_TO_US(pn[k] / pframes));
+        debugf(" (of %d)\n", num_npcs);
+        memset(pn, 0, sizeof(pn)); pframes = 0;
+    }
+#endif
 }
 
 // solid NPC boxes for the player's movement code
