@@ -8,6 +8,10 @@ Everything comes from the game's own files:
   sprites/320hud3.spr  -> 320x240 HUD sprites: train speed indicator + "HALF-LIFE" title
   resource/logo.tga    -> the main-menu logo
   titles.txt           -> HUD text messages (chapter titles, credits, Hazard Course text)
+  sprites/*.spr        -> effect sprites (fx_*: explosions, muzzle flashes, beams, sparks, blood,
+                          spit and energy balls), see build_fx
+  resource/background  -> the title-screen background (title) and the loading lambda (lambda);
+                          a plain dark background when the install doesn't have it
 
 Output (filesystem/ui/):
   font_<size>.sprite + font_<size>.fnt     I4 glyph atlas + metrics ('HLF1', big-endian)
@@ -155,8 +159,156 @@ def build(valve, out, tmp):
     a.save(png)
     mksprite(png, ui)
 
+    build_fx(valve, ui, tmp)
+    build_title(valve, ui, tmp)
+
     shutil.copy(os.path.join(valve, 'titles.txt'), os.path.join(out, 'titles.txt'))
     print('ui: fonts %s, hud sprites, logo, titles.txt' % ', '.join(n for n, _ in SIZES))
+
+
+
+# ---------------------------------------------------------------- effect sprites
+def _pixels(im):
+    return list(im.get_flattened_data() if hasattr(im, 'get_flattened_data') else im.getdata())
+
+
+def _norm(im):
+    """additive art -> colour at full brightness, alpha = brightness (the RDP's additive blend
+    overflows, so these are alpha-blended: the same look over the dark backgrounds they sit on)"""
+    im = im.convert('RGB')
+    out = []
+    for r, g, b in _pixels(im):
+        m = max(r, g, b)
+        out.append((0, 0, 0, 0) if m == 0 else (r * 255 // m, g * 255 // m, b * 255 // m, m))
+    o = Image.new('RGBA', im.size)
+    o.putdata(out)
+    return o
+
+
+def _white(im):
+    """white, alpha = brightest channel (tinted at draw time)"""
+    im = im.convert('RGB')
+    a = Image.new('L', im.size)
+    a.putdata([max(p) for p in _pixels(im)])
+    o = Image.new('RGBA', im.size, (255, 255, 255, 0))
+    o.putalpha(a)
+    return o
+
+
+def build_fx(valve, ui, tmp):
+    """fx_*.sprite from the game's sprites (src/weapons.c draws them as billboards and beams)"""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import spr
+    sd = os.path.join(valve, 'sprites')
+    names = {f.lower(): f for f in os.listdir(sd)} if os.path.isdir(sd) else {}
+
+    def frames(n):
+        f = names.get(n + '.spr')
+        return spr.read_spr(os.path.join(sd, f))[1] if f else None
+
+    made, missing = 0, []
+
+    def out(name, im, fmt, size=None, filt=Image.LANCZOS):
+        nonlocal made
+        if size and im.size != size:
+            im = im.resize(size, filt)
+        png = os.path.join(tmp, name + '.png')
+        im.save(png)
+        mksprite(png, ui, fmt)
+        made += 1
+
+    jobs = [
+        # name prefix, sprite, frames, recipe, format, size
+        ('fx_expl', 'zerogxplode', list(range(0, 15, 2)), _norm, 'RGBA32', (32, 32)),   # 8 of its 15 frames
+        ('fx_muzzle1', 'muzzleflash1', [0], _norm, 'RGBA32', (32, 32)),
+        ('fx_muzzle2', 'muzzleflash2', [0], _norm, 'RGBA32', (32, 32)),
+        ('fx_muzzle3', 'muzzleflash3', [0], _norm, 'RGBA32', (32, 32)),
+        ('fx_xspark', 'xspark1', list(range(11)), _norm, 'RGBA32', None),              # gluon gun spark
+        ('fx_xbeam', 'xbeam1', [0], _norm, 'RGBA32', None),                            # gluon gun beam
+        ('fx_flare', 'flare1', [0], _white, 'RGBA32', (32, 32)),                       # env_glow fallback
+        ('fx_spit', 'bigspit', [0], lambda f: f.convert('RGBA'), 'RGBA32', None),      # bullsquid
+        ('fx_mspit', 'mommaspit', [0], lambda f: f.convert('RGBA'), 'RGBA32', None),   # gonarch
+        ('fx_nball', 'nhth1', [0], _norm, 'RGBA32', (32, 32)),                         # nihilanth zap
+        ('fx_cball', 'xspark4', [0], _norm, 'RGBA32', None),                           # controller ball
+        ('fx_tball', 'exit1', [0], _norm, 'RGBA32', (32, 32)),                         # teleport ball
+        ('fx_blood', 'blood', [0], lambda f: f.convert('RGBA'), 'IA8', (32, 32), Image.BILINEAR),
+        ('fx_wallpuff', 'wallpuff', [0], _norm, 'IA8', (32, 32), Image.BILINEAR),
+        # beams: the sprite's width runs across the beam (src/weapons.c)
+        ('fx_lgtning', 'lgtning', [0], lambda f: f.convert('L').transpose(Image.Transpose.TRANSPOSE), 'I8', None),
+        ('fx_laserbeam', 'laserbeam', [0], lambda f: f.convert('LA').transpose(Image.Transpose.TRANSPOSE).convert('L'), 'I8', (32, 16), Image.BILINEAR),
+    ]
+    for job in jobs:
+        name, src, idx, recipe, fmt, size = job[:6]
+        filt = job[6] if len(job) > 6 else Image.LANCZOS
+        fr = frames(src)
+        if not fr:
+            missing.append(src)
+            continue
+        many = len(idx) > 1
+        for k, i in enumerate(idx):
+            out('%s%d' % (name, k) if many else name, recipe(fr[min(i, len(fr) - 1)]), fmt, size, filt)
+    print('effect sprites: %d%s' % (made, (', missing: ' + ' '.join(missing)) if missing else ''))
+
+
+# ---------------------------------------------------------------- title background
+def build_title(valve, ui, tmp):
+    """title.sprite (320x240) from the PC menu background (resource/background/800_<row>_<col>.tga
+    tiles, 256x256 each, the 800x600 picture) and lambda.sprite (the loading icon: the logo
+    circle in it, tinted red). Without those files: a plain dark background and a drawn ring."""
+    bd = os.path.join(valve, 'resource', 'background')
+    tiles = {}
+    if os.path.isdir(bd):
+        files = {f.lower(): f for f in os.listdir(bd)}
+        for loading in ('', '_loading'):
+            for r in (1, 2, 3):
+                for c in 'abcd':
+                    f = files.get('800_%d_%s%s.tga' % (r, c, loading))
+                    if f:
+                        tiles[(r, c)] = os.path.join(bd, f)
+            if len(tiles) == 12:
+                break
+            tiles = {}
+    if len(tiles) == 12:
+        full = Image.new('RGB', (1024, 768))
+        for (r, c), f in tiles.items():
+            full.paste(Image.open(f).convert('RGB').resize((256, 256)), ('abcd'.index(c) * 256, (r - 1) * 256))
+        bg = full.crop((0, 0, 800, 600)).resize((320, 240), Image.LANCZOS)
+        # the lambda logo circle sits at about (238, 238) in the 800x600 picture
+        cx, cy, rad = 95, 95, 64
+        crop = bg.crop((cx - rad, cy - rad, cx + rad, cy + rad)).convert('L').resize((32, 32), Image.LANCZOS)
+        src = 'resource/background'
+    else:
+        if os.path.exists(os.path.join(ui, 'title.sprite')) and os.path.exists(os.path.join(ui, 'lambda.sprite')):
+            print('title background: kept the existing one (no resource/background in this install)')
+            return
+        import random
+        rnd = random.Random(64)
+        bg = Image.new('RGB', (320, 240))
+        bg.putdata([(v, v, v) for v in (18 + rnd.randint(0, 10) for _ in range(320 * 240))])
+        bg = bg.filter(ImageFilter.GaussianBlur(1.2))
+        from PIL import ImageDraw
+        crop = Image.new('L', (32, 32))
+        d = ImageDraw.Draw(crop)
+        d.ellipse((2, 2, 29, 29), outline=230, width=3)
+        d.line((10, 8, 22, 25), fill=230, width=3)
+        d.line((16, 16, 10, 25), fill=230, width=3)
+        src = 'drawn (no resource/background in this install)'
+    png = os.path.join(tmp, 'title.png')
+    bg.save(png)
+    mksprite(png, ui, 'RGBA16')
+    # lambda: red tint, round
+    lam = Image.new('RGBA', (32, 32))
+    lp = []
+    for i, v in enumerate(_pixels(crop)):
+        x, y = i % 32, i // 32
+        inside = (x - 15.5) ** 2 + (y - 15.5) ** 2 <= 16 * 16
+        g = min(255, v)
+        lp.append((255 if v > 8 else v * 32, g, g, 255 if inside else 0))
+    lam.putdata(lp)
+    png = os.path.join(tmp, 'lambda.png')
+    lam.save(png)
+    mksprite(png, ui, 'RGBA16')
+    print('title background: %s' % src)
 
 
 def parse_titles(path):

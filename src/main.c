@@ -1095,6 +1095,25 @@ int main(void)
         { extern void weapons_test_select(int id); static bool sel; if (in_game && game_clock > 2 && !sel) { sel = true; weapons_test_select(WEAPON_CROWBAR); } }
         { static float nt; if (in_game && game_clock > nt) { nt = game_clock + 1; for (int i = 0; i < num_npcs; i++) if (!strcmp(entities[npcs[i].ent].classname, "monster_scientist_dead")) debugf("BODY %d %.0f %.0f %s\n", i, npcs[i].origin[0], npcs[i].origin[1], entities[npcs[i].ent].removed ? "GONE" : "there"); } }
 #endif
+#ifdef TESTSPRDUMP
+        { static bool done; if (!done) { done = true;
+            const char *names[] = {"fx_blood","fx_cball","fx_expl0","fx_expl3","fx_flare","fx_laserbeam","fx_lgtning","fx_mspit","fx_muzzle1","fx_muzzle2","fx_muzzle3","fx_nball","fx_spit","fx_tball","fx_wallpuff","fx_xbeam","fx_xspark0","lambda","title"};
+            for (int i = 0; i < (int)(sizeof names / sizeof *names); i++) {
+                char p[64]; snprintf(p, sizeof p, "rom:/ui/%s.sprite", names[i]);
+                sprite_t *sp = sprite_load(p);
+                if (!sp) { debugf("SPRDUMP %s missing\n", names[i]); continue; }
+                surface_t s = sprite_get_pixels(sp);
+                uint32_t sum = 0; const uint8_t *px = s.buffer;
+                for (int y = 0; y < s.height; y++) for (int x = 0; x < s.stride; x++) sum = sum * 31 + px[y * s.stride + x];
+                debugf("SPRDUMP %s %dx%d fmt %s hs %d vs %d stride %d sum %08lx\n", names[i], sp->width, sp->height, tex_format_name(sprite_get_format(sp)), sp->hslices, sp->vslices, s.stride, (unsigned long)sum);
+                // first row of pixels (to recognise the source)
+                char hex[200]; int n = 0; for (int x = 0; x < s.stride && n < 190; x++) n += snprintf(hex + n, sizeof hex - n, "%02x", px[(s.height / 2) * s.stride + x]);
+                debugf("SPRROW %s %s\n", names[i], hex);
+                if (!strcmp(names[i], "fx_blood") || !strcmp(names[i], "fx_wallpuff") || !strcmp(names[i], "fx_laserbeam"))
+                    for (int y = 0; y < s.height; y++) { char h2[200]; int m = 0; for (int x = 0; x < s.stride && m < 190; x++) m += snprintf(h2 + m, sizeof h2 - m, "%02x", px[y * s.stride + x]); debugf("SPRFULL %s %d %s\n", names[i], y, h2); }
+                sprite_free(sp);
+            } } }
+#endif
 #ifdef TESTCORPSE
         {   // weapons reach corpses: a downward trace onto each body, then crowbar hits until it gibs
             static float nt = 3; static int k;

@@ -347,7 +347,10 @@ def _conv_one(job):
     out = os.path.join(dstdir, base + '.wav64')
     low = os.path.join(dstdir, base.lower() + '.wav64')
     if r.returncode == 0 and os.path.exists(out) and out != low:
-        os.replace(out, low)
+        # via a temporary name: on a case-insensitive filesystem (Windows) a direct rename that
+        # only changes case can do nothing
+        os.replace(out, low + '.tmp')
+        os.replace(low + '.tmp', low)
     return src, r.returncode, r.stderr.strip()[:300]
 
 
