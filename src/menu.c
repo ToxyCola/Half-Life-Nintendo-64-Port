@@ -7,6 +7,10 @@
 // Text is Half-Life's own font (gfx.wad CREDITSFONT) - see font.c.
 //
 // Pad: D-pad / stick to move, A to choose, B to go back, START to resume, Z/R to change tabs.
+#ifndef HUD_SAFE_X
+#define HUD_SAFE_X 12
+#define HUD_SAFE_Y 9
+#endif
 #include <libdragon.h>
 #include <string.h>
 #include <stdlib.h>
@@ -500,7 +504,7 @@ void menu_draw(void)
             rdpq_sprite_blit(bg, 0, 0, NULL);
             rdpq_set_mode_standard();
         }
-        text(FONT_SMALL, SW - 4 - font_width(FONT_SMALL, "Ported by ToxyCola using Claude Opus 5.5"), SH - 12,
+        text(FONT_SMALL, SW - 4 - HUD_SAFE_X - font_width(FONT_SMALL, "Ported by ToxyCola using Claude Opus 5.5"), SH - 12 - HUD_SAFE_Y,
              C_TEXT_BRIGHT, "Ported by ToxyCola using Claude Opus 5.5");
     }
     draw_main();

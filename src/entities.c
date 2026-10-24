@@ -169,11 +169,83 @@ static const char *button_sound(int n)
 
 // ------------------------------------------------------------------ event queue (delayed target firing)
 #define MAX_EVENTS 256
-typedef struct { char name[48]; float time; int activator; } event_t;
+typedef struct { char name[48]; float time; int activator; int caller; } event_t;
 static event_t events[MAX_EVENTS];
 static int num_events;
 static int fire_depth;
 static int cur_activator = -1;   // entity that caused the current FireTargets (for func_trackautochange)
+static int cur_caller = -1;      // entity whose target is being fired (pCaller: multisource sources)
+
+// ---- global states (CGlobalState: env_global, multisource/trigger_auto "globalstate"); they live
+// across maps and in saved games
+#define MAX_GLOBALS 24
+typedef struct { char name[40]; int8_t state; } gvar_t;   // 0 off, 1 on, 2 dead
+static gvar_t gvars[MAX_GLOBALS];
+static int num_gvars;
+static int gstate_find(const char *name)
+{
+    for (int i = 0; i < num_gvars; i++) if (!strcasecmp(gvars[i].name, name)) return i;
+    return -1;
+}
+int ents_global_state(const char *name)   // -1 unknown
+{
+    int i = name && name[0] ? gstate_find(name) : -1;
+    return i < 0 ? -1 : gvars[i].state;
+}
+static void gstate_set(const char *name, int state)
+{
+    if (!name || !name[0]) return;
+    int i = gstate_find(name);
+    if (i < 0) {
+        if (num_gvars >= MAX_GLOBALS) return;
+        i = num_gvars++;
+        strncpy(gvars[i].name, name, sizeof(gvars[i].name) - 1);
+    }
+    gvars[i].state = state;
+    debugf("global %s = %d\n", name, state);
+}
+void ents_globals_reset(void) { num_gvars = 0; memset(gvars, 0, sizeof(gvars)); }
+int ents_globals_save(uint8_t *b, int max)
+{
+    int n = num_gvars * (int)sizeof(gvar_t) + 1;
+    if (n > max) return 0;
+    b[0] = num_gvars;
+    memcpy(b + 1, gvars, num_gvars * sizeof(gvar_t));
+    return n;
+}
+void ents_globals_load(const uint8_t *b, int len)
+{
+    ents_globals_reset();
+    if (len < 1) return;
+    int n = b[0];
+    if (n > MAX_GLOBALS || 1 + n * (int)sizeof(gvar_t) > len) return;
+    num_gvars = n;
+    memcpy(gvars, b + 1, n * sizeof(gvar_t));
+}
+static bool global_ok(entity_t *e)   // an entity with "globalstate" works only while that state is on
+{
+    const char *g = ent_value(e, "globalstate");
+    if (!g || !g[0]) return true;
+    char nm[40];
+    str_copy(nm, g, sizeof(nm));
+    return ents_global_state(nm) == 1;
+}
+
+// ---- multisource (CMultiSource): triggered when every entity that targets it has switched it on
+#define MAX_MSOURCES 64
+typedef struct { int16_t ent, n; int16_t src[24]; uint32_t on; } msrc_t;
+static msrc_t msrc[MAX_MSOURCES];
+static int num_msrc;
+static msrc_t *msrc_for(int ent) { for (int i = 0; i < num_msrc; i++) if (msrc[i].ent == ent) return &msrc[i]; return NULL; }
+static bool msource_triggered(entity_t *ms)
+{
+    msrc_t *m = msrc_for((int)(ms - entities));
+    if (m) {
+        uint32_t all = m->n >= 32 ? 0xffffffffu : ((1u << m->n) - 1);
+        if ((m->on & all) != all) return false;
+    } else if (ms->msource_count < ms->code) return false;
+    return global_ok(ms);
+}
 
 static bool in_event_pass;
 
@@ -186,6 +258,7 @@ static void queue_event(const char *name, float time)
     str_copy(events[num_events].name, name, 48);
     events[num_events].time = time;
     events[num_events].activator = cur_activator;
+    events[num_events].caller = cur_caller;
     num_events++;
 }
 
@@ -249,7 +322,10 @@ void ents_fire_entity_target(entity_t *e)
         for (int i = ents_find_targetname(name, 1); i >= 0; i = ents_find_targetname(name, i + 1))
             entities[i].removed = true, entities[i].visible = false, entities[i].solid = SOLID_NOT;
     }
+    int oldc = cur_caller;
+    cur_caller = (int)(e - entities);
     queue_fire(e->target, e->delay);
+    cur_caller = oldc;
 }
 
 // ------------------------------------------------------------------ movers
@@ -398,7 +474,7 @@ static bool master_ok(entity_t *e)
     if (i < 0) return true;   // "Master was null or not a master!" -> treated as triggered
     entity_t *ms = &entities[i];
     if (ms->type != ENT_MULTISOURCE) return true;
-    return ms->msource_count >= ms->code;
+    return msource_triggered(ms);
 }
 
 static void parse_color(const entity_t *e, const char *key, uint8_t *c, int n)
@@ -561,9 +637,16 @@ static void special_use(entity_t *e)
 {
     switch (e->type) {
     case ENT_MULTISOURCE:
-        // CMultiSource::Use: a source switched on (sources are not told apart here)
-        e->msource_count++;
-        if (e->msource_count >= e->code) fire_entity_target(e);
+    {   // CMultiSource::Use: the calling source toggles its switch; all on (and the global state) fires
+        msrc_t *m = msrc_for((int)(e - entities));
+        if (m) {
+            int k = -1;
+            for (int j = 0; j < m->n && j < 24; j++) if (m->src[j] == cur_caller) { k = j; break; }
+            if (k < 0) for (int j = 0; j < m->n && j < 24; j++) if (!(m->on & (1u << j))) { k = j; break; }   // caller unknown
+            if (k >= 0) m->on ^= 1u << k;
+        } else e->msource_count++;
+        if (msource_triggered(e)) fire_entity_target(e);
+    }
         break;
     case ENT_ENV_FADE: {
         // effects.cpp CFade::Use
@@ -779,6 +862,30 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
 
 void game_effect_blood(const float *o);
 void game_effect_particles(const float *o, int count, float speed, int r, int g, int b, float life, float grav);
+// CMomentaryRotButton::UpdateTarget: the button's position (0..1) drives its momentary doors; other
+// targets are used once when it starts turning
+static void momentary_update_targets(entity_t *b, bool first)
+{
+    if (!b->target[0]) return;
+    for (int t = ents_find_targetname(b->target, 1); t >= 0; t = ents_find_targetname(b->target, t + 1)) {
+        entity_t *d = &entities[t];
+        if (d->type == ENT_MOMENTARY_DOOR) {
+            for (int k = 0; k < 3; k++) d->dest[k] = d->pos1[k] + (d->pos2[k] - d->pos1[k]) * b->mpos;
+        } else if (first) {
+            int oldc = cur_caller;
+            cur_caller = (int)(b - entities);
+            ent_use(d);
+            cur_caller = oldc;
+        }
+    }
+}
+static void momentary_set(entity_t *b, float pos, bool first)
+{
+    b->mpos = fminf(fmaxf(pos, 0), 1);
+    for (int k = 0; k < 3; k++) b->angles[k] = b->ang1[k] + b->movedir[k] * b->dist * b->mpos;
+    momentary_update_targets(b, first);
+}
+
 // CMonsterMaker::MakeMonster: one of "monstertype" at the maker, named "netname", if there is room
 // and the live/total limits allow it; fires the maker's target
 extern int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker);
@@ -970,6 +1077,50 @@ static void ent_use(entity_t *e)
     case ENT_GLOBAL_BEAM:
         e->active = !e->active;
         break;
+    case ENT_ENV_GLOBAL: {
+        // CEnvGlobal::Use: triggermode 0 off, 1 on, 2 dead, 3 toggle
+        char g[40];
+        str_copy(g, ent_value(e, "globalstate"), sizeof(g));
+        int mode = (int)ent_float(e, "triggermode", 0), cur = ents_global_state(g), st;
+        if (mode == 3) st = cur == 1 ? 0 : 1;
+        else st = mode == 2 ? 2 : mode;
+        gstate_set(g, st);
+        break;
+    }
+    case ENT_LOADSAVED: {
+        // CRevertSaved: fade out, show the message, then load the last save (start the map again)
+        uint8_t c[4];
+        parse_color(e, "rendercolor", c, 3);
+        c[3] = (uint8_t)ent_float(e, "renderamt", 255);
+        hud_fade(c, ent_float(e, "duration", 2), ent_float(e, "holdtime", 2), FFADE_OUT | FFADE_STAYOUT);
+        const char *msg = ent_value(e, "message");
+        if (msg && msg[0]) hud_show_message(msg);
+        extern void game_request_restart(float delay);
+        game_request_restart(ent_float(e, "loadtime", 0) + ent_float(e, "duration", 2) + 0.5f);
+        break;
+    }
+    case ENT_PENDULUM:
+        e->active = !e->active;
+        break;
+    case ENT_MORTAR_FIELD: {
+        // CFuncMortarField::FieldUse: shells come down inside the field (m_iCount, m_flSpread)
+        if (e->model <= 0) break;
+        bmodel_t *bm = &world.bmodels[e->model];
+        int count = (int)ent_float(e, "m_iCount", 1);
+        float spread = ent_float(e, "m_flSpread", 64);
+        float c[3];
+        for (int k = 0; k < 3; k++) c[k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f;
+        int ctl = (int)ent_float(e, "m_fControl", 0);
+        if (ctl == 1) { float po[3]; pm_get_origin(po); c[0] = po[0]; c[1] = po[1]; }   // at the activator
+        extern int proj_spawn_vel(int kind, const float *origin, const float *vel, int owner, int target);
+        snd_emit(-1, CHAN_AUTO, "weapons/mortar.wav", 1, ATTN_NONE, PITCH_NORM, c);
+        for (int n = 0; n < count && n < 12; n++) {
+            float o[3] = {c[0] + ((rand() % 200) - 100) / 100.0f * spread, c[1] + ((rand() % 200) - 100) / 100.0f * spread, e->origin[2] + bm->maxs[2] - 8};
+            float v[3] = {0, 0, -900 - rand() % 300};
+            proj_spawn_vel(2 /* P_ARGRENADE */, o, v, -1, -1);
+        }
+        break;
+    }
     case ENT_MONSTERMAKER:
         // CMonsterMaker::CyclicUse makes one per use; ToggleUse switches the timed maker on and off
         if (e->spawnflags & 4) maker_make(e);
@@ -1001,13 +1152,13 @@ static enttype_t classify(const char *cn)
         {"path_track", ENT_PATH_TRACK}, {"multisource", ENT_MULTISOURCE}, {"env_fade", ENT_ENV_FADE},
         {"env_message", ENT_ENV_MESSAGE}, {"game_text", ENT_GAME_TEXT}, {"trigger_camera", ENT_CAMERA},
         {"scripted_sentence", ENT_SENTENCE}, {"env_render", ENT_ENV_RENDER}, {"trigger_endsection", ENT_ENDSECTION},
-        {"func_guntarget", ENT_WALL}, {"func_mortar_field", ENT_INVISIBLE_BRUSH},
+        {"func_guntarget", ENT_WALL}, {"func_mortar_field", ENT_MORTAR_FIELD},
         {"func_tank", ENT_WALL}, {"func_tankcontrols", ENT_INVISIBLE_BRUSH}, {"func_recharge", ENT_RECHARGE},
-        {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_WALL}, {"func_friction", ENT_INVISIBLE_BRUSH},
-        {"trigger_autosave", ENT_INVISIBLE_BRUSH}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
+        {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_MOMENTARY_BUTTON}, {"func_friction", ENT_FRICTION},
+        {"trigger_autosave", ENT_AUTOSAVE}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
         {"ambient_generic", ENT_AMBIENT}, {"speaker", ENT_SPEAKER}, {"env_shake", ENT_ENV_SHAKE},
-        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_explosion", ENT_ENV_EXPLOSION},
-        {"trigger_monsterjump", ENT_INVISIBLE_BRUSH}, {"trigger_gravity", ENT_INVISIBLE_BRUSH},
+        {"player_weaponstrip", ENT_WEAPONSTRIP}, {"env_beam", ENT_GLOBAL_BEAM}, {"env_laser", ENT_GLOBAL_BEAM}, {"env_spark", ENT_ENV_SPARK}, {"monstermaker", ENT_MONSTERMAKER}, {"env_global", ENT_ENV_GLOBAL}, {"player_loadsaved", ENT_LOADSAVED}, {"func_pendulum", ENT_PENDULUM}, {"env_explosion", ENT_ENV_EXPLOSION},
+        {"trigger_monsterjump", ENT_INVISIBLE_BRUSH}, {"trigger_gravity", ENT_TRIGGER_GRAVITY},
         {"trigger_transition", ENT_INVISIBLE_BRUSH}, {"func_vehiclecontrols", ENT_INVISIBLE_BRUSH},
         {"trigger", ENT_INVISIBLE_BRUSH},
         {"env_bubbles", ENT_INVISIBLE_BRUSH}, {"func_tankmortar", ENT_WALL}, {"func_tanklaser", ENT_WALL},
@@ -1295,6 +1446,48 @@ static void spawn_entity(entity_t *e)
     case ENT_GLOBAL_BEAM:
         e->active = (e->spawnflags & 1) || !e->targetname[0];
         break;
+    case ENT_ENV_GLOBAL: {
+        // CEnvGlobal::Spawn: SF_GLOBAL_SET puts the initial state in if the state isn't known yet
+        char g[40];
+        str_copy(g, ent_value(e, "globalstate"), sizeof(g));
+        if ((e->spawnflags & 1) && g[0] && ents_global_state(g) < 0) gstate_set(g, (int)ent_float(e, "initialstate", 0));
+        e->visible = false; e->solid = SOLID_NOT;
+        break;
+    }
+    case ENT_TRIGGER_GRAVITY:
+    case ENT_FRICTION:
+    case ENT_AUTOSAVE:
+    case ENT_MORTAR_FIELD:
+        e->visible = false;
+        e->solid = SOLID_NOT;
+        break;
+    case ENT_MOMENTARY_DOOR:
+        // CMomentaryDoor: a door whose position follows a momentary_rot_button
+        set_movedir(e);
+        if (e->speed == 0) e->speed = 100;
+        model_size(e, size);
+        memcpy(e->pos1, e->origin, 12);
+        {
+            float d = fabsf(e->movedir[0] * (size[0] - 2)) + fabsf(e->movedir[1] * (size[1] - 2)) +
+                      fabsf(e->movedir[2] * (size[2] - 2)) - e->lip;
+            for (int i = 0; i < 3; i++) e->pos2[i] = e->pos1[i] + e->movedir[i] * d;
+        }
+        memcpy(e->dest, e->origin, 12);
+        break;
+    case ENT_MOMENTARY_BUTTON:
+    case ENT_PENDULUM:
+        // CMomentaryRotButton / CPendulum: turn about an axis (CBaseToggle::AxisDir)
+        memset(e->movedir, 0, 12);
+        if (e->spawnflags & 64) e->movedir[2] = 1;
+        else if (e->spawnflags & 128) e->movedir[0] = 1;
+        else e->movedir[1] = 1;
+        if (e->type == ENT_MOMENTARY_BUTTON && (e->spawnflags & 2)) for (int i = 0; i < 3; i++) e->movedir[i] = -e->movedir[i];
+        memcpy(e->ang1, e->angles, 12);
+        if (e->speed == 0) e->speed = e->type == ENT_PENDULUM ? 100 : 100;
+        e->mpos = 0; e->mdir = -1; e->mlast = -10;
+        if (e->type == ENT_MOMENTARY_BUTTON && (e->spawnflags & 16)) e->solid = SOLID_NOT;
+        if (e->type == ENT_PENDULUM) e->active = (e->spawnflags & 1) || !e->targetname[0];
+        break;
     case ENT_MONSTERMAKER:
         e->maker_count = (int)ent_float(e, "monstercount", -1);
         e->maker_maxlive = (int)ent_float(e, "m_imaxlivechildren", -1);
@@ -1322,6 +1515,7 @@ static int ents_gen;   // bumped for every map (and saved game) spawn
 void ents_spawn_all(void)
 {
     ents_gen++;
+    num_msrc = 0;
     memset(beam_cache, 0, sizeof(beam_cache));
     memset(master_cache, 0, sizeof(master_cache));
     num_pushables = 0;
@@ -1360,9 +1554,15 @@ void ents_spawn_all(void)
         }
         if (e->type == ENT_MULTISOURCE) {
             int n = 0;
+            msrc_t *m = num_msrc < MAX_MSOURCES ? &msrc[num_msrc++] : NULL;
+            if (m) { memset(m, 0, sizeof(*m)); m->ent = i; }
             for (int j = 1; j < num_entities; j++)
-                if (entities[j].target[0] && !strcasecmp(entities[j].target, e->targetname)) n++;
-            e->code = n > 0 ? n : 1;          // sources needed
+                if (entities[j].target[0] && !strcasecmp(entities[j].target, e->targetname)) {
+                    if (m && n < 24) m->src[n] = j;
+                    n++;
+                }
+            if (m) m->n = n > 24 ? 24 : n;
+            e->code = n;          // sources needed (0: only the global state decides)
         }
         if (e->type == ENT_SENTENCE && !e->targetname[0]) e->nextthink = 1.0f;   // starts by itself
     }
@@ -2172,8 +2372,10 @@ static void trackchange_think(entity_t *e, int idx, float dt)
     }
 }
 
+static float frame_dt_for_use;
 void ents_think(float dt)
 {
+    frame_dt_for_use = dt;
     if (pushable_settle_pending) { settle_pushables(); game_trace_begin_frame(); }
     g_time += dt;
     // delayed events
@@ -2182,12 +2384,14 @@ void ents_think(float dt)
         if (events[i].time <= g_time) {
             char name[48];
             memcpy(name, events[i].name, 48);
-            int act = events[i].activator;
+            int act = events[i].activator, caller = events[i].caller;
             events[i] = events[--num_events];
-            int old = cur_activator;
+            int old = cur_activator, oldc = cur_caller;
             cur_activator = act;
+            cur_caller = caller;
             ents_fire_targets(name);
             cur_activator = old;
+            cur_caller = oldc;
         } else i++;
     }
     in_event_pass = false;
@@ -2217,6 +2421,8 @@ void ents_think(float dt)
             case ENT_SPEAKER: case ENT_TARGET_CDAUDIO: case ENT_TRACKAUTO: case ENT_TRACKTRAIN: case ENT_TRAIN:
             case ENT_TRIGGER_AUTO: case ENT_TRIGGER_CHANGELEVEL: case ENT_TRIGGER_HURT: case ENT_TRIGGER_MULTIPLE:
             case ENT_TRIGGER_ONCE: case ENT_TRIGGER_PUSH: case ENT_TRIGGER_TELEPORT:
+            case ENT_TRIGGER_GRAVITY: case ENT_FRICTION: case ENT_AUTOSAVE: case ENT_MOMENTARY_DOOR:
+            case ENT_MOMENTARY_BUTTON: case ENT_PENDULUM:
                 think_list[num_think++] = i;
                 break;
             default:
@@ -2226,6 +2432,7 @@ void ents_think(float dt)
         think_built = num_entities;
         think_gen = ents_gen;
     }
+    float friction_touch = 1;   // func_friction under the player this frame
     for (int ti = 0; ti < num_think; ti++) {
         int i = think_list[ti];
         entity_t *e = &entities[i];
@@ -2302,7 +2509,7 @@ void ents_think(float dt)
         case ENT_TRIGGER_AUTO:
             // triggers.cpp CAutoTrigger: fire once shortly after the map starts
             if (!e->removed && g_time > 0.2f) {
-                queue_fire(e->target, e->delay);
+                if (global_ok(e)) queue_fire(e->target, e->delay);   // CAutoTrigger: only with its global state on
                 e->removed = true;
             }
             break;
@@ -2377,6 +2584,52 @@ void ents_think(float dt)
                 if (da > 2500.0f * 2500.0f && db > 2500.0f * 2500.0f) break;
                 if (bc->laser) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, pb, bc->c[0], bc->c[1], bc->c[2]); }
                 else game_effect_lightning(pa, pb, bc->c[0], bc->c[1], bc->c[2]);
+            }
+            break;
+        case ENT_TRIGGER_GRAVITY:
+            // CTriggerGravity::GravityTouch: the player keeps this gravity until another trigger changes it
+            if (e->model > 0 && player_touches(e, porg, pmins, pmaxs)) {
+                extern void pm_set_gravity(float g);
+                float g = ent_float(e, "gravity", 1);
+                pm_set_gravity(g > 0 ? g : 1);
+            }
+            break;
+        case ENT_FRICTION:
+            if (e->model > 0 && player_touches(e, porg, pmins, pmaxs)) friction_touch = ent_float(e, "modifier", 100) / 100.0f;
+            break;
+        case ENT_AUTOSAVE:
+            if (e->model > 0 && player_touches(e, porg, pmins, pmaxs)) {
+                extern void game_request_autosave(void);
+                game_request_autosave();
+                e->removed = true;
+            }
+            break;
+        case ENT_MOMENTARY_DOOR: {
+            float d[3], l2 = 0;
+            for (int k = 0; k < 3; k++) { d[k] = e->dest[k] - e->origin[k]; l2 += d[k] * d[k]; }
+            if (l2 > 0.01f) {
+                float l = sqrtf(l2), step = e->speed * dt, delta[3];
+                for (int k = 0; k < 3; k++) delta[k] = l <= step ? d[k] : d[k] / l * step;
+                if (!e->snd) { e->snd = 1; if (e->movesnd) snd_emit(i, CHAN_STATIC, plat_move_sound(e->movesnd), 1, ATTN_NORM, PITCH_NORM, NULL); }
+                push_entity(e, i, delta, 0);
+            } else if (e->snd) {
+                e->snd = 0;
+                snd_stop(i, CHAN_STATIC, NULL);
+            }
+            break;
+        }
+        case ENT_MOMENTARY_BUTTON: {
+            // let go: turn back at "returnspeed" (CMomentaryRotButton::Return)
+            float rs = ent_float(e, "returnspeed", 0);
+            if (g_time - e->mlast > 0.15f && rs > 0 && e->mpos > 0) momentary_set(e, e->mpos - rs * dt / (e->dist > 0 ? e->dist : 90), false);
+            break;
+        }
+        case ENT_PENDULUM:
+            if (e->active) {
+                // CPendulum::Swing: back and forth through "distance" degrees
+                e->mpos += dt * e->speed / (e->dist > 0 ? e->dist : 90);
+                float a = sinf(e->mpos) * e->dist * 0.5f;
+                for (int k = 0; k < 3; k++) e->angles[k] = e->ang1[k] + e->movedir[k] * a;
             }
             break;
         case ENT_MONSTERMAKER:
@@ -2488,6 +2741,7 @@ void ents_think(float dt)
             break;
         }
     }
+    { extern void pm_set_friction(float f); pm_set_friction(friction_touch); }
 #ifdef PROFX
     PROFX_STEP(0);
     ploop += TICKS_DISTANCE(tloop0, TICKS_READ());
@@ -2547,7 +2801,7 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
     for (int i = 1; i < num_entities; i++) {
         entity_t *e = &entities[i];
         if (e->removed || e->model <= 0) continue;
-        bool usable = e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_RECHARGE ||
+        bool usable = e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_RECHARGE || e->type == ENT_MOMENTARY_BUTTON ||
                       e->type == ENT_HEALTHCHARGER ||
                       ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !e->targetname[0]) ||
                       (e->type == ENT_PLAT && !e->targetname[0]);
@@ -2575,6 +2829,15 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
     if (best >= 0) {
         entity_t *e = &entities[best];
         if (e->type == ENT_RECHARGE || e->type == ENT_HEALTHCHARGER) { charger_use(e, best); return true; }
+        if (e->type == ENT_MOMENTARY_BUTTON) {
+            // held: keep turning; a new press turns it the other way (always forward with the door hack)
+            bool first = pressed && e->mpos <= 0.001f;
+            if (pressed) e->mdir = (e->spawnflags & 1) ? 1 : (e->mpos >= 0.999f ? -1 : (e->mpos <= 0.001f ? 1 : -e->mdir));
+            float dps = e->speed / (e->dist > 0 ? e->dist : 90);
+            momentary_set(e, e->mpos + e->mdir * dps * frame_dt_for_use, first);
+            e->mlast = g_time;
+            return true;
+        }
         if (!pressed) return true;
         if (e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) {
             if (!master_ok(e)) { door_locked_sound(e); return true; }

@@ -1959,8 +1959,20 @@ void weapons_draw_hud(float dt, bool show_crosshair)
     font_begin(BLEND_ADD);
     // crosshair (the weapon's own from crosshairs.spr: a simple one for all)
     if (show_crosshair && w && player_alive() && (w->cx || w->cy || w->id == WEAPON_CROWBAR)) {
+        // the crosshair slides onto the monster the auto-aim locked on to (where the shots go)
+        extern int npc_autoaim_target;
+        static float xh_x = 160, xh_y = 120;
+        float tx = 160, ty = 120;
+        int t = npc_autoaim_target;
+        if (t >= 0 && t < num_npcs && npc_alive(t) && w->id != WEAPON_CROWBAR) {
+            npc_t *n = &npcs[t];
+            float c[3] = {n->origin[0], n->origin[1], n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f}, sx, sy;
+            if (project(c, &sx, &sy)) { tx = fminf(fmaxf(sx, 40), 280); ty = fminf(fmaxf(sy, 30), 210); }
+        }
+        float k = fminf(1, dt * 18);
+        xh_x += (tx - xh_x) * k; xh_y += (ty - xh_y) * k;
         font_color(RGBA32(255, 160, 0, 255));
-        image_draw(&xhair, 160 - 12, 120 - 12, w->cx, w->cy, 24, 24);
+        image_draw(&xhair, (int)(xh_x + 0.5f) - 12, (int)(xh_y + 0.5f) - 12, w->cx, w->cy, 24, 24);
     }
     // ammo
     if (w && w->ammo1 >= 0) {
@@ -1969,10 +1981,10 @@ void weapons_draw_hud(float dt, bool show_crosshair)
         if (ammo_fade > 100) ammo_fade -= dt * 20 * 10;
         if (ammo_fade < 100) ammo_fade = 100;
         font_color(hud_color(ammo_fade));
-        int y = 240 - 16 - 8 - 8;
+        int y = 240 - 16 - 8 - 8 - HUD_SAFE_Y;
         int x;
         if (clip >= 0) {
-            x = 320 - 8 * 12 - 24 - 8;
+            x = 320 - HUD_SAFE_X - 8 * 12 - 24 - 8;
             x = hud_number(x, y, clip, 3, true);
             rdpq_set_mode_fill(hud_color(ammo_fade));
             rdpq_fill_rectangle(x + 6, y, x + 7, y + 16);
@@ -1981,22 +1993,22 @@ void weapons_draw_hud(float dt, bool show_crosshair)
             x += 13;
             x = hud_number(x, y, res, 3, true);
         } else {
-            x = 320 - 4 * 12 - 24 - 8;
+            x = 320 - HUD_SAFE_X - 4 * 12 - 24 - 8;
             x = hud_number(x, y, res, 3, true);
         }
-        image_draw(&hud2, 320 - 24 - 8, y - 2, w->ax, w->ay, 18, 18);
+        image_draw(&hud2, 320 - HUD_SAFE_X - 24 - 8, y - 2, w->ax, w->ay, 18, 18);
         if (w->ammo2 >= 0) {
             y -= 16 + 4;
-            x = 320 - 4 * 12 - 24 - 8;
+            x = 320 - HUD_SAFE_X - 4 * 12 - 24 - 8;
             hud_number(x, y, player.ammo[w->ammo2], 3, true);
-            image_draw(&hud2, 320 - 24 - 8, y - 2, 36, 16, 18, 18);
+            image_draw(&hud2, 320 - HUD_SAFE_X - 24 - 8, y - 2, 36, 16, 18, 18);
         }
     }
     // weapon selection: the slot's weapons under the bucket numbers (CHudAmmo::DrawWList)
     if (select_show > 0) {
         int show = pending ? pending : cur;
         const wdef_t *sw = wdef(show);
-        int x = 10, y = 10;
+        int x = 10 + HUD_SAFE_X, y = 10 + HUD_SAFE_Y;
         for (int s = 0; s < 5; s++) {
             font_color(RGBA32(255, 160, 0, 255));
             image_draw(&hud2, x, y, 108, 16 + s * 12, 12, 12);

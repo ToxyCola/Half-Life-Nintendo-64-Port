@@ -12,6 +12,12 @@
 #define SOLID_NOT 0
 #endif
 
+// HUD inset from the screen edges: CRTs overscan a little (title-safe area)
+#ifndef HUD_SAFE_X
+#define HUD_SAFE_X 12
+#define HUD_SAFE_Y 9
+#endif
+
 typedef enum {
     ENT_OTHER = 0, ENT_WORLD, ENT_WALL, ENT_ILLUSIONARY, ENT_DOOR, ENT_DOOR_ROTATING, ENT_BUTTON,
     ENT_ROT_BUTTON, ENT_PLAT, ENT_TRAIN, ENT_ROTATING, ENT_WATER, ENT_LADDER, ENT_BREAKABLE,
@@ -22,6 +28,8 @@ typedef enum {
     ENT_ENV_RENDER, ENT_ENDSECTION,
     ENT_AMBIENT, ENT_SPEAKER, ENT_CDAUDIO, ENT_TARGET_CDAUDIO, ENT_RECHARGE, ENT_HEALTHCHARGER,
     ENT_ENV_SHAKE, ENT_WEAPONSTRIP, ENT_ENV_SPARK, ENT_ENV_EXPLOSION, ENT_GLOBAL_BEAM, ENT_MONSTERMAKER,
+    ENT_ENV_GLOBAL, ENT_TRIGGER_GRAVITY, ENT_LOADSAVED, ENT_PENDULUM, ENT_FRICTION, ENT_AUTOSAVE, ENT_MORTAR_FIELD,
+    ENT_MOMENTARY_BUTTON,
 } enttype_t;
 
 enum { MS_IDLE = 0, MS_AT_BOTTOM, MS_AT_TOP, MS_GOING_UP, MS_GOING_DOWN };
@@ -70,6 +78,7 @@ typedef struct entity_s {
     float sndtime, juice, ltime2;
     int   charge_on;
     float maxhealth;
+    float mpos, mdir, mlast;   // momentary_rot_button position 0..1, direction, last held; pendulum phase
 } entity_t;
 
 extern entity_t entities[MAX_ENTITIES];

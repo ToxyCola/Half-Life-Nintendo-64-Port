@@ -1,5 +1,9 @@
 // HL64 - HUD text messages and screen fades, ported from the Half-Life client
 // (cl_dll/message.cpp: CHudMessage) and the engine's titles.txt parser and screen fade.
+#ifndef HUD_SAFE_X
+#define HUD_SAFE_X 12
+#define HUD_SAFE_Y 9
+#endif
 #include <libdragon.h>
 #include <string.h>
 #include <stdlib.h>
@@ -203,7 +207,8 @@ static int xpos(float x, int width, int total)
     if (x == -1) p = (SCREEN_W - width) / 2;
     else if (x < 0) p = (1.0f + x) * SCREEN_W - total;
     else p = x * SCREEN_W;
-    if (p + width > SCREEN_W) p = SCREEN_W - width;
+    if (p + width > SCREEN_W - HUD_SAFE_X) p = SCREEN_W - HUD_SAFE_X - width;
+    if (p < HUD_SAFE_X) p = HUD_SAFE_X;
     else if (p < 0) p = 0;
     return p;
 }
@@ -214,7 +219,8 @@ static int ypos(float y, int height)
     if (y == -1) p = (SCREEN_H - height) * 0.5f;
     else if (y < 0) p = (1.0f + y) * SCREEN_H - height;
     else p = y * SCREEN_H;
-    if (p + height > SCREEN_H) p = SCREEN_H - height;
+    if (p + height > SCREEN_H - HUD_SAFE_Y) p = SCREEN_H - HUD_SAFE_Y - height;
+    if (p < HUD_SAFE_Y) p = HUD_SAFE_Y;
     else if (p < 0) p = 0;
     return p;
 }
@@ -382,5 +388,5 @@ void hud_draw_train(void)
     font_color(RGBA32(255, 160, 0, 255));   // HUD colour (RGB_YELLOWISH)
     int lv = train_level > 4 ? 4 : train_level;
     // train_back/stop/forward1..3 in 320hud3.spr: 48x48 each along the top row
-    image_draw(&hud3, SCREEN_W / 3 + 48 / 4, SCREEN_H - 48 - font_height(FONT_SMALL), lv * 48, 0, 48, 48);
+    image_draw(&hud3, SCREEN_W / 3 + 48 / 4, SCREEN_H - 48 - font_height(FONT_SMALL) - HUD_SAFE_Y, lv * 48, 0, 48, 48);
 }

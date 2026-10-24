@@ -48,6 +48,7 @@ void player_get_eye(float *eye)
 
 void player_new_game(void)
 {
+    { extern void pm_set_gravity(float g); extern void ents_globals_reset(void); pm_set_gravity(1); ents_globals_reset(); }
     memset(&player, 0, sizeof(player));
     player.health = 100;
     player.flashbattery = 100;
@@ -373,25 +374,25 @@ void player_draw_hud(float dt)
     if (player.armor != last_armor) { armor_fade = 255; last_armor = player.armor; }
     health_fade = fmaxf(100, health_fade - dt * 200);
     armor_fade = fmaxf(100, armor_fade - dt * 200);
-    int y = 240 - 16 - 8 - 8;
+    int y = 240 - 16 - 8 - 8 - HUD_SAFE_Y;
     bool red = player.health <= 25;
     // health: cross + number + divider
     font_color(col(health_fade, red));
-    hud_icon2(8 + 4, y, 0, 72, 16, 16);
-    int x = hud_number(16 + 6 + 4, y, (int)player.health, 3, true);
+    hud_icon2(8 + 4 + HUD_SAFE_X, y, 0, 72, 16, 16);
+    int x = hud_number(16 + 6 + 4 + HUD_SAFE_X, y, (int)player.health, 3, true);
     rdpq_set_mode_fill(col(health_fade, red));
     rdpq_fill_rectangle(x + 6, y, x + 7, y + 16);
     // armour: the suit icon fills up with the charge (CHudBattery::Draw)
     font_begin(BLEND_ADD);
     font_color(col(armor_fade, false));
-    int ax = 320 / 5 + 8;
+    int ax = 320 / 5 + 8 + HUD_SAFE_X;
     hud_icon2(ax, y - 3, 0, 52, 20, 20);
     int full = (int)(20 * player.armor / 100);
     if (full > 0) hud_icon2(ax, y - 3 + (20 - full), 20, 52 + (20 - full), 20, full);
     hud_number(ax + 20, y, (int)player.armor, 3, true);
     // flashlight (CHudFlashlight)
     font_color(col(player.flashlight ? 255 : 120, false));
-    hud_icon2(320 - 18 - 12, 10, player.flashlight ? 16 : 34, 72, 18, 16);
-    if (player.flashlight) hud_icon2(320 - 18 - 12 - 6, 10, 52, 72, 6, 16);
+    hud_icon2(320 - 18 - 12 - HUD_SAFE_X, 10 + HUD_SAFE_Y, player.flashlight ? 16 : 34, 72, 18, 16);
+    if (player.flashlight) hud_icon2(320 - 18 - 12 - 6 - HUD_SAFE_X, 10 + HUD_SAFE_Y, 52, 72, 6, 16);
     rdpq_set_mode_standard();
 }

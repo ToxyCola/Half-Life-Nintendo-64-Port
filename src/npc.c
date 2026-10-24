@@ -2860,11 +2860,13 @@ void npcs_apply_snapshot(const uint8_t *b, int len)
 }
 
 // auto-aim: the hostile monster nearest the crosshair inside a small cone, in clear sight
+int npc_autoaim_target = -1;   // the monster the aim was bent onto this frame (-1 none)
 bool npc_autoaim(const float *eye, float *dir)
 {
     float best = 0.9925f;   // ~7 degrees
     float bestdir[3];
     bool found = false;
+    npc_autoaim_target = -1;
     for (int i = 0; i < num_npcs; i++) {
         npc_t *n = &npcs[i];
         if (!npc_alive(i) || !hates(n, 0) || (n->flags & (NF_NOTSOLID | NF_STATIC))) continue;
@@ -2881,6 +2883,7 @@ bool npc_autoaim(const float *eye, float *dir)
         best = dot;
         for (int k = 0; k < 3; k++) bestdir[k] = v[k] / l;
         found = true;
+        npc_autoaim_target = i;
     }
     if (found) memcpy(dir, bestdir, 12);
     return found;

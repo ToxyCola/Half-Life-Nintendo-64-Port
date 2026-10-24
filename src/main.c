@@ -113,6 +113,10 @@ void game_set_camera(int ent, float wait, bool freeze)
 }
 
 void game_end_section(void) { end_requested = true; }
+static float restart_at;    // player_loadsaved: when to start the map again
+void game_request_restart(float delay) { restart_at = game_clock + (delay > 0 ? delay : 0.1f); }
+static bool autosave_pending;
+void game_request_autosave(void) { autosave_pending = true; }
 
 void game_request_changelevel(const char *map, const char *landmark)
 {
@@ -180,7 +184,6 @@ static bool flag_key(const char *key)
 
 // spawn: fresh start at info_player_start, or via landmark transition
 void npcs_mark_base(void);
-static bool autosave_pending;
 static void autosave(void);
 // Debug map loader: enter a map where the previous one leads into it (maps/arrive.txt from
 // tools/build_assets.py), with the transition's changetarget (c1a2: the elevator ride)
@@ -202,6 +205,7 @@ static bool find_arrive(const char *map, arrive_t *a)
 
 static bool load_map(const char *name, const char *landmark, const float *old_landmark)
 {
+    restart_at = 0;
     float porigin[3], pvel[3];
     pm_get_origin(porigin);
     pm_get_velocity(pvel);
@@ -370,11 +374,12 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
 
 // ---- saves (EEPROM 16kbit = 2KB): slot 0 = autosave, slots 1..5 = manual saves ----
 typedef struct { uint32_t magic, serial; char map[32]; float o[3], a[3]; int skill; player_t pl; } save_t;
-#define SAVE_MAGIC 0x484C3636
+#define SAVE_MAGIC 0x484C3637   // bumped: global states and gravity in the slot
 // SRAM 32KB: 3 slots of 10KB, each the player plus a snapshot of the level (entities, characters)
 #define SAVE_SLOT_BYTES 10240
 #define NUM_SAVE_SLOTS 3
 #define SAVE_HDR 336
+#define SAVE_GLOBALS 1024
 _Static_assert(sizeof(save_t) <= SAVE_HDR, "save header too big");
 static union { save_t s; uint8_t raw[SAVE_SLOT_BYTES]; } save_buf __attribute__((aligned(16)));
 int ents_snapshot(uint8_t *b, int max, int base);
@@ -433,10 +438,18 @@ static void write_slot(int slot, const float *o, const float *a)
     save_buf.s.pl = player;
     // level snapshot: [u16 ent bytes][ents][u16 npc bytes][npcs]
     int base = npcs_base_ents(), pos = SAVE_HDR;
-    int ne = ents_snapshot(save_buf.raw + pos + 2, SAVE_SLOT_BYTES - pos - 2 - 2400, base);
+    int ne = ents_snapshot(save_buf.raw + pos + 2, SAVE_SLOT_BYTES - pos - 2 - 2400 - SAVE_GLOBALS, base);
     save_buf.raw[pos] = ne & 255; save_buf.raw[pos + 1] = ne >> 8; pos += 2 + ne;
-    int nn = npcs_snapshot(save_buf.raw + pos + 2, SAVE_SLOT_BYTES - pos - 2);
+    int nn = npcs_snapshot(save_buf.raw + pos + 2, SAVE_SLOT_BYTES - pos - 2 - SAVE_GLOBALS);
     save_buf.raw[pos] = nn & 255; save_buf.raw[pos + 1] = nn >> 8;
+    {   // the last SAVE_GLOBALS bytes: player gravity (Xen) and the global states (env_global)
+        extern int ents_globals_save(uint8_t *b, int max);
+        extern float pm_get_gravity(void);
+        uint8_t *g = save_buf.raw + SAVE_SLOT_BYTES - SAVE_GLOBALS;
+        float grav = pm_get_gravity();
+        memcpy(g, &grav, 4);
+        ents_globals_save(g + 4, SAVE_GLOBALS - 4);
+    }
     sram_write(save_buf.raw, slot * SAVE_SLOT_BYTES, SAVE_SLOT_BYTES);
     game_saves_scan();
 }
@@ -468,6 +481,15 @@ static bool load_save(int slot)
     player_new_game();
     snd_music_stop();
     settings.skill = sv.skill;
+    {
+        extern void ents_globals_load(const uint8_t *b, int len);
+        extern void pm_set_gravity(float g);
+        const uint8_t *g = save_buf.raw + SAVE_SLOT_BYTES - SAVE_GLOBALS;
+        float grav;
+        memcpy(&grav, g, 4);
+        ents_globals_load(g + 4, SAVE_GLOBALS - 4);
+        pm_set_gravity(grav > 0.05f && grav <= 2 ? grav : 1);
+    }
     in_game = load_map(sv.map, NULL, NULL);
     autosave_pending = false;   // don't overwrite the autosave just by loading
     if (!in_game) return false;
@@ -1082,6 +1104,7 @@ int main(void)
         }
         hud_set_train(ents_player_train_update(input.buttons, newly));
 
+        if (restart_at > 0 && game_clock >= restart_at) { restart_at = 0; restart_map(); continue; }   // player_loadsaved
         if (player.dead) {
             // dead: no moving; a button press after a moment starts the map again
             input.forward = input.side = input.up = 0;

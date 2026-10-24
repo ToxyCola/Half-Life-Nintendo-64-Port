@@ -676,6 +676,11 @@ bool pm_unstick(float dt)
 }
 
 // driving a func_tracktrain (CBasePlayer::PreThink sets FL_ONTRAIN: no walking, jumping or ducking)
+// pev->gravity (trigger_gravity: Xen) and pev->friction (func_friction) of the player
+void pm_set_gravity(float g) { pm->gravity = g; }
+float pm_get_gravity(void) { return pm->gravity; }
+void pm_set_friction(float f) { pm->friction = f; }
+
 void pm_set_ontrain(bool on)
 {
     if (on) pm->flags |= FL_ONTRAIN;
