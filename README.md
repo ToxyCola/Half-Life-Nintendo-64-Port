@@ -30,7 +30,8 @@ It is built from:
 | Speech and music | All of `sentences.txt` (the engine's VOX system: word lists, per-word pitch/volume/start/end, groups), scripted_sentence, speaker announcements, ambient_generic, env_message sounds, the HEV suit voice, and the CD-audio music (trigger_cdaudio / target_cdaudio) from the game's MP3s. 3D panning and distance falloff follow the engine's `S_Spatialize`. Audio is compressed with libdragon's ULC codec |
 | HEV suit | Picking up the suit starts the HEV logon (with its music in Anomalous Materials), turns on the HUD, and unlocks the map logic that waits for it. Health, armour, batteries, medkits, wall health and HEV chargers, fall damage, drowning, trigger_hurt, the suit's damage reports, death and restart |
 | Weapons | All 14 weapons with their first-person models and animations, ammo, reloads and alternate fire: crowbar, glock, .357, MP5 + grenades, shotgun, crossbow, RPG (laser-guided), gauss (charged shot), egon, hivehand, hand grenades, satchels, trip mines, snarks. Placed where the maps put them, in crates (`func_breakable` spawn objects) and dropped by soldiers. Autoaim as in single player. HUD ammo counters, weapon selection, crosshairs, damage indicators |
-| Combat | Monsters see, hear and chase you along the node graph, and use their own attack animations: zombie claws, headcrab leaps, houndeye blasts, vortigaunt zaps, soldiers' MP5s, alien grunt hornets, bullsquid spit, turrets, barnacles, tentacles. Barney fights alongside you, scientists flee. Damage, pain, deaths. Values come from the game's `skill.cfg` (difficulty from the New Game dialog) |
+| Combat | Monsters see, hear and chase you along the node graph, and use their own attack animations: zombie claws, headcrab leaps, houndeye blasts, vortigaunt zaps, soldiers' MP5s, shotguns and grenades (they take cover when hurt), alien grunt hornets, bullsquid spit, gargantua flames, turrets, barnacles, tentacles. Monstermakers bring in reinforcements. Barney fights alongside you, scientists flee. Damage, pain, deaths. Values come from the game's `skill.cfg` (difficulty from the New Game dialog) |
+| Bosses | Nihilanth (arenas, teleport balls, crystal recharging, opening head), Gonarch (node path with per-node health, mortar, baby headcrabs), Apache (path, strafing, rockets), Osprey (drops soldiers) |
 | Brush entities | Doors (sliding and rotating), buttons, lifts/plats, func_train, rotating objects, walls, water, ladders, breakables (shoot or hit them; they drop their items) |
 | Trains | `func_tracktrain` ported from `plats.cpp`/`pathcorner.cpp`: path_track switching (alternate paths, disabled tracks), track-change lifts, dead ends, and **player-driven trains** (On A Rail) with the HUD speed gauge |
 | Map logic | trigger_once/multiple/auto/relay/push/teleport/hurt, multi_manager, multisource masters, trigger_changetarget, trigger_camera, env_fade, env_message, env_shake, env_explosion, env_spark, game_text, env_render, killtarget, `globalname` carry-over |
@@ -38,13 +39,12 @@ It is built from:
 | Menus | Modelled on the PC GameUI: logo, New game / Load game / Options, the VGUI-style New Game, Load Game and Options dialogs, "Loading..." box, pause menu over the game |
 | Level transitions | trigger_changelevel with landmarks, as on PC. The intro tram plays through c0a0–c0a0e. Your health, suit and weapons carry over |
 | Player physics | Valve's pm_shared.c, unmodified (including the long jump module) |
-| Performance | Roughly 20–40 fps at 320×240 in ares (cycle-accurate emulator), depending on the view and how many characters are visible |
+| Performance | Roughly 20–60 fps at 320×240 in ares (cycle-accurate emulator), depending on the view and how many characters are visible. PVS + frustum culling of world faces and brush entities, idle monsters out of sight think at 4 Hz |
 
 ## What is not there (yet)
 
 * The monster AI is a compact rewrite of the SDK's schedule system, not a port of it: no squad
-  tactics, cover-seeking or grenade throwing by soldiers, and the bosses (Gargantua, Gonarch,
-  Nihilanth) and flying machines (Apache, Osprey) only do part of what they do on PC.
+  tactics, and the bosses and flying machines are simplified versions of the PC behaviour.
 * No sprites, decals, particles or dynamic lights: muzzle flashes, blood and smoke are missing,
   beams and explosions are drawn as simple 2D overlays, and the flashlight only shows on the HUD.
   Animated (`+0…`) textures show their first frame.

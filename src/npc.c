@@ -2329,7 +2329,7 @@ static void apache_think(npc_t *n, float dt)
     // rockets now and then
     if (aim < 15 && now >= n->bt[2]) {
         n->bt[2] = now + 4 + rand() % 3;
-        float a = (n->yaw + (n->bi[1] ^= 1 ? 90 : -90)) * (float)M_PI / 180;
+        float a = (n->yaw + ((n->bi[1] ^= 1) ? 90 : -90)) * (float)M_PI / 180;
         float src[3] = {n->origin[0] + cosf(a) * 64, n->origin[1] + sinf(a) * 64, n->origin[2] - 32};
         float dir[3] = {player_pos[0] - src[0], player_pos[1] - src[1], player_pos[2] - src[2]};
         float l = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
