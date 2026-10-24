@@ -1687,13 +1687,22 @@ static void ai_flee(npc_t *n, float dt)
     }
 }
 
-// barnacle: grabs the player standing under it (CBarnacle::BarnacleThink, simplified)
+// barnacle (CBarnacle::BarnacleThink): the tongue hangs down to the floor (TongueTouchEnt traces
+// 2048 units down), grows back at BARNACLE_PULL_SPEED after letting go, grabs the player who
+// touches it and reels them up into the mouth
 static void barnacle_think(npc_t *n, float dt)
 {
-    if (!player_alive()) return;
+    gtrace_t tr;
+    float st[3] = {n->origin[0], n->origin[1], n->origin[2] - 2};
+    float end[3] = {n->origin[0], n->origin[1], n->origin[2] - 2048};
+    game_trace(st, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, n - npcs, &tr);
+    if (n->ctl0 == 0) n->alt = fabsf(n->origin[2] - tr.endpos[2]);   // first think: already hanging down
+    float len = fabsf(n->origin[2] - tr.endpos[2]);
     float dx = player_pos[0] - n->origin[0], dy = player_pos[1] - n->origin[1];
     float below = n->origin[2] - player_pos[2];
-    if (dx * dx + dy * dy < 20 * 20 && below > 0 && below < 512 && !pm_noclip_active()) {
+    // player hull top is 36 above the origin (standing): the tongue touches them when it reaches that
+    bool touch = player_alive() && !pm_noclip_active() && dx * dx + dy * dy < 20 * 20 && below > 0 && below - 36 < n->alt;
+    if (touch) {
         if (n->ai != AI_GRABBED) {
             n->ai = AI_GRABBED;
             snd_emit(n->ent, CHAN_WEAPON, "barnacle/bcl_alert2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
@@ -1701,14 +1710,18 @@ static void barnacle_think(npc_t *n, float dt)
         // pull the player up into the mouth, then chew
         float v[3] = {-dx * 4, -dy * 4, below > 56 ? 40.0f : 0.0f};
         pm_set_velocity(v);
+        n->alt = fmaxf(below - 36, 0);          // the tongue is as long as the prey is low
         if (below <= 60 && game_time() > n->next_attack) {
             n->next_attack = game_time() + 1.2f;
             npc_sound(n, CHAN_WEAPON, "barnacle/bcl_chew%d.wav", 3, 1, ATTN_NORM);
             player_take_damage(10, DMG_SLASH | DMG_ALWAYSGIB, n->origin, n->ent);
         }
-    } else if (n->ai == AI_GRABBED) {
-        n->ai = AI_IDLE;
+    } else {
+        if (n->ai == AI_GRABBED) n->ai = AI_IDLE;
+        if (n->alt < len) n->alt = fminf(n->alt + 80 * dt, len);   // BARNACLE_PULL_SPEED 8 per 0.1 s
+        else n->alt = len;
     }
+    n->ctl0 = -(n->alt - 100);                 // SetBoneController(0, -(m_flAltitude + m_flTongueAdj)), adj = -100
 }
 
 // tentacles strike at things that make noise nearby (CTentacle, simplified)

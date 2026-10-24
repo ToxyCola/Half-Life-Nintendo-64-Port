@@ -25,3 +25,5 @@ bool menu_is_open(void);
 menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed, char *map_out, int map_out_len);
 void menu_draw(void);                        // 2D layer (the caller draws the background)
 void menu_draw_loading(float progress);      // the "Loading..." dialog on a black screen
+
+bool menu_debug_warped(void);   // the last START_MAP came from the Debug map loader

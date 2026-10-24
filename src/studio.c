@@ -193,6 +193,17 @@ studio_t *studio_get(const char *name)
     }
     m->numatt = 0; m->att = NULL;
     if (h[4] > 14) m->att = lump(buf, tab, 14, &m->numatt);
+    m->ctl0_bone = -1;
+    if (h[4] > 15) {
+        int has = 0;
+        uint8_t *c = lump(buf, tab, 15, &has);
+        if (has) {
+            m->ctl0_bone = *(int16_t *)c;
+            m->ctl0_type = *(uint16_t *)(c + 2);
+            m->ctl0_start = *(float *)(c + 4);
+            m->ctl0_end = *(float *)(c + 8);
+        }
+    }
     data_cache_hit_writeback(buf, size);
     record_textures(m);
     cache[num_cached++] = m;
@@ -342,6 +353,11 @@ void studio_draw(const studio_draw_t *d)
             p0 += 3; p1 += 3;
         } else {
             for (int i = 0; i < 3; i++) p[i] = cpos[b * 3 + i] * inv;
+        }
+        if (b == m->ctl0_bone && d->ctl0 != 0) {
+            float lo = fminf(m->ctl0_start, m->ctl0_end), hi = fmaxf(m->ctl0_start, m->ctl0_end);
+            float v = fminf(fmaxf(d->ctl0, lo), hi);
+            p[(m->ctl0_type & 1) ? 0 : (m->ctl0_type & 2) ? 1 : 2] += v;
         }
         if (b == m->mouth_bone && d->mouth > 0) {
             // add the jaw angle about the controller's axis (STUDIO_XR/YR/ZR)

@@ -182,6 +182,24 @@ static bool flag_key(const char *key)
 void npcs_mark_base(void);
 static bool autosave_pending;
 static void autosave(void);
+// Debug map loader: enter a map where the previous one leads into it (maps/arrive.txt from
+// tools/build_assets.py), with the transition's changetarget (c1a2: the elevator ride)
+typedef struct { char landmark[48], target[48]; float ofs[3], delay; } arrive_t;
+static arrive_t *debug_arrive;
+static bool find_arrive(const char *map, arrive_t *a)
+{
+    FILE *f = fopen("rom:/maps/arrive.txt", "r");
+    if (!f) return false;
+    char line[160], m[32];
+    bool ok = false;
+    while (!ok && fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "%31s %47s %f %f %f %47s %f", m, a->landmark, &a->ofs[0], &a->ofs[1], &a->ofs[2], a->target, &a->delay) == 7 && !strcasecmp(m, map)) ok = true;
+    }
+    fclose(f);
+    if (ok && !strcmp(a->target, "-")) a->target[0] = 0;
+    return ok;
+}
+
 static bool load_map(const char *name, const char *landmark, const float *old_landmark)
 {
     float porigin[3], pvel[3];
@@ -250,6 +268,38 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     render_new_map();
     setup_sky();
     cam_ent = -1;
+    if (!placed && debug_arrive) {
+        for (int i = ents_find_class("info_landmark", 0); i >= 0; i = ents_find_class("info_landmark", i + 1)) {
+            if (strcasecmp(entities[i].targetname, debug_arrive->landmark)) continue;
+            hud_reset();
+            ents_player_teleported();
+            for (int k = 0; k < 3; k++) origin[k] = entities[i].origin[k] + debug_arrive->ofs[k];
+            int s = ents_find_class("info_player_start", 0);
+            view_angles[0] = view_angles[2] = 0;
+            view_angles[1] = s >= 0 ? entities[s].angles[1] : 0;
+            extern bool pm_find_free_position_hull(float *origin, int usehull);
+            extern void pm_set_ducked(void);
+            extern bool pm_position_free(const float *pos);
+            extern void pm_build_physents(void);
+            pm_reset_player(origin);
+            pm_build_physents();
+            {   // the trigger can be up near the ceiling (a button-fired elevator): stand on the floor below
+                static const float hmn[3] = {-16, -16, -36}, hmx[3] = {16, 16, 36};
+                float down[3] = {origin[0], origin[1], origin[2] - 256};
+                gtrace_t tr;
+                game_trace(origin, down, hmn, hmx, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, -1, &tr);
+                if (!tr.startsolid) memcpy(origin, tr.endpos, 12);
+            }
+            float duck[3] = {origin[0], origin[1], origin[2] - 18};
+            bool stand = pm_position_free(origin);
+            if (!stand) { pm_set_ducked(); stand = !pm_position_free(duck); }   // a crawlspace (t0a0a)
+            if (!stand) { memcpy(origin, duck, 12); pm_reset_player(origin); pm_set_ducked(); }
+            else { pm_find_free_position(origin); pm_reset_player(origin); }
+            if (debug_arrive->target[0]) { extern void ents_fire_delayed(const char *n, float d); ents_fire_delayed(debug_arrive->target, debug_arrive->delay); }
+            placed = true;
+            break;
+        }
+    }
     if (!placed) {
         hud_reset();
         ents_player_teleported();
@@ -433,6 +483,7 @@ static bool load_save(int slot)
     return true;
 }
 
+static bool debug_load;   // the Debug menu's map loader
 static bool start_game(const char *map)
 {
     if (!strncmp(map, "*save", 5)) return load_save(map[5] ? atoi(map + 5) : -1);
@@ -441,7 +492,11 @@ static bool start_game(const char *map)
     player_new_game();
     snd_music_stop();
     end_requested = false;
+    arrive_t arr;
+    debug_arrive = (debug_load && find_arrive(map, &arr)) ? &arr : NULL;
+    debug_load = false;
     in_game = load_map(map, NULL, NULL);
+    debug_arrive = NULL;
     return in_game;
 }
 
@@ -830,6 +885,9 @@ int main(void)
 
 #ifdef AUTOSTART_MAP
     menu_close();
+#ifdef DEBUGWARP
+    debug_load = true;
+#endif
     start_game(AUTOSTART_MAP);
     settings.show_stats = true;
     settings.cheats = true;
@@ -960,7 +1018,7 @@ int main(void)
         if (!in_game) {
             char map[32] = "";
             menu_action_t act = menu_update(dt, in, pressed, map, sizeof(map));
-            if (act == MENU_ACT_START_MAP) { start_game(map); continue; }
+            if (act == MENU_ACT_START_MAP) { debug_load = map[0] != '*' && menu_debug_warped(); start_game(map); continue; }
             if (!menu_is_open()) menu_open(false);
             rdpq_attach_clear(display_get(), NULL);
             menu_draw();
@@ -972,7 +1030,7 @@ int main(void)
         if (menu_is_open()) {
             char map[32] = "";
             menu_action_t act = menu_update(dt, in, pressed, map, sizeof(map));
-            if (act == MENU_ACT_START_MAP) { menu_close(); start_game(map); continue; }
+            if (act == MENU_ACT_START_MAP) { menu_close(); debug_load = map[0] != '*' && menu_debug_warped(); start_game(map); continue; }
             if (act == MENU_ACT_LEAVE) { leave_game(); continue; }
             paused = menu_is_open();
             if (paused) { render_frame(last_eye, last_ang, draw_hud); continue; }

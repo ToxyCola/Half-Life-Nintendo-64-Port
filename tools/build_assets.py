@@ -128,6 +128,73 @@ def build_nav(a, maps):
     print('node graphs: %d maps' % n)
 
 
+def floor_under(bsp, p):
+    """z of the first solid point (world hull 0) below p, None if p is solid or nothing within 512"""
+    planes = bsp.arr('PLANES', '<4fi')
+    nodes = bsp.arr('NODES', '<I2h3h3hHH')
+    leafs = bsp.arr('LEAVES', '<2i6h2H4B')
+    head = bsp.arr('MODELS', '<9f4i3i')[0][9]
+    def contents(x, y, z):
+        n = head
+        while n >= 0:
+            pl = planes[nodes[n][0]]
+            n = nodes[n][1] if pl[0] * x + pl[1] * y + pl[2] * z - pl[3] >= 0 else nodes[n][2]
+        return leafs[-n - 1][0]
+    # first floor below with room for a standing player (72 units) above it: the trigger can sit in
+    # a gap above an elevator's ceiling
+    z, run = p[2], 0
+    while z > p[2] - 1024:
+        if contents(p[0], p[1], z) == -2:
+            if run >= 72:
+                return z + 1
+            run = 0
+        else:
+            run += 1
+        z -= 1
+    return None
+
+
+def build_arrivals(a, maps):
+    """maps/arrive.txt: where a map is entered from the previous one, for the Debug map loader:
+    '<map> <landmark> <dx> <dy> <dz> <changetarget|-> <changedelay>' with the player's spot (the
+    middle of the previous map's trigger_changelevel, feet on its floor) relative to the landmark"""
+    info = {}
+    for m in maps:
+        b = bsp2n64.BSP(open(os.path.join(a.valve, 'maps', m + '.bsp'), 'rb').read())
+        ents = bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1'))
+        info[m] = (ents, b.arr('MODELS', '<9f4i3i'), b)
+    out = []
+    for i, m in enumerate(maps):
+        if i == 0:
+            continue
+        best = None
+        # prefer the previous map in campaign order, then any earlier map, then any map
+        order = [maps[i - 1]] + [maps[j] for j in range(i - 2, -1, -1)] + maps[i + 1:]
+        for src in order:
+            ents, models, bsp = info[src]
+            lms = {e.get('targetname'): e for e in ents if e.get('classname') == 'info_landmark'}
+            for e in ents:
+                if e.get('classname') != 'trigger_changelevel' or e.get('map', '').lower() != m:
+                    continue
+                lm = lms.get(e.get('landmark'))
+                if not lm or not e.get('model', '').startswith('*'):
+                    continue
+                mn = models[int(e['model'][1:])]
+                lo, hi = mn[0:3], mn[3:6]
+                c = [(lo[k] + hi[k]) / 2 for k in range(3)]
+                # stand on the floor under the trigger (it can be a small brush up by the ceiling)
+                c[2] = floor_under(bsp, c) + 37 if floor_under(bsp, c) is not None else min(c[2], lo[2] + 37)
+                o = [float(v) for v in lm['origin'].split()]
+                best = (e.get('landmark'), [c[k] - o[k] for k in range(3)], e.get('changetarget') or '-', e.get('changedelay') or '0')
+                break
+            if best:
+                break
+        if best:
+            out.append('%s %s %.0f %.0f %.0f %s %s' % (m, best[0], *best[1], best[2], best[3]))
+    open(os.path.join(a.out, 'maps', 'arrive.txt'), 'w').write('\n'.join(out) + '\n')
+    print('arrivals: %d' % len(out))
+
+
 def build_chapters(a, maps):
     """maps/chapters.txt: '<map> <chapter title>' for maps that start a chapter (worldspawn chaptertitle)"""
     titles = ui2n64.parse_titles(os.path.join(a.valve, 'titles.txt'))
@@ -169,6 +236,7 @@ def main():
     if a.ui_only:
         ui2n64.build(a.valve, a.out, '/tmp/ui2n64')
         build_chapters(a, maps)
+        build_arrivals(a, maps)
         return
     pack = bsp2n64.TexturePack()
     jobs = [(os.path.join(a.valve, 'maps', m + '.bsp'), wads, a.grid, a.tol) for m in maps]
@@ -221,6 +289,7 @@ def main():
     build_models(a, maps)
     ui2n64.build(a.valve, a.out, '/tmp/ui2n64')
     build_chapters(a, maps)
+    build_arrivals(a, maps)
 
     build_sounds(a)
 

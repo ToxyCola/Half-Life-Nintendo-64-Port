@@ -22,6 +22,7 @@ typedef struct studio_s {
     int numskinref, numskinfamilies;
     float eye[3], hullmin[3], hullmax[3];
     int mouth_bone, mouth_type; float mouth_start, mouth_end;   // bone controller 4
+    int ctl0_bone, ctl0_type; float ctl0_start, ctl0_end;       // bone controller 0 (translation)
     int16_t *parents;      int numbones;
     sseq_t *seqs;          int numseqs;
     uint8_t *anim;
@@ -56,6 +57,7 @@ typedef struct {
     int body, skin;
     uint8_t light[3];
     float mouth;             // 0..1 jaw open (talking)
+    float ctl0;              // bone controller 0 value (units), e.g. the barnacle's tongue
     bool use_xform;          // xform instead of origin + yaw (the first-person view model)
     float xform[3][4];
     float (*att_out)[3];     // optional: world positions of the first att_n attachments

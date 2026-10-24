@@ -394,11 +394,18 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
         ax, ay, az = struct.unpack_from('<3f', m.d, o + 40)
         att += struct.pack(E + 'hh3f', abone, 0, ax, ay, az)
     blob['att'] = att
+    # bone controller 0 when it moves a bone (barnacle tongue: CBarnacle SetBoneController(0, ...))
+    ctl0 = b''
+    for ci in range(m.numbonecontrollers):
+        cb, ct, cs, ce, crest, cidx = struct.unpack_from('<2i2f2i', m.d, m.bonecontrollerindex + ci * 24)
+        if cidx == 0 and (ct & 0x07):
+            ctl0 = struct.pack(E + 'hHff', cb, ct, cs, ce)
+    blob['ctl0'] = ctl0
     order = ['bones', 'seqs', 'anim', 'tex', 'texdata', 'skins', 'bodyparts', 'models', 'chunks', 'loads',
-             'verts', 'tris', 'events', 'ctrl', 'att']
+             'verts', 'tris', 'events', 'ctrl', 'att', 'ctl0']
     counts = dict(bones=len(bones), seqs=len(seq_out), anim=len(animblob), tex=len(tex_hdr), texdata=len(tex_out),
                   skins=len(skins), bodyparts=len(bodyparts), models=len(models_out), chunks=len(chunks),
-                  loads=len(loads), verts=len(verts), tris=len(tris) // 3, events=len(eventblob) // 64, ctrl=1 if ctl else 0, att=len(att) // 16)
+                  loads=len(loads), verts=len(verts), tris=len(tris) // 3, events=len(eventblob) // 64, ctrl=1 if ctl else 0, att=len(att) // 16, ctl0=1 if ctl0 else 0)
     hdr = bytearray(b'HLM1' + struct.pack(E + 'IIII', POS_SCALE, tex_m.numskinref, tex_m.numskinfamilies, len(order)))
     hdr += struct.pack(E + '9f', *m.eye, *m.hullmin, *m.hullmax)
     hdrsize = len(hdr) + 8 * len(order)

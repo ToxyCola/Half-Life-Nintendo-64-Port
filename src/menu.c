@@ -195,6 +195,8 @@ extern bool dbg_god, dbg_noclip, dbg_give_all;
 int game_num_maps(void);
 const char *game_map_name(int i);
 static bool dbg_warp;
+static bool warped;
+bool menu_debug_warped(void) { bool w = warped; warped = false; return w; }
 static int dbg_map;
 static const char *dbg_map_names[160];
 static const char *dbg_action[] = {"Press A", "..."};
@@ -324,6 +326,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         if (pressed.a) option_change(&o[opt_sel], 1);
         if (dbg_warp) {   // Debug: load the chosen map at its start point
             dbg_warp = false;
+            warped = true;
             open = false;
             strncpy(map_out, game_map_name(dbg_map), map_out_len);
             return MENU_ACT_START_MAP;

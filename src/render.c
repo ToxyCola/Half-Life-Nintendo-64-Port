@@ -630,7 +630,7 @@ static void draw_npcs(const float *eye)
     for (int i = 0; i < n; i++) {
         npc_t *c = &npcs[order[i]];
         studio_draw_t d = {.model = c->model, .yaw = c->yaw, .seq = c->seq, .frame = c->frame,
-                           .body = c->body, .skin = c->skin, .att_out = c->att, .att_n = 1};
+                           .body = c->body, .skin = c->skin, .att_out = c->att, .att_n = 1, .ctl0 = c->ctl0};
         if (c->model->numatt > 0) { extern float game_time(void); c->att_time = game_time(); }
         memcpy(d.origin, c->origin, 12);
         memcpy(d.light, c->light, 3);

@@ -2472,6 +2472,7 @@ void ents_save_globals(const float *landmark)
 }
 
 static void queue_fire(const char *name, float delay);
+void ents_fire_delayed(const char *name, float delay) { queue_fire(name, delay > 0 ? delay : 0.1f); }
 void ents_restore_globals(const float *landmark)
 {
     if (carry_target[0]) { queue_fire(carry_target, carry_delay > 0 ? carry_delay : 0.1f); carry_target[0] = 0; }

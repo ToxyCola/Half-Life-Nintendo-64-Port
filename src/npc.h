@@ -57,6 +57,8 @@ typedef struct {
     float trig_check;
     float att[1][3];         // the gun's muzzle (model attachment 0) where it was last drawn
     float att_time;
+    float ctl0;              // bone controller 0 (barnacle: tongue length)
+    float alt;               // barnacle: how far down the tongue reaches
 } npc_t;
 
 typedef struct { float origin[3], mins[3], maxs[3]; } npc_box_t;
