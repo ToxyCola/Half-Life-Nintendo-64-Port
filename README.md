@@ -111,7 +111,9 @@ is unrecognised (it isn't code-signed): choose "More info" → "Run anyway". The
 Half-Life's game data, so keep it for yourself and don't share it.
 
 To make HL64Builder.exe yourself (on Linux, with mingw-w64): `builder/build_windows.sh`
-(see the comments at its top).
+(see the comments at its top). Releases are built by GitHub Actions
+(`.github/workflows/release.yml`): changing `builder/VERSION` on `main` builds the .exe and
+publishes it as release `v<VERSION>`.
 
 ## Building from source
 

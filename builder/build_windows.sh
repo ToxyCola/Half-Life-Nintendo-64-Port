@@ -18,7 +18,7 @@ PY_VER=3.12.10
 OUT=$REPO/builder/out
 WORK=$OUT/work
 STAGE=$WORK/stage
-VERSION=$(git describe --tags --always 2>/dev/null || echo dev)
+VERSION=${HL64_VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}
 export PATH=$N64_INST/bin:$PATH
 rm -rf "$STAGE"; mkdir -p "$STAGE"/{tools,engine,hl64/tools,hl64/src,licenses} "$WORK/dl"
 
