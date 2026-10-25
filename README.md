@@ -4,6 +4,10 @@ A Nintendo 64 port of Half-Life's single-player campaign: the original maps, tex
 lighting, played with Valve's own player-movement code, running on stock N64 hardware with an
 Expansion Pak.
 
+**Current release: 1.0.** Get `HL64Builder.exe` from the [Releases](../../releases) page; it
+builds the ROM from your own copy of Half-Life (see
+[Building the ROM on Windows](#building-the-rom-on-windows-the-easy-way)).
+
 It is built from:
 
 * **Valve's Half-Life SDK** (`github.com/ValveSoftware/halflife`). Valve's player physics,
@@ -21,7 +25,7 @@ It is built from:
 
 | Area | Status |
 |---|---|
-| The whole campaign | All 103 maps, Black Mesa Inbound → the G-Man ending, plus the Hazard Course, played through in order with the PC's level changes. New game (Easy / Medium / Hard or the Training Room), Continue, chapter select under Load game |
+| The whole campaign | All 103 maps, Black Mesa Inbound → the G-Man ending, plus the Hazard Course, played through in order with the PC's level changes. New game (Easy / Medium / Hard or the Training Room), Continue, Load game (autosaves and manual saves) |
 | Saving | Battery-backed SRAM, like a cartridge save: an autosave each time you enter a level (from Office Complex on, as the PC starts autosaving after the tram ride) and at the maps' trigger_autosave points, plus manual saves from the pause menu (Save game). A save holds the player, the level's doors, lifts, triggers and characters, global states (Blast Pit's fuel, oxygen and power) and Xen's gravity. Dying restarts from where you entered the level |
 | World rendering | BSP + PVS culling, frustum culling, original textures, baked lighting, light styles (switchable and flickering lights), skyboxes, see-through grates (alpha-tested) and glass/water (translucent, drawn after the effects so beams and glows behind them show through correctly) |
 | Characters | Scientists, Barney, the G-Man and every monster are placed with their original models, skins, heads and animations (studio models converted by `tools/mdl2n64.py`, skinned on the RSP). They are solid, lit by the floor beneath them, and follow the player through level transitions |
@@ -36,13 +40,27 @@ It is built from:
 | Effects | The PC's own sprites: explosions, muzzle flashes (at the weapon model's muzzle), gluon gun beams (xbeam1/xspark1), lightning and laser beams, sparks, blood, gibs, bullsquid/Gonarch spit, alien-controller balls, Nihilanth zaps and teleport balls, and every env_sprite/env_glow in the maps (portals, including the G-Man's at the end, light glows, Xen flares) animated at their framerate. Glows follow GoldSrc's `R_GlowBlend`: hidden by walls in front, constant size on screen, fading with distance. Everything else is depth-tested against the world, so walls and grates hide it |
 | Brush entities | Doors (sliding and rotating), buttons, lifts/plats, func_train, rotating objects, walls, water, ladders, breakables (shoot or hit them; they drop their items) |
 | Trains | `func_tracktrain` ported from `plats.cpp`/`pathcorner.cpp`: path_track switching (alternate paths, disabled tracks), track-change lifts, dead ends, and **player-driven trains** (On A Rail) with the HUD speed gauge |
-| Map logic | trigger_once/multiple/auto/relay/push/teleport/hurt, multi_manager, multisource masters (sources are everything that targets them plus the multi_managers that list them, as in `CMultiSource::Register`; their state is saved), trigger_changetarget, trigger_camera, env_fade, env_message, env_shake, env_explosion, env_spark, game_text, env_render, env_sprite/env_glow, env_shooter, env_funnel, env_blood, env_beverage, env_global (global states carried between maps and saves), trigger_gravity (Xen's 0.6 gravity), trigger_autosave, player_loadsaved, func_friction, func_pendulum, func_mortar_field, momentary_rot_button + momentary_door, func_tank family, killtarget, `globalname` carry-over |
+| Map logic | trigger_once/multiple/auto/relay/push/teleport/hurt (including the monster-only ones: the vortigaunts that flash into the test chamber during the resonance cascade are sent on as on PC), multi_manager, multisource masters (sources are everything that targets them plus the multi_managers that list them, as in `CMultiSource::Register`; their state is saved), trigger_changetarget, trigger_camera, env_fade, env_message, env_shake, env_explosion, env_spark, game_text, env_render, env_sprite/env_glow, env_shooter, env_funnel, env_blood, env_beverage, env_global (global states carried between maps and saves), trigger_gravity (Xen's 0.6 gravity), trigger_autosave, player_loadsaved, func_friction, func_pendulum, func_mortar_field, momentary_rot_button + momentary_door, func_tank family, killtarget, `globalname` carry-over |
 | Text | Half-Life's own font (`gfx.wad` CREDITSFONT) for menus and HUD messages. `titles.txt` is parsed at run time: intro credits, chapter titles, Hazard Course instructions and end credits use their original positions, colours and fade/type-on effects (`cl_dll/message.cpp`) |
-| Menus | Modelled on the PC GameUI: logo, Continue / New game / Load game / Options on the title screen; Resume / Save game / Load game / Options / Leave game in the pause menu; the VGUI-style New Game, Load Game (saves first, then chapters) and Options dialogs, "Loading..." box |
-| Level transitions | trigger_changelevel with landmarks, as on PC, carrying over characters that follow you, `changetarget` events (Office Complex's elevator) and global states. The intro tram plays through c0a0–c0a0e. Your health, suit, weapons and ducking carry over. The Options → Debug tab can also jump straight to any map, placing you where the level is normally entered |
+| Menus | Modelled on the PC GameUI: logo, Continue / New game / Load game / Options on the title screen; Resume / Save game / Load game / Options / Leave game in the pause menu; the VGUI-style New Game, Load Game (autosaves and saved games, newest first) and Options dialogs, "Loading..." box |
+| Level transitions | trigger_changelevel with landmarks, as on PC, carrying over characters that follow you, `changetarget` events (Office Complex's elevator) and global states. The intro tram plays through c0a0–c0a0e. Your health, suit, weapons and ducking carry over. The Options → Debug tab can also jump straight to any map, placing you where the level is normally entered (or at the map's own start point when that spot is over a drop or outside the new map) |
 | Player physics | Valve's pm_shared.c, unmodified (including the long jump module) |
-| Performance | Roughly 20–60 fps at 320×240 in ares (cycle-accurate emulator), depending on the view and how many characters are visible. PVS + frustum culling of world faces and brush entities, characters drawn as triangle strips with cached poses for corpses, idle monsters out of sight think at 4 Hz, a deeper RSP command queue so the CPU and RSP work in parallel |
+| Performance | About 30–60 fps at 320×240 in ares (cycle-accurate emulator), averaging ~47 fps over an automated tour of the campaign's maps; the busiest scenes dip to the high 20s. PVS + frustum culling of world faces and brush entities, characters drawn as triangle strips, fixed poses (gibs, mines, items, bodies) computed once and shared, view-culled gibs and projectiles, billboards drawn as texture rectangles, monster sight checks that test the nearest targets first and skip those outside the PVS, throttled route searches, idle monsters out of sight think at 4 Hz, and a deeper RSP command queue so the CPU and RSP work in parallel |
 | HUD | HEV HUD and title credit inset for CRT overscan; the crosshair (on once you have the suit) slides onto the enemy the auto-aim locks on to |
+
+## Known issues
+
+* Tested mainly in the ares emulator. Speed on real hardware should be similar but hasn't been
+  measured scene by scene.
+* The heaviest scenes (the tram ride and busy parts of Unforeseen Consequences, Office Complex and
+  "We've Got Hostiles", with many characters on screen) run in the high 20s fps.
+* A few of the largest maps use nearly all of the Expansion Pak's memory.
+* A report of the shotgun's view model briefly covering the lower half of the screen while
+  moving hasn't been reproduced yet.
+* The Debug map loader's arrival spot is worked out from the previous map's level change; on a
+  few maps it falls back to the map's own start point, which can be a little off the usual path.
+* With the flashlight on and the view held still, a character walking into the beam can take a
+  few frames to be lit.
 
 ## What is not there (yet)
 
@@ -113,7 +131,8 @@ Half-Life's game data, so keep it for yourself and don't share it.
 To make HL64Builder.exe yourself (on Linux, with mingw-w64): `builder/build_windows.sh`
 (see the comments at its top). Releases are built by GitHub Actions
 (`.github/workflows/release.yml`): changing `builder/VERSION` on `main` builds the .exe and
-publishes it as release `v<VERSION>`.
+publishes it as release `v<VERSION>`. "Run workflow" on the Actions tab builds it too, and with
+"publish" ticked publishes it as (or replaces it in) the release for the current `builder/VERSION`.
 
 ## Building from source
 
