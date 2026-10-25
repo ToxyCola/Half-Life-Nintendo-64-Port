@@ -1877,6 +1877,7 @@ static void carry_pushables(entity_t *m, const float *moved)
 }
 
 // the player walking into a func_pushable shoves it along (CPushable::Move)
+static void pushable_move(entity_t *p, const float *d);
 static void push_pushable(entity_t *p, const float *porg, const float *pmins, const float *pmaxs, float dt)
 {
     float mn[3], mx[3];
@@ -1897,13 +1898,71 @@ static void push_pushable(entity_t *p, const float *porg, const float *pmins, co
     float c[2] = {p->origin[0] + (pb->mins[0] + pb->maxs[0]) * 0.5f - porg[0], p->origin[1] + (pb->mins[1] + pb->maxs[1]) * 0.5f - porg[1]};
     if (v[0] * c[0] + v[1] * c[1] <= 0) return;   // moving away
     float d[3] = {v[0] * dt * 0.9f, v[1] * dt * 0.9f, 0};
-    // check the move against the world with the cart's box
-    float o[3] = {p->origin[0], p->origin[1], p->origin[2] + 1}, to[3] = {o[0] + d[0], o[1] + d[1], o[2]};
+    pushable_move(p, d);
+}
+
+// MOVETYPE_PUSHSTEP (SV_PushMove / SV_StepMove): the move is tried as it is, then 18 units higher
+// (a step or the rim of a ramp), sliding along whatever stops it; afterwards the pushable settles on
+// the floor below. The world and brush entities (lifts, walls) block it, never the pushable itself.
+static bool pushable_try(entity_t *p, const float *from, const float *d, float *out)
+{
+    bmodel_t *pb = &world.bmodels[p->model];
+    float to[3] = {from[0] + d[0], from[1] + d[1], from[2]};
     gtrace_t tr;
-    game_trace(o, to, pb->mins, pb->maxs, TR_WORLD_ONLY, -1, &tr);
-    if (tr.startsolid) { for (int k = 0; k < 2; k++) p->origin[k] += d[k]; return; }
-    p->origin[0] = tr.endpos[0];
-    p->origin[1] = tr.endpos[1];
+    game_trace(from, to, pb->mins, pb->maxs, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+    if (tr.startsolid) return false;
+    float moved[2] = {tr.endpos[0] - from[0], tr.endpos[1] - from[1]};
+    if (tr.fraction < 1 && fabsf(tr.normal[2]) < 0.7f) {
+        // slide: what is left of the move, along the surface
+        float rest[2] = {to[0] - tr.endpos[0], to[1] - tr.endpos[1]};
+        float dn = rest[0] * tr.normal[0] + rest[1] * tr.normal[1];
+        float s2[3] = {tr.endpos[0], tr.endpos[1], tr.endpos[2]};
+        float to2[3] = {s2[0] + rest[0] - dn * tr.normal[0], s2[1] + rest[1] - dn * tr.normal[1], s2[2]};
+        gtrace_t t2;
+        game_trace(s2, to2, pb->mins, pb->maxs, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &t2);
+        if (!t2.startsolid) { moved[0] = t2.endpos[0] - from[0]; moved[1] = t2.endpos[1] - from[1]; }
+    }
+    out[0] = from[0] + moved[0]; out[1] = from[1] + moved[1]; out[2] = from[2];
+    return moved[0] * moved[0] + moved[1] * moved[1] > 0.0001f;
+}
+static void pushable_move(entity_t *p, const float *d)
+{
+    bmodel_t *pb = &world.bmodels[p->model];
+    int sol = p->solid;
+    p->solid = SOLID_NOT;   // never collide with itself
+    float o[3] = {p->origin[0], p->origin[1], p->origin[2] + 1};
+    float a[3], b[3];
+    bool ok_a = pushable_try(p, o, d, a);
+    float want = d[0] * d[0] + d[1] * d[1];
+    float got_a = ok_a ? (a[0] - o[0]) * (a[0] - o[0]) + (a[1] - o[1]) * (a[1] - o[1]) : 0;
+    float *best = ok_a ? a : NULL, got = got_a;
+    if (got_a < want * 0.9f) {
+        // up a step
+        float up[3] = {o[0], o[1], o[2] + 18};
+        gtrace_t tu;
+        game_trace(o, up, pb->mins, pb->maxs, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tu);
+        if (!tu.startsolid && pushable_try(p, tu.endpos, d, b)) {
+            float got_b = (b[0] - o[0]) * (b[0] - o[0]) + (b[1] - o[1]) * (b[1] - o[1]);
+            if (got_b > got + 0.01f) { best = b; got = got_b; }
+        }
+    }
+    if (!best) {
+        // stuck in something (the lift it rode up on): the old behaviour, just move
+        gtrace_t ts;
+        game_trace(o, o, pb->mins, pb->maxs, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &ts);
+        if (ts.startsolid) { p->origin[0] += d[0]; p->origin[1] += d[1]; }
+        p->solid = sol;
+        return;
+    }
+    // settle on the floor: at most a step (18) plus a little below where it moved to
+    float dn[3] = {best[0], best[1], best[2] - 18 - 24};
+    gtrace_t tf;
+    game_trace(best, dn, pb->mins, pb->maxs, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tf);
+    p->origin[0] = best[0];
+    p->origin[1] = best[1];
+    if (!tf.startsolid && tf.fraction < 1) p->origin[2] = tf.endpos[2];
+    else if (!tf.startsolid) p->origin[2] = best[2] - 1;   // nothing close below: let it drop a bit (falls over frames)
+    p->solid = sol;
 }
 
 // pushables come to rest on whatever is below them -- the world or a brush entity such as the
