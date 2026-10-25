@@ -1,6 +1,7 @@
 # Builds HL64Builder.exe (the Windows ROM builder, see builder/) and publishes it as a release.
 # A release is made when builder/VERSION changes on main (tag v<VERSION>, made here) or when a
-# tag like v1.0 is pushed; "Run workflow" on the Actions tab only builds it (download it from the run).
+# tag like v1.0 is pushed; "Run workflow" on the Actions tab builds it (download it from the run), and
+# with "publish" ticked also replaces the exe in the release for the current builder/VERSION.
 name: Release HL64Builder.exe
 
 on:
@@ -9,6 +10,11 @@ on:
     paths: ['builder/VERSION']
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Also publish it to the release named in builder/VERSION (replaces its HL64Builder.exe)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -71,7 +77,7 @@ jobs:
           path: builder/out/HL64Builder.exe
 
       - name: Release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
