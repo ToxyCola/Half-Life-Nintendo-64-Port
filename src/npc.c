@@ -695,7 +695,11 @@ static bool local_walk(const float *a, const float *b, void *vctx)
         return tr.fraction >= 1 && !tr.startsolid;
     }
     float d = dist2d(a, b);
+#ifdef NOQR
+    if (0) {
+#else
     if (d > 48) {
+#endif
         // quick reject: a wall across the line near the top of the hull blocks the walk too
         // (one point trace instead of a hull walk in 24 unit steps); high up, stairs don't hit it
         float hz = n->maxs[2] - 4;
@@ -760,6 +764,9 @@ static void route_to(npc_t *n, const float *goal)
     }
     n->npath = 0;
     debugf("route %s: %d nodes (%d->%d)\n", entities[n->ent].targetname, len, a, b);
+#ifdef BARNDBG
+    for (int i = 0; i < len; i++) { const float *o = nav_node_origin(route[i]); debugf("   node %d: %.0f %.0f %.0f\n", route[i], o[0], o[1], o[2]); }
+#endif
     for (int i = 0; i < len; i++) memcpy(n->path[n->npath++], nav_node_origin(route[i]), 12);
     memcpy(n->path[n->npath++], goal, 12);
     // skip the first node when the second is already reachable (route simplification)
@@ -792,7 +799,9 @@ static bool follow_route(npc_t *n, float speed, float dt, float arrive_dist)
     float step = speed * dt;
     if (step > d) step = d;
     if (fabsf(dy) > 60) step *= 0.3f;   // turn on the spot first
-    float a = n->yaw * (float)M_PI / 180;
+    // step towards the waypoint, not along the facing: turning round in front of a console or a
+    // door frame used to walk the monster up onto it (Barney at the end of the tram ride)
+    float a = ((n->flags & NF_FLY) ? n->yaw : want) * (float)M_PI / 180;
     if (n->flags & NF_FLY) {
         float dir[3] = {wp[0] - n->origin[0], wp[1] - n->origin[1], wp[2] - n->origin[2]};
         float l = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
@@ -2685,6 +2694,17 @@ void npcs_think(float dt)
     static uint32_t pq[4];
 #endif
     const float frame_dt = dt;
+#ifdef BARNDBG
+    for (int i = 0; i < num_npcs; i++) {
+        npc_t *n = &npcs[i];
+        if (strcmp(entities[n->ent].targetname, BARNDBG)) continue;
+        static float lz, lt; float now2 = game_time();
+        if (fabsf(n->origin[2] - lz) > 1.5f || now2 - lt > 2.0f) {
+            debugf("BD t=%.2f o %.0f %.0f %.1f ss %d ai %d gnd %d og %d seq %d npath %d/%d stuck %.1f fol %d\n", now2, n->origin[0], n->origin[1], n->origin[2], n->sstate, n->ai, n->ground_ent, n->onground, n->seq, n->pathi, n->npath, n->stuck_time, n->following);
+            lz = n->origin[2]; lt = now2;
+        }
+    }
+#endif
     for (int i = 0; i < num_npcs; i++) {
         npc_t *n = &npcs[i];
         dt = frame_dt;

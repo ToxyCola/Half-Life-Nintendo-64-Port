@@ -1228,7 +1228,10 @@ int main(void)
         }
 #endif
 #ifdef TESTCHANGE
-        { static bool done; if (!done && in_game && game_clock > 4) { done = true; game_request_changelevel(TESTCHANGE); } }
+#ifndef TESTLANDMARK
+#define TESTLANDMARK NULL
+#endif
+        { static bool done; if (!done && in_game && game_clock > 4) { done = true; game_request_changelevel(TESTCHANGE, TESTLANDMARK); } }
 #endif
         TR("V"); snd_set_volume(settings.volume / 10.0f);
         {

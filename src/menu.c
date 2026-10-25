@@ -176,7 +176,7 @@ static int num_saves, save_slots[6];
 static char save_labels[6][48];
 typedef enum { MI_CONTINUE, MI_RESUME, MI_SAVE, MI_NEWGAME, MI_LOAD, MI_OPTIONS, MI_LEAVE } mitem_t;
 static const char *mi_label[] = {"Continue", "Resume game", "Save game", "New game", "Load game", "Options", "Leave game"};
-static const char *mi_hint[] = {"Continue from your most recent save.", "", "Save your progress here.", "Start a new single player game.", "Start from the beginning of a chapter.",
+static const char *mi_hint[] = {"Continue from your most recent save.", "", "Save your progress here.", "Start a new single player game.", "Load an autosave or a saved game.",
                                 "Change game settings, configure controls.", ""};
 
 static int main_items(mitem_t *out)
@@ -304,7 +304,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         break;
     }
     case SCR_LOAD: {
-        int total = num_saves + num_chapters;
+        int total = num_saves;   // saved games only (autosaves and manual saves)
         if (!total) { if (pressed.b || pressed.a) screen = SCR_MAIN; break; }
         int d = nav_dir(dt, in, pressed, false);
         load_sel = (load_sel + d + total) % total;
@@ -313,8 +313,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         if (pressed.b) screen = SCR_MAIN;
         if (pressed.a || pressed.start) {
             open = false;
-            if (load_sel < num_saves) snprintf(map_out, map_out_len, "*save%d", save_slots[load_sel]);
-            else strncpy(map_out, chapter_maps[load_sel - num_saves], map_out_len);
+            snprintf(map_out, map_out_len, "*save%d", save_slots[load_sel]);
             return MENU_ACT_START_MAP;
         }
         break;
@@ -398,23 +397,20 @@ static void draw_load(void)
     frame(x, y, w, h, "Load Game");
     fill(x + 10, y + 20, w - 20, 8 * 15 + 4, C_WINDOW_BG);
     bevel(x + 10, y + 20, w - 20, 8 * 15 + 4, C_BORDER_DARK, C_BORDER_BRT);
-    int total = num_saves + num_chapters;
+    int total = num_saves;
+    if (!total) text(FONT_SMALL, x + 16, y + 24, C_TEXT_DIM, "No saved games.");
     for (int i = 0; i < 8 && load_scroll + i < total; i++) {
         int k = load_scroll + i;
         int ry = y + 22 + i * 15;
         if (k == load_sel) fill(x + 12, ry, w - 24, 15, C_SEL_BG);
-        char num[8];
-        if (k < num_saves) strcpy(num, "*");
-        else snprintf(num, sizeof(num), "%d", k - num_saves + 1);
-        text(FONT_SMALL, x + 16, ry + 2, k == load_sel ? C_TEXT_BRIGHT : C_TEXT_DIM, num);
-        text(FONT_SMALL, x + 34, ry + 2, k == load_sel ? C_TEXT_BRIGHT : C_TEXT, k < num_saves ? save_labels[k] : chapters[k - num_saves]);
+        text(FONT_SMALL, x + 16, ry + 2, k == load_sel ? C_TEXT_BRIGHT : C_TEXT, save_labels[k]);
     }
     if (total > 8) {   // scroll bar
         int track = 8 * 15;
         int th = track * 8 / total, ty = track * load_scroll / total;
         fill(x + w - 16, y + 22 + ty, 4, th, C_BORDER_BRT);
     }
-    help_text(x + 12, y + h - 38, w - 24, "Saved games (*) first, newest at the top, then chapters.");
+    help_text(x + 12, y + h - 38, w - 24, "Autosaves and saved games, newest at the top.");
     button(x + w - 128, y + h - 22, 56, "Load (A)", true);
     button(x + w - 66, y + h - 22, 56, "Cancel (B)", false);
 }
