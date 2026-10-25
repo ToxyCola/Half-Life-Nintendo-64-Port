@@ -233,9 +233,9 @@ def build_fx(valve, ui, tmp):
         ('fx_tball', 'exit1', [0], _norm, 'RGBA32', (32, 32)),                         # teleport ball
         ('fx_blood', 'blood', [0], lambda f: f.convert('RGBA'), 'IA8', (32, 32), Image.BILINEAR),
         ('fx_wallpuff', 'wallpuff', [0], _norm, 'IA8', (32, 32), Image.BILINEAR),
-        # beams: the sprite's width runs across the beam (src/weapons.c)
-        ('fx_lgtning', 'lgtning', [0], lambda f: f.convert('L').transpose(Image.Transpose.TRANSPOSE), 'I8', None),
-        ('fx_laserbeam', 'laserbeam', [0], lambda f: f.convert('LA').transpose(Image.Transpose.TRANSPOSE).convert('L'), 'I8', (32, 16), Image.BILINEAR),
+        # beams, as on the PC: the sprite's width runs across the beam, its height along it
+        ('fx_lgtning', 'lgtning', [0], lambda f: f.convert('L'), 'I8', None),
+        ('fx_laserbeam', 'laserbeam', [0], lambda f: f.convert('L'), 'I8', None),
     ]
     for job in jobs:
         name, src, idx, recipe, fmt, size = job[:6]

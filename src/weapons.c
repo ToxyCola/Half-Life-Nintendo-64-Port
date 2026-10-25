@@ -1395,6 +1395,24 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         eye[2] += 28;
         npc_autoaim(eye, aim_dir);
     }
+#ifdef TESTBEAM
+    {   // beams across the view: lightning (top), laser (middle), gluon (bottom)
+        static float nt = 3;
+        if (wtime > nt) {
+            nt = wtime + 0.1f;
+            float o[3]; pm_get_origin(o);
+            float y = view_angles[1] * (float)M_PI / 180, f[3] = {cosf(y), sinf(y), 0}, r[3] = {sinf(y), -cosf(y), 0};
+            float a[3], c[3];
+            for (int k = 0; k < 3; k++) { a[k] = o[k] + f[k] * 220 - r[k] * 160; c[k] = o[k] + f[k] * 220 + r[k] * 160; }
+            a[2] += 70; c[2] += 70;
+            game_effect_lightning(a, c, 140, 120, 255);
+            a[2] -= 50; c[2] -= 50;
+            game_effect_beam_plain(a, c, 255, 60, 60);
+            a[2] -= 50; c[2] -= 50;
+            beam_tex_next = 5; beam_world_next = true; add_beam(a, c, 160, 200, 255, 0.12f, 16); beam_tex_next = 0; beam_world_next = false;
+        }
+    }
+#endif
 #ifdef TESTPROJ
     {   // effects test: the three PC-sprite projectiles drifting in front of the camera
         static float nt = 4;
@@ -2099,9 +2117,13 @@ void weapons_draw_effects(void)
                     }
                     float nx = -dy / l, ny = dx / l;
                     // GoldSrc beams: the sprite's width runs across the beam, its height along it
-                    float wm = (wa + wb) > 0 ? (wa + wb) : 1;
-                    float t1 = l / wm * tw + (b->world_w ? fmodf(wtime * 110, th) : (float)(rand() % (int)th));   // scroll (egon: SetScrollRate)
-                    float t0 = t1 - l / wm * tw;
+                    // r_beams R_DrawSegs: the sprite's width runs across the beam and its height
+                    // along it, once every 100 units (length * 0.01, at least half the sprite);
+                    // the egon's scrolls (SetScrollRate), lightning starts at a random place
+                    float wl = sqrtf((b->b[0] - b->a[0]) * (b->b[0] - b->a[0]) + (b->b[1] - b->a[1]) * (b->b[1] - b->a[1]) + (b->b[2] - b->a[2]) * (b->b[2] - b->a[2]));
+                    float span = fminf(fmaxf(wl * 0.01f, 0.5f) * th, 900.0f);   // texture coordinates stay inside s10.5
+                    float t0 = b->world_w ? fmodf(wtime * 110, th) : (float)(rand() % (int)th);
+                    float t1 = t0 + span;
                     float v0[6] = {ax + nx * wa, ay + ny * wa, za, 0, t0, 1}, v1[6] = {ax - nx * wa, ay - ny * wa, za, tw, t0, 1};
                     float v2[6] = {bx + nx * wb, by + ny * wb, zb, 0, t1, 1}, v3[6] = {bx - nx * wb, by - ny * wb, zb, tw, t1, 1};
                     rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
