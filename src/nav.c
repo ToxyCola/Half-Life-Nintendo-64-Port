@@ -94,24 +94,28 @@ int nav_route(int a, int b, int hull, int *out, int max)
 {
     if (a < 0 || b < 0 || !numnodes) return 0;
     if (a == b) { out[0] = a; return 1; }
-    static float g[2048];
+    static float g[2048], h[2048];
     static int16_t from[2048];
     static uint8_t state[2048];   // 0 new, 1 open, 2 closed
+    static int16_t open[2048];    // the open set, so each step scans only it (not every node)
     int n = numnodes > 2048 ? 2048 : numnodes;
     memset(state, 0, n);
     g[a] = 0;
+    h[a] = d3(nodes[a].o, nodes[b].o);
     from[a] = -1;
     state[a] = 1;
-    for (int iter = 0; iter < n; iter++) {
-        int best = -1;
-        float bf = 1e30f;
-        for (int i = 0; i < n; i++)
-            if (state[i] == 1) {
-                float f = g[i] + d3(nodes[i].o, nodes[b].o);
-                if (f < bf) { bf = f; best = i; }
-            }
-        if (best < 0) return 0;
+    int nopen = 0;
+    open[nopen++] = a;
+    while (nopen > 0) {
+        int bi = 0;
+        float bf = g[open[0]] + h[open[0]];
+        for (int k = 1; k < nopen; k++) {
+            float f = g[open[k]] + h[open[k]];
+            if (f < bf) { bf = f; bi = k; }
+        }
+        int best = open[bi];
         if (best == b) break;
+        open[bi] = open[--nopen];
         state[best] = 2;
         navnode_t *nd = &nodes[best];
         for (int k = 0; k < nd->count; k++) {
@@ -119,7 +123,8 @@ int nav_route(int a, int b, int hull, int *out, int max)
             int t = l->dest;
             if (t >= n || state[t] == 2 || !link_ok(l, hull)) continue;
             float ng = g[best] + d3(nd->o, nodes[t].o);
-            if (state[t] == 0 || ng < g[t]) { g[t] = ng; from[t] = best; state[t] = 1; }
+            if (state[t] == 0) { h[t] = d3(nodes[t].o, nodes[b].o); g[t] = ng; from[t] = best; state[t] = 1; open[nopen++] = t; }
+            else if (ng < g[t]) { g[t] = ng; from[t] = best; }
         }
     }
     if (state[b] != 1 && state[b] != 2) return 0;

@@ -638,14 +638,16 @@ static bool box_free(npc_t *n, const float *p, int self)
 // SV_movestep: step up to 18 units, never off a ledge (unless `allow_fall`); slides along walls
 static bool walk_step(npc_t *n, int self, float dx, float dy, bool allow_fall, int *blocker)
 {
+    // step up 18, across, then down (no room above: across from where it stands)
     float up[3] = {n->origin[0], n->origin[1], n->origin[2] + 18};
-    gtrace_t t0;
-    game_trace(up, up, n->mins, n->maxs, 0, self, &t0);
-    if (t0.startsolid) up[2] = n->origin[2];
     float fw[3] = {up[0] + dx, up[1] + dy, up[2]};
     gtrace_t t1;
     game_trace(up, fw, n->mins, n->maxs, 0, self, &t1);
-    if (t1.startsolid) return false;
+    if (t1.startsolid) {
+        up[2] = fw[2] = n->origin[2];
+        game_trace(up, fw, n->mins, n->maxs, 0, self, &t1);
+        if (t1.startsolid) return false;
+    }
     if (t1.fraction < 1 && blocker) *blocker = t1.ent;
     if (t1.fraction < 0.05f) {
         // slide: try each axis on its own
@@ -692,11 +694,20 @@ static bool local_walk(const float *a, const float *b, void *vctx)
         game_trace(a, b, n->mins, n->maxs, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, c->self, &tr);
         return tr.fraction >= 1 && !tr.startsolid;
     }
+    float d = dist2d(a, b);
+    if (d > 48) {
+        // quick reject: a wall across the line near the top of the hull blocks the walk too
+        // (one point trace instead of a hull walk in 24 unit steps); high up, stairs don't hit it
+        float hz = n->maxs[2] - 4;
+        float la[3] = {a[0], a[1], a[2] + hz}, lb[3] = {b[0], b[1], b[2] + hz};
+        gtrace_t tr;
+        game_trace(la, lb, NULL, NULL, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS | TR_IGNORE_GLASS, c->self, &tr);
+        if (tr.fraction < 1 && !tr.startsolid && fabsf(tr.normal[2]) < 0.7f) return false;
+    }
     float save[3];
     memcpy(save, n->origin, 12);
     bool save_g = n->onground;
     memcpy(n->origin, a, 12);
-    float d = dist2d(a, b);
     bool ok = true;
     float dx = (b[0] - a[0]) / (d > 0 ? d : 1), dy = (b[1] - a[1]) / (d > 0 ? d : 1);
     for (float moved = 0; moved < d - 1 && ok; moved += 24) {
@@ -1150,18 +1161,21 @@ static uint8_t pvs_buf[1024];
 static bool pvs_ok;
 static float player_pos[3], player_eye[3];
 
+static int npc_leaf(npc_t *n)
+{
+    if (n->leaf_cache > 0 && n->leaf_org[0] == n->origin[0] && n->leaf_org[1] == n->origin[1] && n->leaf_org[2] == n->origin[2]) return n->leaf_cache;
+    float c[3];
+    npc_center(n, c);
+    int l = bsp_leaf_for_point(c);
+    memcpy(n->leaf_org, n->origin, 12);
+    n->leaf_cache = l;
+    return l;
+}
+
 static bool player_in_pvs(npc_t *n)
 {
     if (!pvs_ok) return true;
-    int l;
-    if (n->leaf_cache > 0 && n->leaf_org[0] == n->origin[0] && n->leaf_org[1] == n->origin[1] && n->leaf_org[2] == n->origin[2]) l = n->leaf_cache;
-    else {
-        float c[3];
-        npc_center(n, c);
-        l = bsp_leaf_for_point(c);
-        memcpy(n->leaf_org, n->origin, 12);
-        n->leaf_cache = l;
-    }
+    int l = npc_leaf(n);
     if (l <= 0) return true;
     return pvs_buf[(l - 1) >> 3] & (1 << ((l - 1) & 7));
 }
@@ -1234,14 +1248,28 @@ static int look_for_enemy(npc_t *n)
         float d = dist3(n->origin, player_pos);
         if (d < 2048 && can_see(n, 0, fov)) { best = 0; bd = d; }
     }
-    // other monsters: only for allies, soldiers and machines (aliens go for humans too)
+    // other monsters: only for allies, soldiers and machines (aliens go for humans too).
+    // Sight traces are the cost: test the candidates nearest first and stop at the first one seen,
+    // at most a handful per look (the rest get their turn at the next look)
+    int cand[24]; float cd[24]; int nc = 0;
     for (int i = 0; i < num_npcs; i++) {
         npc_t *t = &npcs[i];
         if (t == n || !npc_alive(i)) continue;
         float d = dist3(n->origin, t->origin);
         if (d >= bd || d > 1500) continue;
         if (!hates(n, i + 1)) continue;
-        if (can_see(n, i + 1, fov)) { best = i + 1; bd = d; }
+        if (nc == 24 && d >= cd[23]) continue;   // full: keep the 24 nearest
+        int k = nc < 24 ? nc++ : 23;
+        while (k > 0 && cd[k - 1] > d) { cand[k] = cand[k - 1]; cd[k] = cd[k - 1]; k--; }
+        cand[k] = i; cd[k] = d;
+    }
+    // the looker's PVS rules out most candidates without a trace
+    const uint8_t *pvs = NULL;
+    if (nc) { int ll = npc_leaf(n); if (ll > 0) pvs = bsp_leaf_pvs(ll); }
+    for (int k = 0, tries = 0; k < nc && tries < 6; k++) {
+        if (pvs) { int tl = npc_leaf(&npcs[cand[k]]); if (tl > 0 && !(pvs[(tl - 1) >> 3] & (1 << ((tl - 1) & 7)))) continue; }
+        tries++;
+        if (can_see(n, cand[k] + 1, fov)) { best = cand[k] + 1; break; }
     }
     return best;
 }
@@ -1929,7 +1957,7 @@ static void ai_combat(npc_t *n, float dt)
     if (vis) memcpy(n->last_seen, tp, 12);
     float dist = target_dist(n, t);
     // scientists run from danger
-    if (klass(n) == C_ALLY && (n->flags & NF_SCI)) { n->ai = AI_FLEE; n->fear_time = now; return; }
+    if (klass(n) == C_ALLY && (n->flags & NF_SCI)) { n->ai = AI_FLEE; n->fear_time = now; n->next_plan = n->flee_look = 0; return; }
     if (n->weapons) {   // human grunts
         if (vis) n->bt[0] = now;
         if (now < n->cover_until && n->npath > 0) {   // running for cover
@@ -1955,9 +1983,11 @@ static void ai_combat(npc_t *n, float dt)
     }
     float stop = d && d->melee_dmg ? d->melee_range * 0.8f : 48;
     if (dist <= stop && vis) { face_yaw(n, yaw_to(n->origin, tp), 300, dt); set_activity(n, ACT_IDLE); return; }
-    if (n->npath == 0 || dist3(n->goal, n->last_seen) > 96 || n->stuck_time > 1.0f || n->pathi >= n->npath) {
+    if ((n->npath == 0 || dist3(n->goal, n->last_seen) > 96 || n->stuck_time > 1.0f || n->pathi >= n->npath) && now >= n->next_plan) {
         float g[3] = {n->last_seen[0], n->last_seen[1], n->last_seen[2] - (t == 0 ? 36 : 0)};
         start_moving(n, g, true);
+        // route searches are costly: a few a second, and a failed one waits longer before retrying
+        n->next_plan = now + (n->npath > 0 ? 0.25f : 0.6f) + (rand() % 100) / 1000.0f;
     }
     if (follow_route(n, n->speed, dt, stop)) {
         n->npath = 0;
@@ -1972,8 +2002,14 @@ static void ai_flee(npc_t *n, float dt)
     if (n->enemy >= 0 && (n->enemy == 0 || npc_alive(n->enemy - 1))) {
         float tp[3];
         target_pos(n->enemy, tp);
-        if (dist3(n->origin, tp) > 600 && !can_see(n, n->enemy, false)) { if (!set_activity(n, ACT_COWER)) set_activity(n, ACT_IDLE); return; }
-        if (n->npath == 0 || n->pathi >= n->npath || n->stuck_time > 1) {
+        // sight checks and route searches are the costly part: a few times a second is plenty
+        if (now >= n->flee_look) {
+            n->look_hidden = dist3(n->origin, tp) > 600 && !can_see(n, n->enemy, false);
+            n->flee_look = now + 0.3f + (rand() % 100) / 1000.0f;
+        }
+        if (n->look_hidden) { if (!set_activity(n, ACT_COWER)) set_activity(n, ACT_IDLE); return; }
+        if ((n->npath == 0 || n->pathi >= n->npath || n->stuck_time > 1) && now >= n->next_plan) {
+            n->next_plan = now + 0.5f + (rand() % 200) / 1000.0f;
             // run to the node furthest from the danger among the nearby ones (CoverRadius)
             int best = -1;
             float bd = 0;
@@ -2646,6 +2682,7 @@ void npcs_think(float dt)
 #ifdef PROFX
     static uint32_t pn[MAX_NPCS]; static int pframes; uint32_t tl = TICKS_READ(); int pi = -1;
     static uint32_t ploop; uint32_t tloop0 = tl;
+    static uint32_t pq[4];
 #endif
     const float frame_dt = dt;
     for (int i = 0; i < num_npcs; i++) {
@@ -2771,6 +2808,9 @@ void npcs_think(float dt)
         if (d && !strcmp(d->model, "barnacle")) { barnacle_think(n, dt); continue; }
         if (d && !strcmp(d->model, "tentacle2")) { tentacle_think(n, dt); continue; }
 
+#ifdef PROFX
+        uint32_t q0 = TICKS_READ();
+#endif
         // look for enemies a few times a second
         if (now >= n->next_look) {
             n->next_look = now + 0.3f + (rand() % 100) / 500.0f;
@@ -2786,7 +2826,7 @@ void npcs_think(float dt)
                         if (d && d->snd && d->snd->alert) npc_sound(n, CHAN_VOICE, d->snd->alert, d->snd->na, 1, ATTN_NORM);
                         else if (d && !strcmp(d->model, "barney") && ok_to_speak(n)) npc_say(n, "BA_ATTACK", 2, 1, ATTN_NORM);
                         else if (n->weapons && !strcmp(d->model, "hgrunt") && ok_to_speak(n)) npc_say(n, e == 0 ? "HG_ALERT" : "HG_MONST", 2, 1, ATTN_NORM);
-                        if (n->flags & NF_SCI) { n->ai = AI_FLEE; n->fear_time = now; n->said &= ~32; }
+                        if (n->flags & NF_SCI) { n->ai = AI_FLEE; n->fear_time = now; n->said &= ~32; n->next_plan = n->flee_look = 0; }
                     }
                 } else if (e >= 0 && e != n->enemy) {
                     // switch to a closer target
@@ -2797,14 +2837,26 @@ void npcs_think(float dt)
                 }
             }
         }
+#ifdef PROFX
+        uint32_t q1 = TICKS_READ();
+#endif
         switch (n->ai) {
         case AI_IDLE: ai_idle(n, dt); break;
         case AI_COMBAT: ai_combat(n, dt); break;
         case AI_FLEE: ai_flee(n, dt); break;
         default: break;
         }
+#ifdef PROFX
+        uint32_t q2 = TICKS_READ();
+#endif
         gravity(n, dt);
+#ifdef PROFX
+        uint32_t q3 = TICKS_READ();
+#endif
         if (!(n->flags & NF_STATIC)) npc_relight(n, now);
+#ifdef PROFX
+        pq[0] += TICKS_DISTANCE(q0, q1); pq[1] += TICKS_DISTANCE(q1, q2); pq[2] += TICKS_DISTANCE(q2, q3); pq[3] += TICKS_DISTANCE(q3, TICKS_READ());
+#endif
     }
 #ifdef PROFX
     { uint32_t t = TICKS_READ(); if (pi >= 0) pn[pi] += TICKS_DISTANCE(tl, t); ploop += TICKS_DISTANCE(tloop0, t); }
@@ -2812,7 +2864,11 @@ void npcs_think(float dt)
         debugf("  npc prof loop %d us/frame:", (int)TICKS_TO_US(ploop / pframes)); ploop = 0;
         for (int k = 0; k < num_npcs; k++) if (pn[k] / pframes > TICKS_FROM_US(300))
             debugf(" %s[%s ai%d ss%d]=%d", entities[npcs[k].ent].classname + 8, entities[npcs[k].ent].targetname, npcs[k].ai, npcs[k].sstate, (int)TICKS_TO_US(pn[k] / pframes));
-        debugf(" (of %d)\n", num_npcs);
+        { extern uint32_t prof_trace_ticks, prof_trace_n; debugf(" traces %d/frame %d us/frame", (int)(prof_trace_n / pframes), (int)TICKS_TO_US(prof_trace_ticks / pframes)); prof_trace_n = prof_trace_ticks = 0;
+          extern int prof_nsolid(void); debugf(" solids %d entsz %d", prof_nsolid(), (int)sizeof(entity_t));
+          extern uint32_t prof_tw[4]; debugf(" [bt %d world %d ents %d npcs %d]", (int)(prof_tw[3] / pframes), (int)TICKS_TO_US(prof_tw[0] / pframes), (int)TICKS_TO_US(prof_tw[1] / pframes), (int)TICKS_TO_US(prof_tw[2] / pframes)); memset(prof_tw, 0, 16); }
+        debugf(" (of %d) look %d ai %d grav %d light %d\n", num_npcs, (int)TICKS_TO_US(pq[0] / pframes), (int)TICKS_TO_US(pq[1] / pframes), (int)TICKS_TO_US(pq[2] / pframes), (int)TICKS_TO_US(pq[3] / pframes));
+        memset(pq, 0, sizeof(pq));
         memset(pn, 0, sizeof(pn)); pframes = 0;
     }
 #endif

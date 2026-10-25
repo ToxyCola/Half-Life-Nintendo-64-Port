@@ -745,11 +745,47 @@ static solid_t solids[256];
 static int num_solid;
 static bool solid_valid;
 
+// brush entities (the only ones that can be SOLID_BSP), listed once per map
+static int16_t brush_ents[MAX_ENTITIES];
+static int num_brush_ents = -1, brush_ents_for = -1;
+static int brush_ents_map = -1;
+// monster boxes, grown by what they can move in a frame: a compact first test for traces
+typedef struct { float mn[3], mx[3]; } nbox_t;
+static nbox_t nboxes[MAX_NPCS];
+static int num_nboxes;
+static void update_brush_ents(void)
+{
+    extern int bsp_load_serial;
+    if (brush_ents_for != num_entities || brush_ents_map != bsp_load_serial || num_brush_ents < 0) {
+        num_brush_ents = 0;
+        for (int i = 1; i < num_entities; i++)
+            if (entities[i].model > 0) brush_ents[num_brush_ents++] = i;
+        brush_ents_for = num_entities;
+        brush_ents_map = bsp_load_serial;
+    }
+}
+// the entities with a brush model, in index order (the renderer walks these instead of all)
+int game_brush_entities(const int16_t **list)
+{
+    update_brush_ents();
+    *list = brush_ents;
+    return num_brush_ents;
+}
 void game_trace_begin_frame(void)
 {
     num_solid = 0;
     solid_valid = true;
-    for (int i = 1; i < num_entities && num_solid < 256; i++) {
+    num_nboxes = num_npcs;
+    for (int i = 0; i < num_npcs; i++) {
+        npc_t *n = &npcs[i];
+        for (int k = 0; k < 3; k++) {
+            nboxes[i].mn[k] = n->origin[k] + fminf(n->mins[k], -48) - 64;
+            nboxes[i].mx[k] = n->origin[k] + fmaxf(n->maxs[k], 48) + 64;
+        }
+    }
+    update_brush_ents();
+    for (int bi = 0; bi < num_brush_ents && num_solid < 256; bi++) {
+        int i = brush_ents[bi];
         entity_t *en = &entities[i];
         if (en->model <= 0 || en->removed || en->solid != SOLID_BSP) continue;
         bmodel_t *bm = &world.bmodels[en->model];
@@ -773,6 +809,18 @@ void game_trace_begin_frame(void)
 
 void game_trace(const float *start, const float *end, const float *mins, const float *maxs, int flags, int ignore_npc,
                 gtrace_t *out)
+#ifdef PROFX
+{
+    extern uint32_t prof_trace_ticks, prof_trace_n;
+    void game_trace_(const float *, const float *, const float *, const float *, int, int, gtrace_t *);
+    uint32_t t0 = TICKS_READ();
+    game_trace_(start, end, mins, maxs, flags, ignore_npc, out);
+    prof_trace_ticks += TICKS_DISTANCE(t0, TICKS_READ()); prof_trace_n++;
+}
+uint32_t prof_trace_ticks, prof_trace_n;
+void game_trace_(const float *start, const float *end, const float *mins, const float *maxs, int flags, int ignore_npc,
+                gtrace_t *out)
+#endif
 {
     static const float zero[3] = {0, 0, 0};
     int hn = hull_for_size(mins, maxs);
@@ -787,8 +835,14 @@ void game_trace(const float *start, const float *end, const float *mins, const f
     out->ent = -1;
     out->npc = -1;
     btrace_t tr;
+#ifdef PROFX
+    extern uint32_t prof_tw[4]; uint32_t w0 = TICKS_READ();
+#endif
     trace_brush(&world.models[0], hn, zero, NULL, s, e, &tr);
     merge(out, &tr, 0, -1, false);
+#ifdef PROFX
+    uint32_t w1 = TICKS_READ(); prof_tw[0] += TICKS_DISTANCE(w0, w1);
+#endif
     // segment bounds for quick rejection
     float bmin[3], bmax[3];
     for (int k = 0; k < 3; k++) {
@@ -799,20 +853,29 @@ void game_trace(const float *start, const float *end, const float *mins, const f
         if (!solid_valid) game_trace_begin_frame();
         for (int si = 0; si < num_solid && out->fraction > 0; si++) {
             solid_t *sd = &solids[si];
+            // the compact box first: entity_t is big and each one read is a cache miss
+            if (bmax[0] < sd->mn[0] || bmin[0] > sd->mx[0] || bmax[1] < sd->mn[1] || bmin[1] > sd->mx[1] ||
+                bmax[2] < sd->mn[2] || bmin[2] > sd->mx[2]) continue;
             int i = sd->ent;
             entity_t *en = &entities[i];
             if (en->removed || en->solid != SOLID_BSP) continue;
             if ((flags & TR_IGNORE_GLASS) && en->rendermode != 0) continue;
-            if (bmax[0] < sd->mn[0] || bmin[0] > sd->mx[0] || bmax[1] < sd->mn[1] || bmin[1] > sd->mx[1] ||
-                bmax[2] < sd->mn[2] || bmin[2] > sd->mx[2]) continue;
             trace_brush(&world.models[en->model], hn, en->origin, en->angles, s, e, &tr);
             merge(out, &tr, i, -1, false);
+#ifdef PROFX
+            prof_tw[3]++;
+#endif
         }
     }
+#ifdef PROFX
+    uint32_t w2 = TICKS_READ(); prof_tw[1] += TICKS_DISTANCE(w1, w2);
+#endif
     float mn0[3] = {0, 0, 0}, mx0[3] = {0, 0, 0};
     if (mins) { VectorCopy(mins, mn0); VectorCopy(maxs, mx0); }
     if (!(flags & (TR_IGNORE_MONSTERS | TR_WORLD_ONLY))) {
         for (int i = 0; i < num_npcs; i++) {
+            if (i < num_nboxes && (bmax[0] < nboxes[i].mn[0] || bmin[0] > nboxes[i].mx[0] || bmax[1] < nboxes[i].mn[1] ||
+                                   bmin[1] > nboxes[i].mx[1] || bmax[2] < nboxes[i].mn[2] || bmin[2] > nboxes[i].mx[2])) continue;
             npc_t *n = &npcs[i];
             if (i == ignore_npc || entities[n->ent].removed) continue;
             const float *nmn = n->mins, *nmx = n->maxs;
@@ -849,7 +912,14 @@ void game_trace(const float *start, const float *end, const float *mins, const f
         if (out->player) out->ent = 0;
     }
     for (int k = 0; k < 3; k++) out->endpos[k] = start[k] + out->fraction * (end[k] - start[k]);
+#ifdef PROFX
+    prof_tw[2] += TICKS_DISTANCE(w2, TICKS_READ());
+#endif
 }
+#ifdef PROFX
+uint32_t prof_tw[4];
+int prof_nsolid(void) { return num_solid * 1000 + num_brush_ents; }
+#endif
 
 bool game_visible(const float *a, const float *b)
 {

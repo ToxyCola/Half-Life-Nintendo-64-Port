@@ -22,6 +22,7 @@ void bsp_free(void)
     memset(&world, 0, sizeof(world));
 }
 
+int bsp_load_serial;   // bumped by every map load (caches keyed on the map)
 bool bsp_load(const char *mapname)
 {
     bsp_free();
@@ -43,6 +44,7 @@ bool bsp_load(const char *mapname)
 #endif
     uint32_t *hdr = (uint32_t *)buf;
     world.base = buf;
+    bsp_load_serial++;
     world.vertscale = hdr[2];
     uint32_t *tab = hdr + 4;
 #define LUMP(i, ptr, cnt) do { ptr = (void *)(buf + tab[(i) * 2]); cnt = tab[(i) * 2 + 1]; } while (0)

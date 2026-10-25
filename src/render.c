@@ -446,9 +446,11 @@ static void free_model_blocks(void)
 
 static void build_entity_matrix(T3DMat4FP *out, const float *origin, const float *angles, float s)
 {
-    float sy = sinf(angles[1] * M_PI / 180), cy = cosf(angles[1] * M_PI / 180);
-    float sp = sinf(angles[0] * M_PI / 180), cp = cosf(angles[0] * M_PI / 180);
-    float sr = sinf(angles[2] * M_PI / 180), cr = cosf(angles[2] * M_PI / 180);
+    const float k = (float)M_PI / 180;
+    float sy = 0, cy = 1, sp = 0, cp = 1, sr = 0, cr = 1;   // most brush entities never turn: no trig
+    if (angles[1] != 0) { sy = sinf(angles[1] * k); cy = cosf(angles[1] * k); }
+    if (angles[0] != 0) { sp = sinf(angles[0] * k); cp = cosf(angles[0] * k); }
+    if (angles[2] != 0) { sr = sinf(angles[2] * k); cr = cosf(angles[2] * k); }
     // GoldSrc AngleMatrix: columns are forward, left, up
     float f[3] = {cp * cy, cp * sy, -sp};
     float l[3] = {sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, sr * cp};
@@ -574,7 +576,11 @@ static void draw_entities(const float *eye, T3DMat4FP *mats)
     int used = 0;
     num_trans_ents = 0;
     t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED | ENT_CULL);
-    for (int i = 1; i < num_entities && used < MAX_ENT_MATS; i++) {
+    extern int game_brush_entities(const int16_t **list);
+    const int16_t *blist;
+    int nb = game_brush_entities(&blist);
+    for (int bi = 0; bi < nb && used < MAX_ENT_MATS; bi++) {
+        int i = blist[bi];
         entity_t *e = &entities[i];
         if (!e->visible || e->removed || e->model <= 0) continue;
         bmodel_t *bm = &world.bmodels[e->model];

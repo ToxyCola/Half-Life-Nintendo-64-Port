@@ -1864,7 +1864,11 @@ static void carry_pushables(entity_t *m, const float *moved)
 {
     if (m->model <= 0) return;
     bmodel_t *mb = &world.bmodels[m->model];
-    for (int i = 1; i < num_entities; i++) {
+    extern int game_brush_entities(const int16_t **list);
+    const int16_t *bl;
+    int nb = game_brush_entities(&bl);
+    for (int bi = 0; bi < nb; bi++) {
+        int i = bl[bi];
         entity_t *p = &entities[i];
         if (p->type != ENT_PUSHABLE || p->removed || p->model <= 0 || p == m) continue;
         bmodel_t *pb = &world.bmodels[p->model];

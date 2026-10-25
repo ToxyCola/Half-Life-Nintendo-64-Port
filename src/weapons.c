@@ -162,7 +162,7 @@ void game_effect_blood_color(const float *o, bool yellow)
 }
 
 // ---- gibs (CGib::SpawnRandomGibs with models/hgibs.mdl / agibs.mdl): bouncing body parts
-typedef struct { studio_t *m; float o[3], v[3], yaw, spin; int body; float end; bool rest; } gib_t;
+typedef struct { studio_t *m; float o[3], v[3], yaw, spin; int body; float end; bool rest; uint8_t light[3], lit; } gib_t;
 #define MAX_GIBS 32
 static gib_t gibs[MAX_GIBS];
 static int gib_next;
@@ -182,6 +182,7 @@ void game_spawn_gibs(const float *o, int count, bool alien, float speed)
         g->body = !alien && i == 0 ? 0 : (alien ? rand() % nbody : 1 + rand() % (nbody - 1));   // one skull, then parts
         g->end = wtime + 8 + (rand() % 400) / 100.0f;
         g->rest = false;
+        g->lit = 0;
     }
     game_effect_blood_color(o, alien);
 }
@@ -1590,6 +1591,18 @@ static uint32_t pst[5], pacc[5]; static int pn_;
 #else
 #define PSTAMP(i)
 #endif
+// a screen-aligned textured quad at one depth: a texture rectangle with the depth as primitive Z
+// (the RDP does it directly; two rdpq_triangle()s cost the CPU their edge setup)
+static void zrect(float x0, float y0, float x1, float y1, float z, float s0, float t0, float s1, float t1, bool ztest)
+{
+    if (x1 <= x0 || y1 <= y0) return;
+    if (ztest) {
+        rdpq_mode_zoverride(true, 0, 0);
+        rdpq_set_prim_depth_raw((uint16_t)(fminf(fmaxf(z, 0), 1) * 0x7FFF), 0);
+    }
+    rdpq_texture_rectangle_scaled(TILE0, x0, y0, x1, y1, s0, t0, s1, t1);
+    if (ztest) rdpq_mode_zoverride(false, 0, 0);
+}
 static bool project(const float *p, float *sx, float *sy)
 {
     T3DVec3 in = {{p[0], p[1], p[2]}}, out;
@@ -1681,7 +1694,7 @@ static sprite_t *fxspr_sprite(const fxspr_t *x)
 }
 static sprite_t *fx_flare;
 // one quad (or several 30-texel tiles of it: TMEM holds 32x32 RGBA32) between four projected corners
-static void quad_tiles(sprite_t *sp, const fxspr_t *x, int frame, float c[4][3])
+static void quad_tiles(sprite_t *sp, const fxspr_t *x, int frame, float c[4][3], bool rect, bool ztest)
 {
     surface_t surf = sprite_get_pixels(sp);
     int y0 = frame * x->fh;
@@ -1695,6 +1708,13 @@ static void quad_tiles(sprite_t *sp, const fxspr_t *x, int frame, float c[4][3])
             int ut0 = t0 > 0 ? t0 - 1 : 0, ut1 = t1 < x->fh ? t1 + 1 : t1;
             rdpq_sync_tile(); rdpq_sync_load();
             rdpq_tex_upload_sub(TILE0, &surf, &(rdpq_texparms_t){.s.repeats = 1, .t.repeats = 1}, us0, y0 + ut0, us1, y0 + ut1);
+            if (rect) {
+                float u0 = (float)s0 / x->fw, u1 = (float)s1 / x->fw, w0 = (float)t0 / x->fh, w1 = (float)t1 / x->fh;
+                zrect(c[0][0] + (c[3][0] - c[0][0]) * u0, c[0][1] + (c[3][1] - c[0][1]) * w0,
+                      c[0][0] + (c[3][0] - c[0][0]) * u1, c[0][1] + (c[3][1] - c[0][1]) * w1, c[0][2],
+                      s0, y0 + t0, s1, y0 + t1, ztest);
+                continue;
+            }
             float v[4][6];
             const int ss[4] = {s0, s1, s0, s1}, tt[4] = {t0, t0, t1, t1};
             for (int q = 0; q < 4; q++) {
@@ -1732,7 +1752,7 @@ static bool fxspr_billboard(int id, const float *o, float hw, float t, float fps
     rdpq_mode_zbuf(true, false);
     rdpq_mode_filter(FILTER_BILINEAR);
     rdpq_set_prim_color(RGBA32(r * x->tint[0] / 255, g * x->tint[1] / 255, b * x->tint[2] / 255, a));
-    quad_tiles(sp, x, frame, c);
+    quad_tiles(sp, x, frame, c, true, true);
     return true;
 }
 static void draw_env_sprites(void)
@@ -1746,6 +1766,7 @@ static void draw_env_sprites(void)
     int mode = 0;
     static unsigned framecnt;
     framecnt++;
+    int glow_traces = 0;
     for (int i = 0; i < n && drawn < 24; i++) {
         int ei = list[i];
         entity_t *e = &entities[ei];
@@ -1814,7 +1835,9 @@ static void draw_env_sprites(void)
         // show, so the light fixture they sit in doesn't cut them in half but a wall in front hides them
         bool glow = rm == 3;
         if (glow) {
-            if (!spr_vis[ei] || ((framecnt + ei) & 3) == 0) {
+            // the visibility trace is long and costly: every 8th frame each, two a frame at most
+            if ((!spr_vis[ei] || ((framecnt + ei) & 7) == 0) && glow_traces < 2) {
+                glow_traces++;
                 gtrace_t tr;
                 game_trace(fx_eye, e->origin, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
                 // R_GlowBlend: hidden only when more than 8 units of the line are blocked
@@ -1867,15 +1890,12 @@ static void draw_env_sprites(void)
         { static float nt; if (now > nt) { nt = now + 1; debugf("SPR fmt %d %dx%d | %d %s fr %d sc %.2f hw %.0f c0 %.0f %.0f %.3f c3 %.0f %.0f %.3f a %d\n", sp ? (int)sprite_get_format(sp) : -1, sp ? sp->width : 0, sp ? sp->height : 0, ei, x ? x->name : "-", frame, sc, hw, c[0][0], c[0][1], c[0][2], c[3][0], c[3][1], c[3][2], a); } }
 #endif
         rdpq_set_prim_color(RGBA32(cr, cg, cb, a));
-        if (x) quad_tiles(sp, x, frame, c);
+        if (x) quad_tiles(sp, x, frame, c, x->type != 3, !glow);
         else {
             rdpq_sync_tile(); rdpq_sync_load();
             rdpq_sprite_upload(TILE0, sp, NULL);
             float tw = sp->width, th = sp->height;
-            float v0[6] = {c[0][0], c[0][1], c[0][2], 0, 0, 1}, v1[6] = {c[1][0], c[1][1], c[1][2], tw, 0, 1};
-            float v2[6] = {c[2][0], c[2][1], c[2][2], 0, th, 1}, v3[6] = {c[3][0], c[3][1], c[3][2], tw, th, 1};
-            rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
-            rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+            zrect(c[0][0], c[0][1], c[3][0], c[3][1], c[0][2], 0, 0, tw, th, !glow);
         }
         drawn++;
     }
@@ -1922,10 +1942,7 @@ static void draw_bills(bool view)
         rdpq_sprite_upload(TILE0, sp, NULL);
         rdpq_set_prim_color(RGBA32(r, g, b, 255));
         float tw = sp->width, th = sp->height;
-        float v0[6] = {x - rr, y - rr, z, 0, 0, 1}, v1[6] = {x + rr, y - rr, z, tw, 0, 1};
-        float v2[6] = {x - rr, y + rr, z, 0, th, 1}, v3[6] = {x + rr, y + rr, z, tw, th, 1};
-        rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
-        rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+        zrect(x - rr, y - rr, x + rr, y + rr, z, 0, 0, tw, th, true);
     }
     for (int i = 0; i < MAX_BILLS; i++) {
         bill_t *bl = &bills[i];
@@ -1954,10 +1971,7 @@ static void draw_bills(bool view)
         float fade = bl->kind == 0 ? (age < bl->life * 0.6f ? 1 : 1 - (age - bl->life * 0.6f) / (bl->life * 0.4f)) : 1;
         rdpq_set_prim_color(RGBA32(bl->r, bl->g, bl->b, (int)(255 * fade)));
         float tw = sp->width, th = sp->height;
-        float v0[6] = {x - rad, y - rad, z, 0, 0, 1}, v1[6] = {x + rad, y - rad, z, tw, 0, 1};
-        float v2[6] = {x - rad, y + rad, z, 0, th, 1}, v3[6] = {x + rad, y + rad, z, tw, th, 1};
-        rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
-        rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+        zrect(x - rad, y - rad, x + rad, y + rad, z, 0, 0, tw, th, !view);
     }
 }
 
@@ -1966,8 +1980,28 @@ static float fl_point[3];
 static bool fl_valid;
 // where the flashlight's dynamic light is this frame (for lighting characters)
 bool weapons_flashlight_point(float *out) { if (fl_valid) memcpy(out, fl_point, 12); return fl_valid; }
+#ifdef PROFX
+static uint32_t wd_acc[6]; static int wd_n;
+#define WD(i) do { uint32_t _t = TICKS_READ(); wd_acc[i] += TICKS_DISTANCE(wd_t, _t); wd_t = _t; } while (0)
+#else
+#define WD(i)
+#endif
+// rough view cone test for small models (the 3D view is about 90 x 74 degrees, 55 on the diagonal)
+static bool fx_in_view(const float *o, float r)
+{
+    float d[3] = {o[0] - fx_eye[0], o[1] - fx_eye[1], o[2] - fx_eye[2]};
+    float f = d[0] * fx_fwd[0] + d[1] * fx_fwd[1] + d[2] * fx_fwd[2];
+    if (f < -r) return false;
+    float l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+    if (l2 > 2500.0f * 2500.0f) return false;
+    float lim = f + r * 2;   // inside a 60 degree half-angle cone, grown by the radius
+    return lim >= 0 && lim * lim >= l2 * 0.25f;
+}
 void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
 {
+#ifdef PROFX
+    uint32_t wd_t = TICKS_READ();
+#endif
     memcpy(fx_eye, eye, 12); memcpy(fx_angles, angles, 12);
     vm_att_ok = false;
     {
@@ -1977,10 +2011,13 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
         fx_right[0] = sy_; fx_right[1] = -cy_; fx_right[2] = 0;
         fx_fwd[0] = cp_ * cy_; fx_fwd[1] = cp_ * sy_; fx_fwd[2] = -sp_;
     }
+    static uint32_t wd_frame;
+    wd_frame++;
     for (int i = 0; i < MAX_PROJ; i++) {
         proj_t *p = &projs[i];
         if (p->kind == P_NONE || !p->model) continue;
-        studio_draw_t d = {.model = p->model, .yaw = p->yaw, .seq = 0, .frame = p->frame, .body = p->kind == P_TRIPMINE ? 3 : 0};
+        if (!fx_in_view(p->o, 48)) continue;
+        studio_draw_t d = {.model = p->model, .yaw = p->yaw, .seq = 0, .frame = p->frame, .body = p->kind == P_TRIPMINE ? 3 : 0, .cacheable = true};
         if (p->kind == P_TRIPMINE) { int s = studio_find_seq(p->model, "world"); d.seq = s >= 0 ? s : 0; }
         memcpy(d.origin, p->o, 12);
         bsp_light_at(p->o, d.light);
@@ -1989,17 +2026,23 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
     for (int i = 0; i < MAX_GIBS; i++) {
         gib_t *g = &gibs[i];
         if (!g->m || g->end < wtime) continue;
-        studio_draw_t d = {.model = g->m, .yaw = g->yaw, .seq = 0, .frame = 0, .body = g->body};
+        if (!fx_in_view(g->o, 24)) continue;
+        studio_draw_t d = {.model = g->m, .yaw = g->yaw, .seq = 0, .frame = 0, .body = g->body, .cacheable = true};
         memcpy(d.origin, g->o, 12);
-        bsp_light_at(g->o, d.light);
+        // floor light: once at rest, every few frames while flying
+        if (!g->lit || (!g->rest && ((wd_frame + i) & 3) == 0)) { bsp_light_at(g->o, g->light); g->lit = 1; }
+        memcpy(d.light, g->light, 3);
         studio_draw(&d);
     }
+    WD(0);
     // particles / beams: drawn while the world depth is still in the z-buffer so walls hide them
 #ifdef PROFX
     uint32_t wt0 = TICKS_READ();
 #endif
     weapons_draw_effects();
+    WD(1);
     { extern void render_draw_translucent(void); render_draw_translucent(); }
+    WD(2);
 #ifdef PROFX
     uint32_t wt1 = TICKS_READ();
     { pacc[0] += TICKS_DISTANCE(wt0, pst[0]); pacc[1] += TICKS_DISTANCE(pst[0], pst[1]); pacc[2] += TICKS_DISTANCE(pst[1], pst[2]); pacc[3] += TICKS_DISTANCE(pst[2], pst[3]);
@@ -2047,7 +2090,11 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
     t3d_screen_clear_depth();
 #endif
     studio_draw(&d);
+    WD(3);
     vm_att_ok = vmodel->numatt > 0;
+#ifdef PROFX
+    if (++wd_n == 30) { debugf("  w3d: projs+gibs %d fx %d trans %d vm %d us\n", (int)TICKS_TO_US(wd_acc[0] / 30), (int)TICKS_TO_US(wd_acc[1] / 30), (int)TICKS_TO_US(wd_acc[2] / 30), (int)TICKS_TO_US(wd_acc[3] / 30)); memset(wd_acc, 0, sizeof(wd_acc)); wd_n = 0; }
+#endif
     // the gun's own muzzle flash over the view model (no depth test, like the PC's)
     bool anyv = false;
     for (int i = 0; i < MAX_BILLS; i++) if (bills[i].view && wtime - bills[i].start <= bills[i].life) anyv = true;
@@ -2080,8 +2127,18 @@ void weapons_draw_effects(void)
         float p = fx_angles[0] * (float)M_PI / 180, y = fx_angles[1] * (float)M_PI / 180;
         float f[3] = {cosf(p) * cosf(y), cosf(p) * sinf(y), -sinf(p)};
         float end[3] = {fx_eye[0] + f[0] * 2048, fx_eye[1] + f[1] * 2048, fx_eye[2] + f[2] * 2048};
-        gtrace_t tr;
-        game_trace(fx_eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+        // the view trace is the costly part: reuse it while the view holds still
+        static gtrace_t tr;
+        static float last_eye[3], last_ang[2];
+        static bool have_tr;
+        static uint8_t tr_age;
+        if (!have_tr || ++tr_age >= 6 || fabsf(fx_eye[0] - last_eye[0]) + fabsf(fx_eye[1] - last_eye[1]) + fabsf(fx_eye[2] - last_eye[2]) > 1.0f ||
+            fabsf(fx_angles[0] - last_ang[0]) + fabsf(fx_angles[1] - last_ang[1]) > 0.25f) {
+            game_trace(fx_eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+            memcpy(last_eye, fx_eye, 12); last_ang[0] = fx_angles[0]; last_ang[1] = fx_angles[1];
+            have_tr = true;
+            tr_age = 0;
+        }
         if (tr.fraction < 1) {
             memcpy(fl_point, tr.endpos, 12);
             fl_valid = true;
@@ -2106,9 +2163,12 @@ void weapons_draw_effects(void)
                 rdpq_mode_zbuf(true, false);
                 const float R = 100;
                 float prev[7]; bool havep = false;
-                for (int k = 0; k <= 16; k++) {
-                    float t = k * (float)M_PI / 8, w[3], sx, sy;
-                    for (int q = 0; q < 3; q++) w[q] = c[q] + (u[q] * cosf(t) + v[q] * sinf(t)) * R;
+                // 12 segments: each is a CPU-set-up triangle
+                static float ring[13][2]; static bool ring_ok;
+                if (!ring_ok) { for (int k = 0; k <= 12; k++) { ring[k][0] = cosf(k * (float)M_PI / 6) * R; ring[k][1] = sinf(k * (float)M_PI / 6) * R; } ring_ok = true; }
+                for (int k = 0; k <= 12; k++) {
+                    float w[3], sx, sy;
+                    for (int q = 0; q < 3; q++) w[q] = c[q] + u[q] * ring[k][0] + v[q] * ring[k][1];
                     if (!project(w, &sx, &sy)) { havep = false; continue; }
                     float cur[7] = {sx, sy, proj_z, 1, 1, 0.9f, 0};
                     float cc[7] = {cx, cy, cz, 1, 1, 0.9f, lv / 255.0f};
@@ -2196,10 +2256,7 @@ void weapons_draw_effects(void)
                         up = true;
                     }
                     rdpq_set_prim_color(RGBA32(p->r, p->g, p->b, (int)(255 * (1 - age))));
-                    float v0[6] = {x - rad, y - rad, z, 0, 0, 1}, v1[6] = {x + rad, y - rad, z, tw, 0, 1};
-                    float v2[6] = {x - rad, y + rad, z, 0, th, 1}, v3[6] = {x + rad, y + rad, z, tw, th, 1};
-                    rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
-                    rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+                    zrect(x - rad, y - rad, x + rad, y + rad, z, 0, 0, tw, th, true);
                 }
             }
         }

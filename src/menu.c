@@ -504,8 +504,6 @@ void menu_draw(void)
             rdpq_sprite_blit(bg, 0, 0, NULL);
             rdpq_set_mode_standard();
         }
-        text(FONT_SMALL, SW - 4 - HUD_SAFE_X - font_width(FONT_SMALL, "Ported by ToxyCola using Claude Opus 5.5"), SH - 12 - HUD_SAFE_Y,
-             C_TEXT_BRIGHT, "Ported by ToxyCola using Claude Opus 5.5");
     }
     draw_main();
     switch (screen) {

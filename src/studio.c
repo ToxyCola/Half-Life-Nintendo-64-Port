@@ -19,10 +19,15 @@ static studio_t *cache[MAX_MODELS];
 static int num_cached;
 static T3DMat4FP *bone_pool;         // FB_COUNT * MAX_DRAWN_BONES, uncached
 // poses that never change (bodies on the floor): their bone matrices are kept here once computed
-#define STATIC_BONES 384
+#define STATIC_BONES 1024
 static T3DMat4FP *static_pool;
 static int static_used;
 static int pool_frame, pool_used;
+// shared fixed poses (gibs, mines, props, bodies on a key frame): model-local bone matrices are the
+// same for every instance, so they are computed once per map and kept in static_pool
+#define MAX_POSES 64
+static struct { studio_t *m; int16_t seq, frame, off, natt; float att[4][3]; } poses[MAX_POSES];
+static int num_poses;
 
 static void *lump(uint8_t *buf, uint32_t *tab, int i, int *count)
 {
@@ -290,6 +295,7 @@ void studio_free(studio_t *m)
         free(m->strip_idx); free(m->strip_ofs); free(m->cs_first);
         free(m->base);
         free(m);
+        for (int p = 0; p < num_poses; p++) if (poses[p].m == m) poses[p].m = NULL;
         cache[i] = cache[--num_cached];
         return;
     }
@@ -299,6 +305,7 @@ void studio_free_all(void)
 {
     rspq_wait();
     static_used = 0;
+    num_poses = 0;
     for (int i = 0; i < num_cached; i++) {
         studio_t *m = cache[i];
         for (int t = 0; t < m->numtex; t++) if (m->texblocks[t]) rspq_block_free(m->texblocks[t]);
@@ -372,8 +379,6 @@ void studio_draw(const studio_draw_t *d)
     studio_t *m = d->model;
     if (!m || m->numseqs == 0) return;
     bool cached = d->cache_slot && *d->cache_slot >= 0 && *d->cache_slot + m->numbones <= static_used;
-    // keep room for the first-person weapon (drawn last): busy scenes used to run the pool dry
-    if (!cached && pool_used + m->numbones > MAX_DRAWN_BONES - (d->use_xform ? 0 : 160)) return;
     int seq = d->seq;
     if (seq < 0 || seq >= m->numseqs) seq = 0;
     sseq_t *s = &m->seqs[seq];
@@ -384,6 +389,18 @@ void studio_draw(const studio_draw_t *d)
     int f0 = (int)fr, f1 = f0 + 1;
     if (f1 >= nf) f1 = (s->flags & 1) ? 0 : nf - 1;
     float t = fr - f0;
+    // a pose on a key frame with no controllers is shared by every instance
+    int pose = -1;
+    // (only poses that stay put: a one-frame or finished sequence, or one the caller says won't change;
+    // animating characters passing a key frame would just fill the pool)
+    bool keyed = !cached && (f0 == f1 || (d->cacheable && t < 0.01f)) && d->ctl0 == 0 && d->mouth <= 0 && !d->use_xform && m->numbones <= 128;
+    if (keyed) {
+        for (int i = 0; i < num_poses; i++)
+            if (poses[i].m == m && poses[i].seq == seq && poses[i].frame == f0) { pose = i; break; }
+        if (pose >= 0) cached = true;
+    }
+    // keep room for the first-person weapon (drawn last): busy scenes used to run the pool dry
+    if (pool_used + (cached ? 0 : m->numbones) + 1 > MAX_DRAWN_BONES - (d->use_xform ? 0 : 160)) return;
     // compact keys (tools/mdl2n64.py): position mask, constant positions, then per frame
     // x,y,z of each bone's quaternion followed by the positions of the moving bones
     const uint8_t *abase = m->anim + s->animofs;
@@ -400,9 +417,25 @@ void studio_draw(const studio_draw_t *d)
     float cy = cosf(d->yaw * (float)M_PI / 180), sy = sinf(d->yaw * (float)M_PI / 180);
     float ent[3][4] = {{cy, -sy, 0, d->origin[0]}, {sy, cy, 0, d->origin[1]}, {0, 0, 1, d->origin[2]}};
     if (d->use_xform) memcpy(ent, d->xform, sizeof(ent));
+    // the entity transform is its own matrix on the stack: bone matrices stay model-local (shareable)
+    T3DMat4FP *emat = &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used++];
+    {
+        T3DMat4 tm;
+        for (int r = 0; r < 3; r++) { tm.m[0][r] = ent[r][0]; tm.m[1][r] = ent[r][1]; tm.m[2][r] = ent[r][2]; tm.m[3][r] = ent[r][3]; }
+        tm.m[0][3] = tm.m[1][3] = tm.m[2][3] = 0;
+        tm.m[3][3] = 1;
+        t3d_mat4_to_fixed_3x4(emat, &tm);
+    }
     float bonemat[128][3][4];
     float inv = 1.0f / m->posscale;
-    T3DMat4FP *out = cached ? &static_pool[*d->cache_slot] : &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used];
+    T3DMat4FP *out = pose >= 0 ? &static_pool[poses[pose].off]
+                   : cached ? &static_pool[*d->cache_slot] : &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used];
+    if (pose >= 0) {
+        for (int a = 0; a < d->att_n && a < poses[pose].natt; a++) {
+            const float *la = poses[pose].att[a];
+            for (int r = 0; r < 3; r++) d->att_out[a][r] = ent[r][0] * la[0] + ent[r][1] * la[1] + ent[r][2] * la[2] + ent[r][3];
+        }
+    }
 #ifdef PROFX
     uint32_t pb0 = TICKS_READ();
 #endif
@@ -412,18 +445,23 @@ void studio_draw(const studio_draw_t *d)
         const float qs = 1.0f / 32767.0f;
         for (int i = 0; i < 3; i++) { qa[i] = k0[b * 3 + i] * qs; qb[i] = k1[b * 3 + i] * qs; }
         float wa = 1 - qa[0] * qa[0] - qa[1] * qa[1] - qa[2] * qa[2];
-        float wb = 1 - qb[0] * qb[0] - qb[1] * qb[1] - qb[2] * qb[2];
         qa[3] = wa > 0 ? sqrtf(wa) : 0;
-        qb[3] = wb > 0 ? sqrtf(wb) : 0;
-        for (int i = 0; i < 4; i++) dot += qa[i] * qb[i];
-        float sgn = dot < 0 ? -1.0f : 1.0f;
-        float len = 0;
-        for (int i = 0; i < 4; i++) {
-            q[i] = qa[i] * (1 - t) + sgn * qb[i] * t;
-            len += q[i] * q[i];
+        if (t < 0.01f || f0 == f1) {
+            // on a key (paused, static or last frame): the stored quaternion is already unit length
+            for (int i = 0; i < 4; i++) q[i] = qa[i];
+        } else {
+            float wb = 1 - qb[0] * qb[0] - qb[1] * qb[1] - qb[2] * qb[2];
+            qb[3] = wb > 0 ? sqrtf(wb) : 0;
+            for (int i = 0; i < 4; i++) dot += qa[i] * qb[i];
+            float sgn = dot < 0 ? -1.0f : 1.0f;
+            float len = 0;
+            for (int i = 0; i < 4; i++) {
+                q[i] = qa[i] * (1 - t) + sgn * qb[i] * t;
+                len += q[i] * q[i];
+            }
+            len = 1.0f / sqrtf(len > 0 ? len : 1);
+            for (int i = 0; i < 4; i++) q[i] *= len;
         }
-        len = 1.0f / sqrtf(len > 0 ? len : 1);
-        for (int i = 0; i < 4; i++) q[i] *= len;
         if (posmask[b]) {
             for (int i = 0; i < 3; i++) p[i] = (p0[i] * (1 - t) + p1[i] * t) * inv;
             p0 += 3; p1 += 3;
@@ -453,7 +491,7 @@ void studio_draw(const studio_draw_t *d)
         float local[3][4];
         quat_to_mat(q, p, local);
         int par = m->parents[b];
-        if (par < 0) concat(ent, local, bonemat[b]);
+        if (par < 0) memcpy(bonemat[b], local, sizeof(local));
         else concat(bonemat[par], local, bonemat[b]);
         // to tiny3d: column-major 4x4, vertex positions are scaled by posscale
         T3DMat4 tm;
@@ -468,12 +506,25 @@ void studio_draw(const studio_draw_t *d)
         t3d_mat4_to_fixed_3x4(&out[b], &tm);
     }
     pool_used += m->numbones;
-    for (int a = 0; a < d->att_n && a < m->numatt; a++) {
+    float latt[4][3];
+    int natt = 0;
+    for (int a = 0; a < m->numatt && a < 4; a++) {
         satt_t *at = &m->att[a];
-        if (at->bone < 0 || at->bone >= m->numbones || at->bone >= 128) continue;
+        if (at->bone < 0 || at->bone >= m->numbones || at->bone >= 128) break;
         float (*bm)[4] = bonemat[at->bone];
-        for (int r = 0; r < 3; r++) d->att_out[a][r] = bm[r][0] * at->org[0] + bm[r][1] * at->org[1] + bm[r][2] * at->org[2] + bm[r][3];
+        for (int r = 0; r < 3; r++) latt[a][r] = bm[r][0] * at->org[0] + bm[r][1] * at->org[1] + bm[r][2] * at->org[2] + bm[r][3];
+        natt = a + 1;
     }
+    for (int a = 0; a < d->att_n && a < natt; a++)
+        for (int r = 0; r < 3; r++) d->att_out[a][r] = ent[r][0] * latt[a][0] + ent[r][1] * latt[a][1] + ent[r][2] * latt[a][2] + ent[r][3];
+    if (keyed && num_poses < MAX_POSES && static_pool && static_used + m->numbones <= STATIC_BONES) {
+        memcpy(&static_pool[static_used], out, sizeof(T3DMat4FP) * m->numbones);
+        poses[num_poses].m = m; poses[num_poses].seq = seq; poses[num_poses].frame = f0;
+        poses[num_poses].off = static_used; poses[num_poses].natt = natt;
+        memcpy(poses[num_poses].att, latt, sizeof(latt));
+        num_poses++;
+        static_used += m->numbones;
+    } else
     // a pose that won't change: keep its matrices for the next frames
     if (d->cache_slot && d->cacheable && static_pool && static_used + m->numbones <= STATIC_BONES) {
         memcpy(&static_pool[static_used], out, sizeof(T3DMat4FP) * m->numbones);
@@ -495,6 +546,7 @@ void studio_draw(const studio_draw_t *d)
 
     int family = (d->skin >= 0 && d->skin < m->numskinfamilies) ? d->skin : 0;
     int cur_tex = -1, cur_alpha = -1;
+    t3d_matrix_push(emat);
     t3d_matrix_push_pos(1);
     for (int bp = 0; bp < m->numbodyparts; bp++) {
         sbodypart_t *part = &m->bodyparts[bp];
@@ -528,7 +580,7 @@ void studio_draw(const studio_draw_t *d)
             rstats.tris += ch->numtris;
         }
     }
-    t3d_matrix_pop(1);
+    t3d_matrix_pop(2);
 #ifdef PROFX
     { static uint32_t ab, as; static int an, nb; ab += TICKS_DISTANCE(pb0, pb1); as += TICKS_DISTANCE(pb1, TICKS_READ()); nb += m->numbones;
       if (++an == 120) { debugf("  studio: bones %d us/model (%d bones avg), submit %d us/model\n", (int)TICKS_TO_US(ab / an), nb / an, (int)TICKS_TO_US(as / an)); ab = as = an = nb = 0; } }
