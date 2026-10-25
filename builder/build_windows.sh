@@ -20,7 +20,7 @@ WORK=$OUT/work
 STAGE=$WORK/stage
 VERSION=${HL64_VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}
 export PATH=$N64_INST/bin:$PATH
-rm -rf "$STAGE"; mkdir -p "$STAGE"/{tools,engine,hl64/tools,hl64/src,licenses} "$WORK/dl"
+rm -rf "$STAGE"; mkdir -p "$STAGE"/{tools,engine,hl64/tools,hl64/src,hl64/assets,licenses} "$WORK/dl"
 
 echo "== engine (N64 code from this checkout)"
 rm -rf build
@@ -57,6 +57,7 @@ cp "$STAGE/python/LICENSE.txt" "$STAGE/licenses/python-LICENSE.txt" 2>/dev/null 
 echo "== converters"
 cp tools/*.py "$STAGE/hl64/tools/"
 cp src/npc.c "$STAGE/hl64/src/"
+cp assets/*.png "$STAGE/hl64/assets/"
 cp valve_sdk/LICENSE "$STAGE/licenses/valve-sdk-LICENSE" 2>/dev/null || true
 cp README.md "$STAGE/licenses/HL64-README.md"
 

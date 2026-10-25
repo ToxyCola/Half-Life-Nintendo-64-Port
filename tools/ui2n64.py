@@ -10,8 +10,8 @@ Everything comes from the game's own files:
   titles.txt           -> HUD text messages (chapter titles, credits, Hazard Course text)
   sprites/*.spr        -> effect sprites (fx_*: explosions, muzzle flashes, beams, sparks, blood,
                           spit and energy balls), see build_fx
-  resource/background  -> the title-screen background (title) and the loading lambda (lambda);
-                          a plain dark background when the install doesn't have it
+  assets/title.png, assets/lambda.png (this port's own art) -> title-screen background and
+                          the loading icon
 
 Output (filesystem/ui/):
   font_<size>.sprite + font_<size>.fnt     I4 glyph atlas + metrics ('HLF1', big-endian)
@@ -252,63 +252,16 @@ def build_fx(valve, ui, tmp):
 
 # ---------------------------------------------------------------- title background
 def build_title(valve, ui, tmp):
-    """title.sprite (320x240) from the PC menu background (resource/background/800_<row>_<col>.tga
-    tiles, 256x256 each, the 800x600 picture) and lambda.sprite (the loading icon: the logo
-    circle in it, tinted red). Without those files: a plain dark background and a drawn ring."""
-    bd = os.path.join(valve, 'resource', 'background')
-    tiles = {}
-    if os.path.isdir(bd):
-        files = {f.lower(): f for f in os.listdir(bd)}
-        for loading in ('', '_loading'):
-            for r in (1, 2, 3):
-                for c in 'abcd':
-                    f = files.get('800_%d_%s%s.tga' % (r, c, loading))
-                    if f:
-                        tiles[(r, c)] = os.path.join(bd, f)
-            if len(tiles) == 12:
-                break
-            tiles = {}
-    if len(tiles) == 12:
-        full = Image.new('RGB', (1024, 768))
-        for (r, c), f in tiles.items():
-            full.paste(Image.open(f).convert('RGB').resize((256, 256)), ('abcd'.index(c) * 256, (r - 1) * 256))
-        bg = full.crop((0, 0, 800, 600)).resize((320, 240), Image.LANCZOS)
-        # the lambda logo circle sits at about (238, 238) in the 800x600 picture
-        cx, cy, rad = 95, 95, 64
-        crop = bg.crop((cx - rad, cy - rad, cx + rad, cy + rad)).convert('L').resize((32, 32), Image.LANCZOS)
-        src = 'resource/background'
-    else:
-        if os.path.exists(os.path.join(ui, 'title.sprite')) and os.path.exists(os.path.join(ui, 'lambda.sprite')):
-            print('title background: kept the existing one (no resource/background in this install)')
-            return
-        import random
-        rnd = random.Random(64)
-        bg = Image.new('RGB', (320, 240))
-        bg.putdata([(v, v, v) for v in (18 + rnd.randint(0, 10) for _ in range(320 * 240))])
-        bg = bg.filter(ImageFilter.GaussianBlur(1.2))
-        from PIL import ImageDraw
-        crop = Image.new('L', (32, 32))
-        d = ImageDraw.Draw(crop)
-        d.ellipse((2, 2, 29, 29), outline=230, width=3)
-        d.line((10, 8, 22, 25), fill=230, width=3)
-        d.line((16, 16, 10, 25), fill=230, width=3)
-        src = 'drawn (no resource/background in this install)'
-    png = os.path.join(tmp, 'title.png')
-    bg.save(png)
-    mksprite(png, ui, 'RGBA16')
-    # lambda: red tint, round
-    lam = Image.new('RGBA', (32, 32))
-    lp = []
-    for i, v in enumerate(_pixels(crop)):
-        x, y = i % 32, i // 32
-        inside = (x - 15.5) ** 2 + (y - 15.5) ** 2 <= 16 * 16
-        g = min(255, v)
-        lp.append((255 if v > 8 else v * 32, g, g, 255 if inside else 0))
-    lam.putdata(lp)
-    png = os.path.join(tmp, 'lambda.png')
-    lam.save(png)
-    mksprite(png, ui, 'RGBA16')
-    print('title background: %s' % src)
+    """title.sprite (320x240 title-screen background) and lambda.sprite (the icon beside
+    "LOADING"): this port's own artwork, kept in the repository's assets/ folder"""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for name in ('title', 'lambda'):
+        src = os.path.join(here, '..', 'assets', name + '.png')
+        im = Image.open(src).convert('RGBA')
+        png = os.path.join(tmp, name + '.png')
+        im.save(png)
+        mksprite(png, ui, 'RGBA16')
+    print('title background and loading icon: assets/')
 
 
 def parse_titles(path):

@@ -1091,6 +1091,10 @@ int main(void)
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;
             for (int i = 0; i < num_npcs; i++) if (entities[npcs[i].ent].targetname[0]) debugf("NPC %s %.0f %.0f %.0f hp %.0f ai %d script %d %s\n", entities[npcs[i].ent].targetname, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].health, npcs[i].ai, npcs[i].script, entities[npcs[i].ent].removed ? "GONE" : ""); } }
 #endif
+#ifdef TESTWEAPONS
+        { extern void weapons_test_select(int id); static int k = 0; static float nt = 3;
+          if (in_game && game_clock > nt && k < 15) { nt = game_clock + 2.5f; k++; dbg_give_all = true; weapons_test_select(k); debugf("TESTWEAPONS %d\n", k); } }
+#endif
 #ifdef TESTCROWBAR
         { extern void weapons_test_select(int id); static bool sel; if (in_game && game_clock > 2 && !sel) { sel = true; weapons_test_select(WEAPON_CROWBAR); } }
         { static float nt; if (in_game && game_clock > nt) { nt = game_clock + 1; for (int i = 0; i < num_npcs; i++) if (!strcmp(entities[npcs[i].ent].classname, "monster_scientist_dead")) debugf("BODY %d %.0f %.0f %s\n", i, npcs[i].origin[0], npcs[i].origin[1], entities[npcs[i].ent].removed ? "GONE" : "there"); } }
