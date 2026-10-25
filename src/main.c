@@ -278,10 +278,11 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
             if (strcasecmp(entities[i].targetname, debug_arrive->landmark)) continue;
             // the low gravity a Xen map is entered with comes from a trigger_gravity in an earlier
             // map (c4a1c-c4a1f have none of their own): arrive with it, as the campaign would
+            for (int k = 0; k < 3; k++) origin[k] = entities[i].origin[k] + debug_arrive->ofs[k];
+            float raw[3] = {origin[0], origin[1], origin[2]};
             if (!strncasecmp(name, "c4a", 3)) { extern void pm_set_gravity(float g); pm_set_gravity(0.6f); }
             hud_reset();
             ents_player_teleported();
-            for (int k = 0; k < 3; k++) origin[k] = entities[i].origin[k] + debug_arrive->ofs[k];
             int s = ents_find_class("info_player_start", 0);
             view_angles[0] = view_angles[2] = 0;
             view_angles[1] = s >= 0 ? entities[s].angles[1] : 0;
@@ -303,6 +304,32 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
             if (!stand) { pm_set_ducked(); stand = !pm_position_free(duck); }   // a crawlspace (t0a0a)
             if (!stand) { memcpy(origin, duck, 12); pm_reset_player(origin); pm_set_ducked(); }
             else { pm_find_free_position(origin); pm_reset_player(origin); }
+            {   // somewhere to stand? The previous map's trigger can be over a drop or in a stretch
+                // the new map doesn't have (the tram line): then the map's own player start is better
+                static const float dmn[3] = {-16, -16, -18}, dmx[3] = {16, 16, 18};
+                float o2[3] = {origin[0], origin[1], origin[2] - (stand ? 18 : 0)};
+                float d2[3] = {o2[0], o2[1], o2[2] - 96};
+                gtrace_t tr;
+                game_trace(o2, d2, dmn, dmx, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, -1, &tr);
+                float mv = fabsf(origin[0] - raw[0]) + fabsf(origin[1] - raw[1]);
+                bool ok = bsp_leaf_for_point(origin) > 0 && (tr.startsolid || tr.fraction < 1) && mv < 160;
+                // or over a pit with a trigger_hurt at the bottom (c2a3: the drop beside its start)
+                for (int h = ents_find_class("trigger_hurt", 0); ok && h >= 0; h = ents_find_class("trigger_hurt", h + 1)) {
+                    entity_t *he = &entities[h];
+                    if (he->model <= 0 || he->removed || he->targetname[0]) continue;
+                    bmodel_t *hb = &world.bmodels[he->model];
+                    bool in = true;
+                    for (int k = 0; k < 3; k++) {
+                        float lo = origin[k] + (k == 2 ? -36 - 128 : -16), hi = origin[k] + (k == 2 ? 36 : 16);
+                        if (hi < he->origin[k] + hb->mins[k] || lo > he->origin[k] + hb->maxs[k]) in = false;
+                    }
+                    if (in) ok = false;
+                }
+                if (!ok && ents_find_class("info_player_start", 0) >= 0) {
+                    debugf("debug load %s: arrival %.0f %.0f %.0f unusable (moved %.0f, floor %d), using info_player_start\n", name, raw[0], raw[1], raw[2], mv, tr.fraction < 1);
+                    break;   // placed stays false
+                }
+            }
             if (debug_arrive->target[0]) { extern void ents_fire_delayed(const char *n, float d); ents_fire_delayed(debug_arrive->target, debug_arrive->delay); }
             placed = true;
             break;
@@ -998,13 +1025,25 @@ int main(void)
 #define MAPCYCLE_START 0
 #endif
             static int cyc = MAPCYCLE_START - 1; static float next;
+#ifdef ARRIVECYCLE
+            { static int lc = -1; if (in_game && cyc >= MAPCYCLE_START && lc != cyc && game_clock >= next - 0.3f) { lc = cyc; float o[3]; pm_get_origin(o);
+                debugf("SETTLED %s at %.0f %.0f %.0f leaf %d tris %d\n", maplist[cyc], o[0], o[1], o[2], bsp_leaf_for_point(o), (int)rstats.tris); } }
+#endif
             if (game_clock >= next) {
                 cyc++;
                 if (cyc >= num_maps) { debugf("MAPCYCLE DONE\n"); cyc = 0; }
                 heap_stats_t hs; sys_get_heap_stats(&hs);
                 debugf("MAPCYCLE %d %s heap used %d KB of %d KB\n", cyc, maplist[cyc], hs.used / 1024, hs.total / 1024);
                 menu_close();
+#ifdef ARRIVECYCLE
+                debug_load = true;
+#endif
                 start_game(maplist[cyc]);
+#ifdef ARRIVECYCLE
+                { float o[3]; pm_get_origin(o); debugf("ARRIVE %s at %.0f %.0f %.0f leaf %d\n", maplist[cyc], o[0], o[1], o[2], bsp_leaf_for_point(o)); }
+                next = game_clock + 2.0f;
+                continue;
+#endif
                 player.suit = true; weapons_give("weapon_crossbow");
                 dbg_give_all = true; dbg_god = true;
                 player.flashlight = true;
@@ -1094,6 +1133,7 @@ int main(void)
 #ifdef TESTFIRE
         { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); { char tl[128]; strncpy(tl, TESTFIRE, 127); tl[127] = 0; for (char *t = strtok(tl, ","); t; t = strtok(NULL, ",")) ents_fire_targets(t); } } }
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;
+            for (int i = 0; i < num_npcs; i++) if (!strcmp(entities[npcs[i].ent].classname, "monster_alien_slave")) debugf("SLAVE %d %.0f %.0f %.0f ai %d %s\n", i, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].ai, entities[npcs[i].ent].removed ? "GONE" : "");
             for (int i = 0; i < num_npcs; i++) if (entities[npcs[i].ent].targetname[0]) debugf("NPC %s %.0f %.0f %.0f hp %.0f ai %d script %d %s\n", entities[npcs[i].ent].targetname, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].health, npcs[i].ai, npcs[i].script, entities[npcs[i].ent].removed ? "GONE" : ""); } }
 #endif
 #ifdef TESTWEAPONS
@@ -1226,6 +1266,10 @@ int main(void)
             }
             if (k >= 5) in.btn.z = 1;
         }
+#endif
+#ifdef TESTSAVELOAD
+        { static int st; if (in_game && game_clock > 3 && st == 0) { st = 1; game_save_manual(); debugf("TSL saved\n"); }
+          if (in_game && game_clock > 5 && st == 1) { st = 2; debugf("TSL loading\n"); load_save(-1); debugf("TSL loaded\n"); } }
 #endif
 #ifdef TESTCHANGE
 #ifndef TESTLANDMARK

@@ -16,6 +16,9 @@ static uint8_t *navbuf;
 static navnode_t *nodes;
 static navlink_t *links;
 static int numnodes;
+static float *as_g, *as_h;
+static int16_t *as_from, *as_open;
+static uint8_t *as_state;
 
 void nav_load(const char *map)
 {
@@ -35,6 +38,16 @@ void nav_load(const char *map)
     fclose(f);
     if (memcmp(navbuf, "HLN1", 4)) { free(navbuf); navbuf = NULL; return; }
     numnodes = (navbuf[4] << 8) | navbuf[5];
+    // A* scratch for this map's nodes, in the same block (was static arrays for 2048 nodes)
+    int al = (len + 7) & ~7;
+    uint8_t *nb = realloc(navbuf, al + numnodes * (4 + 4 + 2 + 2 + 1) + 8);
+    if (!nb) { free(navbuf); navbuf = NULL; numnodes = 0; return; }
+    navbuf = nb;
+    as_g = (float *)(navbuf + al);
+    as_h = as_g + numnodes;
+    as_from = (int16_t *)(as_h + numnodes);
+    as_open = as_from + numnodes;
+    as_state = (uint8_t *)(as_open + numnodes);
     nodes = (navnode_t *)(navbuf + 8);
     links = (navlink_t *)(navbuf + 8 + numnodes * sizeof(navnode_t));
     debugf("nav: %d nodes\n", numnodes);
@@ -94,11 +107,11 @@ int nav_route(int a, int b, int hull, int *out, int max)
 {
     if (a < 0 || b < 0 || !numnodes) return 0;
     if (a == b) { out[0] = a; return 1; }
-    static float g[2048], h[2048];
-    static int16_t from[2048];
-    static uint8_t state[2048];   // 0 new, 1 open, 2 closed
-    static int16_t open[2048];    // the open set, so each step scans only it (not every node)
-    int n = numnodes > 2048 ? 2048 : numnodes;
+    float *g = as_g, *h = as_h;
+    int16_t *from = as_from;
+    uint8_t *state = as_state;   // 0 new, 1 open, 2 closed
+    int16_t *open = as_open;     // the open set, so each step scans only it (not every node)
+    int n = numnodes;
     memset(state, 0, n);
     g[a] = 0;
     h[a] = d3(nodes[a].o, nodes[b].o);

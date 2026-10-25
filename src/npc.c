@@ -236,6 +236,19 @@ bool npc_pose_final(int i)
     npc_t *n = &npcs[i];
     return (n->ai == AI_DEAD || (n->flags & NF_DEAD)) && n->sstate == NS_IDLE && n->script < 0;
 }
+// trigger_teleport with SF_TRIGGER_ALLOWMONSTERS (CTriggerTeleport::TeleportTouch for monsters)
+void npc_teleport(int i, const float *o, float yaw)
+{
+    npc_t *n = &npcs[i];
+    memcpy(n->origin, o, 12);
+    n->origin[2] += -n->mins[2] + 1;
+    n->yaw = yaw;
+    n->npath = 0;
+    n->onground = false;
+    n->vz = 0;
+    n->ground_ent = -1;
+    n->moved = true;
+}
 bool npc_alive(int i) { return i >= 0 && i < num_npcs && !is_dead(&npcs[i]) && !(npcs[i].flags & NF_ITEM) && !entities[npcs[i].ent].removed; }
 static bool npc_bleeds(npc_t *n);
 bool npc_is_item(int i) { return npcs[i].flags & NF_ITEM; }

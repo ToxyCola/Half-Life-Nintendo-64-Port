@@ -938,6 +938,20 @@ void game_effect_particles(const float *o, int count, float speed, int r, int g,
 // ---- func_tank (func_tank.cpp): a mounted gun that turns within its yaw/pitch ranges toward the
 // player (SF_TANK_ACTIVE + SF_TANK_PLAYER) and fires when on target; with SF_TANK_CANCONTROL the
 // player can man it from its func_tankcontrols
+// a live monster inside a brush trigger (SF_TRIGGER_ALLOWMONSTERS), or -1
+static int monster_touching(entity_t *e)
+{
+    bmodel_t *bm = &world.bmodels[e->model];
+    for (int n = 0; n < num_npcs; n++) {
+        if (!npc_alive(n)) continue;
+        npc_t *m = &npcs[n];
+        bool in = true;
+        for (int k = 0; k < 3 && in; k++)
+            if (m->origin[k] + m->maxs[k] < e->origin[k] + bm->mins[k] || m->origin[k] + m->mins[k] > e->origin[k] + bm->maxs[k]) in = false;
+        if (in) return n;
+    }
+    return -1;
+}
 static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs);
 static int ents_gen;   // bumped for every map (and saved game) spawn
 static int tank_driven = -1;   // the tank the player is using
@@ -2124,7 +2138,7 @@ static void path_project(int start, int end, float *origin, float dist)
     for (int k = 0; k < 3; k++) { d[k] = entities[end].origin[k] - entities[start].origin[k]; l += d[k] * d[k]; }
     l = sqrtf(l);
     if (l < 0.001f) return;
-    for (int k = 0; k < 3; k++) origin[k] = entities[end].origin[k] + d[k] / l * dist;
+    for (int k = 0; k < 3; k++) origin[k] = entities[end].origin[k] + d[k] * (dist / fmaxf(l, 1e-6f));
 }
 
 static float vlen(const float *v) { return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); }
@@ -2441,7 +2455,7 @@ static void tracktrain_think(entity_t *e, int idx, float dt)
         float l = vlen(d), step = fabsf(e->oldspeed) * dt;
         float mv[3];
         bool arrived = l <= step || l < 0.01f;
-        for (int k = 0; k < 3; k++) mv[k] = arrived ? d[k] : d[k] / l * step;
+        for (int k = 0; k < 3; k++) mv[k] = arrived ? d[k] : d[k] * (step / fmaxf(l, 1e-6f));
         push_entity(e, idx, mv, 0);
         if (arrived) { e->deadend = false; tt_dead_end(e, idx); }
         return;
@@ -2683,7 +2697,7 @@ static void trackchange_think(entity_t *e, int idx, float dt)
     e->ltime -= dt;
     bool arrived = e->ltime <= 0;
     float delta[3];
-    for (int k = 0; k < 3; k++) delta[k] = (arrived || l <= step) ? d[k] : d[k] / l * step;
+    for (int k = 0; k < 3; k++) delta[k] = (arrived || l <= step) ? d[k] : d[k] * (step / fmaxf(l, 1e-6f));
     float dyaw = e->avelocity[1] * dt;
     bool down = e->state == MS_GOING_DOWN;
     if (arrived) dyaw = angle_distance(down ? e->ang1[1] : e->ang2[1], e->angles[1]);
@@ -2839,7 +2853,9 @@ void ents_think(float dt)
                 for (int k = 0; k < 3; k++) { d[k] = e->dest[k] - e->origin[k]; l2 += d[k] * d[k]; }
                 float l = sqrtf(l2), step = e->speed * dt, delta[3];
                 bool arrived = l <= step;
-                for (int k = 0; k < 3; k++) delta[k] = arrived ? d[k] : d[k] / l * step;
+                // (no division when already there: the FPU traps x/0, and fast-math evaluates both sides)
+                float f = arrived || l < 1e-6f ? 1.0f : step / l;
+                for (int k = 0; k < 3; k++) delta[k] = d[k] * f;
                 memcpy(e->origin, old, 12);
                 push_entity(e, i, delta, 0);
                 if (arrived) { e->active = false; train_wait(e); }
@@ -2935,7 +2951,7 @@ void ents_think(float dt)
                         float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                         if (l < 0.1f) continue;
                         float end[3];
-                        for (int k = 0; k < 3; k++) end[k] = pa[k] + d[k] / l * bc->radius;
+                        for (int k = 0; k < 3; k++) end[k] = pa[k] + d[k] * (bc->radius / fmaxf(l, 1e-6f));
                         gtrace_t tr;
                         game_trace(pa, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
                         if (tr.fraction >= 1 || tr.fraction < 0.1f) continue;
@@ -2983,7 +2999,7 @@ void ents_think(float dt)
             for (int k = 0; k < 3; k++) { d[k] = e->dest[k] - e->origin[k]; l2 += d[k] * d[k]; }
             if (l2 > 0.01f) {
                 float l = sqrtf(l2), step = e->speed * dt, delta[3];
-                for (int k = 0; k < 3; k++) delta[k] = l <= step ? d[k] : d[k] / l * step;
+                for (int k = 0; k < 3; k++) delta[k] = l <= step ? d[k] : d[k] * (step / fmaxf(l, 1e-6f));
                 if (!e->snd) { e->snd = 1; if (e->movesnd) snd_emit(i, CHAN_STATIC, plat_move_sound(e->movesnd), 1, ATTN_NORM, PITCH_NORM, NULL); }
                 push_entity(e, i, delta, 0);
             } else if (e->snd) {
@@ -3058,8 +3074,9 @@ void ents_think(float dt)
             break;
         case ENT_TRIGGER_ONCE:
         case ENT_TRIGGER_MULTIPLE:
-            if (e->model > 0 && !(e->spawnflags & 2 /* SF_TRIGGER_NOCLIENTS */) && g_time >= e->nextthink &&
-                player_touches(e, porg, pmins, pmaxs) && master_ok(e)) {
+            if (e->model > 0 && g_time >= e->nextthink && master_ok(e) &&
+                ((!(e->spawnflags & 2 /* SF_TRIGGER_NOCLIENTS */) && player_touches(e, porg, pmins, pmaxs)) ||
+                 ((e->spawnflags & 1 /* SF_TRIGGER_ALLOWMONSTERS */) && monster_touching(e) >= 0))) {
                 fire_entity_target(e);
                 if (e->type == ENT_TRIGGER_ONCE) e->removed = true;
                 else e->nextthink = g_time + e->wait;
@@ -3092,6 +3109,13 @@ void ents_think(float dt)
             break;
         case ENT_TRIGGER_TELEPORT:
             // triggers.cpp CTriggerTeleport::TeleportTouch
+            if (e->model > 0 && (e->spawnflags & 1 /* SF_TRIGGER_ALLOWMONSTERS */) && master_ok(e)) {
+                // monsters too (the vortigaunts that flash into the test chamber during the
+                // resonance cascade are sent on to a holding room this way)
+                int mi = monster_touching(e);
+                int d = mi >= 0 ? ents_find_targetname(e->target, 1) : -1;
+                if (d >= 0) npc_teleport(mi, entities[d].origin, entities[d].angles[1]);
+            }
             if (e->model > 0 && !(e->spawnflags & 2) && player_touches(e, porg, pmins, pmaxs) && master_ok(e)) {
                 int d = ents_find_targetname(e->target, 1);
                 if (d >= 0) {

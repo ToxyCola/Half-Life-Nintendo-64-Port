@@ -19,7 +19,7 @@ static studio_t *cache[MAX_MODELS];
 static int num_cached;
 static T3DMat4FP *bone_pool;         // FB_COUNT * MAX_DRAWN_BONES, uncached
 // poses that never change (bodies on the floor): their bone matrices are kept here once computed
-#define STATIC_BONES 1024
+#define STATIC_BONES 384
 static T3DMat4FP *static_pool;
 static int static_used;
 static int pool_frame, pool_used;

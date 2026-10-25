@@ -98,4 +98,5 @@ void npc_take_damage(int npc, float dmg, int dmgtype, const float *dir, int atta
 void npc_hear(const float *origin, float radius, int source);                         // gunfire, explosions
 bool npc_is_item(int npc);
 bool npc_alive(int npc);
+void npc_teleport(int npc, const float *origin, float yaw);
 float npc_eye_height(int npc);
