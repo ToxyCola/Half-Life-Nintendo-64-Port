@@ -393,6 +393,6 @@ void player_draw_hud(float dt)
     // flashlight (CHudFlashlight)
     font_color(col(player.flashlight ? 255 : 120, false));
     hud_icon2(320 - 18 - 12 - HUD_SAFE_X, 10 + HUD_SAFE_Y, player.flashlight ? 16 : 34, 72, 18, 16);
-    if (player.flashlight) hud_icon2(320 - 18 - 12 - 6 - HUD_SAFE_X, 10 + HUD_SAFE_Y, 52, 72, 6, 16);
+    if (player.flashlight) hud_icon2(320 - 12 - HUD_SAFE_X, 10 + HUD_SAFE_Y, 52, 72, 6, 16);   // the beam ahead of the lamp (CHudFlashlight::Draw)
     rdpq_set_mode_standard();
 }

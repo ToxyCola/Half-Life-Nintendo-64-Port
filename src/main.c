@@ -276,6 +276,9 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     if (!placed && debug_arrive) {
         for (int i = ents_find_class("info_landmark", 0); i >= 0; i = ents_find_class("info_landmark", i + 1)) {
             if (strcasecmp(entities[i].targetname, debug_arrive->landmark)) continue;
+            // the low gravity a Xen map is entered with comes from a trigger_gravity in an earlier
+            // map (c4a1c-c4a1f have none of their own): arrive with it, as the campaign would
+            if (!strncasecmp(name, "c4a", 3)) { extern void pm_set_gravity(float g); pm_set_gravity(0.6f); }
             hud_reset();
             ents_player_teleported();
             for (int k = 0; k < 3; k++) origin[k] = entities[i].origin[k] + debug_arrive->ofs[k];
@@ -306,6 +309,7 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
         }
     }
     if (!placed) {
+        if (!strncasecmp(name, "c4a", 3)) { extern void pm_set_gravity(float g); pm_set_gravity(0.6f); }   // Xen (see above)
         hud_reset();
         ents_player_teleported();
         int s = ents_find_class("info_player_start", 0);
@@ -771,6 +775,7 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
         for (int k = 0; k < 5; k++) { weapons_give_ammo("ammo_9mmbox"); weapons_give_ammo("ammo_ARgrenades"); weapons_give_ammo("ammo_buckshot");
             weapons_give_ammo("ammo_357"); weapons_give_ammo("ammo_crossbow"); weapons_give_ammo("ammo_rpgclip"); weapons_give_ammo("ammo_gaussclip"); }
         player.armor = 100;
+        player.longjump = true;   // impulse 101 gives item_longjump too
         weapon_reload = false;
         debugf("cheat: all weapons\n");
     }
@@ -1095,10 +1100,33 @@ int main(void)
         { extern void weapons_test_select(int id); static int k = 0; static float nt = 3;
           if (in_game && game_clock > nt && k < 15) { nt = game_clock + 2.5f; k++; dbg_give_all = true; weapons_test_select(k); debugf("TESTWEAPONS %d\n", k); } }
 #endif
+#ifdef TESTWEAPON
+        { extern void weapons_test_select(int id); static bool done; if (!done && in_game && game_clock > 2) { done = true; dbg_give_all = true; } else if (done == 1 && in_game && game_clock > 2.5f) { static bool d2; if (!d2) { d2 = true; weapons_test_select(TESTWEAPON); } } }
+#endif
 #ifdef TESTCART
         { static float nt = 1; if (in_game && game_clock > nt) { nt = game_clock + 1;
             int i = ents_find_targetname(TESTCART, 1); float o[3]; pm_get_origin(o);
             if (i > 0) debugf("CART t=%.0f %.1f %.1f %.1f player %.0f %.0f %.0f\n", game_clock, entities[i].origin[0], entities[i].origin[1], entities[i].origin[2], o[0], o[1], o[2]); } }
+#endif
+#ifdef TESTBARNEY
+        {   // a zombie in front of the first Barney, the camera beside him
+            static int st = 0; static int bi = -1;
+            if (in_game && game_clock > 3 && st == 0) {
+                st = 1;
+                for (int i = 0; i < num_npcs; i++) if (!strcmp(entities[npcs[i].ent].classname, "monster_barney")) { bi = i; break; }
+                if (bi >= 0) {
+                    npc_t *b = &npcs[bi];
+                    float y = b->yaw * (float)M_PI / 180;
+                    float z[3] = {b->origin[0] + cosf(y) * 220, b->origin[1] + sinf(y) * 220, b->origin[2] + 8};
+                    extern int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker);
+                    int zi = npc_spawn_monster("monster_zombie", z, b->yaw + 180, "", 0);
+                    float c[3] = {b->origin[0] + cosf(y) * 90 - sinf(y) * 110, b->origin[1] + sinf(y) * 90 + cosf(y) * 110, b->origin[2] + 40};
+                    pm_reset_player(c);
+                    view_angles[1] = b->yaw - 120; view_angles[0] = 5;
+                    debugf("TESTBARNEY barney %d at %.0f %.0f %.0f yaw %.0f zombie %d\n", bi, b->origin[0], b->origin[1], b->origin[2], b->yaw, zi);
+                }
+            }
+        }
 #endif
 #ifdef TESTCROWBAR
         { extern void weapons_test_select(int id); static bool sel; if (in_game && game_clock > 2 && !sel) { sel = true; weapons_test_select(WEAPON_CROWBAR); } }

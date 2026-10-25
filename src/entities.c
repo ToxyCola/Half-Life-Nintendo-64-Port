@@ -1427,7 +1427,7 @@ static void spawn_entity(entity_t *e)
     e->dist = ent_float(e, "distance", 90);
     e->health = ent_float(e, "health", 0);
     e->rendermode = (int)ent_float(e, "rendermode", 0);
-    e->renderamt = (int)ent_float(e, "renderamt", 255);
+    e->renderamt = (int)ent_float(e, "renderamt", 0);   // pev->renderamt starts at 0: a see-through mode without it is invisible
     e->renderfx = (int)ent_float(e, "renderfx", 0);
     e->movesnd = (int)ent_float(e, "movesnd", 0);
     e->stopsnd = (int)ent_float(e, "stopsnd", 0);

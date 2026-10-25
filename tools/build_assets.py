@@ -189,6 +189,15 @@ def build_arrivals(a, maps):
                 if not lm or not e.get('model', '').startswith('*'):
                     continue
                 mn = models[int(e['model'][1:])]
+                # fired by name (c4a1f's portal): the player is wherever the map put him for the
+                # transition, which is the trigger_transition volume named after the landmark
+                o = [float(v) for v in lm['origin'].split()]
+                far = max(abs((mn[k] + mn[k + 3]) / 2 - o[k]) for k in range(3)) > 512
+                if e.get('targetname') and far:
+                    tv = next((t for t in ents if t.get('classname') == 'trigger_transition' and
+                               t.get('targetname') == e.get('landmark') and t.get('model', '').startswith('*')), None)
+                    if tv:
+                        mn = models[int(tv['model'][1:])]
                 lo, hi = mn[0:3], mn[3:6]
                 c = [(lo[k] + hi[k]) / 2 for k in range(3)]
                 # stand on the floor under the trigger (it can be a small brush up by the ceiling)

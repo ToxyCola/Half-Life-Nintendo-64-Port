@@ -69,6 +69,9 @@ class Mdl:
                 motiontype, motionbone = struct.unpack_from('<f10i', self.d, o + 32)
             linmove = struct.unpack_from('<3f', self.d, o + 76)
             numblends, animindex = struct.unpack_from('<2i', self.d, o + 120)
+            blendtype = struct.unpack_from('<2i', self.d, o + 128)
+            blendstart = struct.unpack_from('<2f', self.d, o + 136)
+            blendend = struct.unpack_from('<2f', self.d, o + 144)
             events = []
             for ev in range(numevents):
                 eo = eventindex + ev * 76
@@ -78,7 +81,8 @@ class Mdl:
             seqgroup = struct.unpack_from('<i', self.d, o + 156)[0]
             out.append(dict(label=label, fps=fps, flags=flags, activity=activity, numframes=numframes,
                             motiontype=motiontype, motionbone=motionbone, linmove=linmove,
-                            numblends=numblends, animindex=animindex, seqgroup=seqgroup, events=events))
+                            numblends=numblends, animindex=animindex, seqgroup=seqgroup, events=events,
+                            blendtype=blendtype, blendstart=blendstart, blendend=blendend))
         return out
 
 
@@ -108,10 +112,46 @@ def angle_quat(a):
             cr * cp * cy + sr * sp * sy)
 
 
+STUDIO_XR = 0x8
+
+
+def quat_slerp(p, q, t):
+    """QuaternionSlerp from Valve's studio_util.cpp"""
+    a = sum((p[i] - q[i]) ** 2 for i in range(4))
+    b = sum((p[i] + q[i]) ** 2 for i in range(4))
+    if a > b:
+        q = tuple(-x for x in q)
+    cosom = sum(p[i] * q[i] for i in range(4))
+    if 1.0 + cosom > 1e-6:
+        if 1.0 - cosom > 1e-6:
+            omega = math.acos(max(-1.0, min(1.0, cosom)))
+            sinom = math.sin(omega)
+            sclp, sclq = math.sin((1.0 - t) * omega) / sinom, math.sin(t * omega) / sinom
+        else:
+            sclp, sclq = 1.0 - t, t
+        return tuple(sclp * p[i] + sclq * q[i] for i in range(4))
+    qt = (-q[1], q[0], -q[3], q[2])
+    sclp, sclq = math.sin((1.0 - t) * 0.5 * math.pi), math.sin(t * 0.5 * math.pi)
+    return tuple(sclp * p[i] + sclq * qt[i] for i in range(3)) + (qt[3],)
+
+
 def decode_frames(mdl, groupdata, seq, bones):
-    """Return [frame][bone] = (quat(4), pos(3)) for blend 0."""
+    """Return [frame][bone] = (quat(4), pos(3)). Sequences that blend between two aiming pitches
+    (soldiers' and Barney's shooting) are mixed at pitch 0, aiming level, as SetBlending(0, 0)
+    would on the PC; others use their only blend."""
+    if seq.get('numblends', 1) >= 2 and seq['blendtype'][0] & STUDIO_XR and seq['blendend'][0] != seq['blendstart'][0]:
+        t = (0.0 - seq['blendstart'][0]) / (seq['blendend'][0] - seq['blendstart'][0])
+        t = max(0.0, min(1.0, t))
+        a = _decode_blend(groupdata, seq, bones, 0)
+        b = _decode_blend(groupdata, seq, bones, 1)
+        return [[(quat_slerp(qa, qb, t), [pa[k] + (pb[k] - pa[k]) * t for k in range(3)])
+                 for (qa, pa), (qb, pb) in zip(fa, fb)] for fa, fb in zip(a, b)]
+    return _decode_blend(groupdata, seq, bones, 0)
+
+
+def _decode_blend(groupdata, seq, bones, blend):
     buf = groupdata
-    animbase = seq['animindex']
+    animbase = seq['animindex'] + blend * len(bones) * 12
     frames = []
     for fr in range(seq['numframes']):
         fb = []

@@ -228,6 +228,7 @@ static int find_npc_for_entity(int ent)
 }
 int npc_for_entity(int ent) { return find_npc_for_entity(ent); }
 
+static void barney_gun(npc_t *n, int state);
 static bool is_dead(npc_t *n) { return (n->flags & NF_DEAD) || n->ai == AI_DYING || n->ai == AI_DEAD; }
 // a corpse whose death animation has finished (or a placed dead body): its pose never changes
 bool npc_pose_final(int i)
@@ -852,9 +853,18 @@ static void gravity(npc_t *n, float dt)
     bool moved = n->moved;
     n->moved = false;
     if (n->onground && !moved) {
-        if (n->ground_ent <= 0 || n->ground_ent >= num_entities) return;
-        entity_t *g = &entities[n->ground_ent];
-        if (g->origin[0] == n->ground_prev[0] && g->origin[1] == n->ground_prev[1] && g->origin[2] == n->ground_prev[2]) return;
+        // on the world (or not known yet): look again now and then, in case it was really a
+        // mover that has since gone (c1a1's falling lift)
+        if (n->ground_ent <= 0 || n->ground_ent >= num_entities) {
+            float now = game_time();
+            if (now < n->ground_check) return;
+            n->ground_check = now + 0.25f;
+        } else if (entities[n->ground_ent].removed || !entities[n->ground_ent].solid) {
+            n->ground_ent = -1;   // the floor broke or went away (c1a1's lift floor gibs): fall
+        } else {
+            entity_t *g = &entities[n->ground_ent];
+            if (g->origin[0] == n->ground_prev[0] && g->origin[1] == n->ground_prev[1] && g->origin[2] == n->ground_prev[2]) return;
+        }
     }
     // ride whatever we stand on (lifts, trains)
     if (n->ground_ent > 0 && n->ground_ent < num_entities) {
@@ -873,7 +883,7 @@ static void gravity(npc_t *n, float dt)
     if (!n->onground) { n->vz += 800 * dt; dn[2] = n->origin[2] - n->vz * dt; }
     gtrace_t tr;
     game_trace(n->origin, dn, n->mins, n->maxs, TR_IGNORE_PLAYER, self, &tr);
-    if (tr.startsolid) { n->onground = true; n->vz = 0; }
+    if (tr.startsolid) { n->onground = true; n->vz = 0; if (tr.ent > 0) { n->ground_ent = tr.ent; } }
     else if (tr.fraction < 1) {
         memcpy(n->origin, tr.endpos, 12);
         n->onground = true;
@@ -1219,7 +1229,7 @@ static int look_for_enemy(npc_t *n)
 {
     int best = -1;
     float bd = 1e30f;
-    bool fov = n->ai == AI_IDLE && !(n->flags & NF_STATIC);
+    bool fov = n->ai == AI_IDLE && !(n->flags & NF_STATIC) && game_time() >= n->alert_until;
     if (hates(n, 0) && player_in_pvs(n)) {
         float d = dist3(n->origin, player_pos);
         if (d < 2048 && can_see(n, 0, fov)) { best = 0; bd = d; }
@@ -1247,7 +1257,13 @@ void npc_hear(const float *origin, float radius, int source)
             // turn towards the noise; the next look may find the enemy
             n->yaw = yaw_to(n->origin, origin);
             n->next_look = 0;
-            if (source == 0 && hates(n, 0)) { n->enemy = 0; memcpy(n->last_seen, origin, 12); n->ai = AI_COMBAT; }
+            // a noise only makes it alert (CBaseMonster: bits_COND_HEAR_SOUND -> SCHED_ALERT_FACE /
+            // SCHED_INVESTIGATE_SOUND); it fights only once it actually sees the player
+            if (source == 0 && hates(n, 0)) {
+                if (game_time() >= n->alert_until) n->investigate = game_time() + 0.6f + (rand() % 100) / 100.0f;
+                memcpy(n->heard, origin, 12);
+                n->alert_until = game_time() + 8;
+            }
         }
         if (klass(n) == C_ALLY && (n->flags & NF_SCI) && n->ai == AI_IDLE) n->fear_time = game_time();
     }
@@ -1489,7 +1505,10 @@ static void attack_hit(npc_t *n)
     case R_BULLET: {
         bool grunt = !strcmp(d->model, "hgrunt");
         bool turret = (n->flags & NF_STATIC) != 0;
-        if (!strcmp(d->model, "barney")) snd_emit(n->ent, CHAN_WEAPON, "barney/ba_attack2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+        if (!strcmp(d->model, "barney")) {
+            snd_emit(n->ent, CHAN_WEAPON, "barney/ba_attack2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+            barney_gun(n, 1);   // BARNEY_AE_DRAW: the pistol in his hand
+        }
         else if (grunt && (n->weapons & 8)) {   // CHGrunt::Shotgun: a spread of buckshot
             snd_emit(n->ent, CHAN_WEAPON, "weapons/sbarrel1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
             int pel = (int)skill_get("sk_hgrunt_pellets");
@@ -1516,6 +1535,18 @@ static void attack_hit(npc_t *n)
         snd_emit(n->ent, CHAN_WEAPON, s, 1, ATTN_NORM, PITCH_NORM, NULL);
         float c[3];
         npc_center(n, c);
+        {   // two TE_BEAMCYLINDERs (shockwave.spr, width 16): to the full radius and to half of it,
+            // coloured by how many houndeyes are in the pack (WriteBeamColor)
+            int pack = 0;
+            for (int i = 0; i < num_npcs; i++)
+                if (npc_alive(i) && D(&npcs[i]) && !strcmp(D(&npcs[i])->model, "houndeye") && dist3(npcs[i].origin, n->origin) < 384) pack++;
+            static const uint8_t col[4][3] = {{188, 220, 255}, {101, 133, 221}, {67, 85, 255}, {62, 33, 211}};
+            const uint8_t *cc = col[pack <= 1 ? 0 : pack >= 4 ? 3 : pack - 1];
+            extern void game_effect_shockring(const float *o, float maxr, float height, float life, int r, int g, int b);
+            float base[3] = {n->origin[0], n->origin[1], n->origin[2] + 8};
+            game_effect_shockring(base, 384, 16, 0.3f, cc[0], cc[1], cc[2]);
+            game_effect_shockring(base, 192, 16, 0.3f, cc[0], cc[1], cc[2]);
+        }
         float pd = dist3(c, player_pos);
         if (pd < 384 && hates(n, 0)) player_take_damage(dmg * (1 - pd / 384), DMG_SONIC, c, n->ent);
         for (int i = 0; i < num_npcs; i++) {
@@ -1785,6 +1816,18 @@ static void ai_idle(npc_t *n, float dt)
     else if (d && d->snd && d->snd->idle && now > n->idle_speak_time) {
         n->idle_speak_time = now + 5 + rand() % 15;
         if (player_in_pvs(n) && dist3(n->origin, player_pos) < 800) npc_sound(n, CHAN_VOICE, d->snd->idle, d->snd->ni, 1, ATTN_IDLE);
+    }
+    // alerted by a noise: look that way, then walk over to where it came from (SCHED_INVESTIGATE_SOUND)
+    if (now < n->alert_until && !n->following && !(n->flags & (NF_STATIC | NF_SCI)) && klass(n) != C_ALLY) {
+        if (now < n->investigate) { face_yaw(n, yaw_to(n->origin, n->heard), 180, dt); return; }
+        float g[3] = {n->heard[0], n->heard[1], n->heard[2] - 36};
+        if (dist3(n->origin, g) < 128) { if (n->npath) { n->npath = 0; set_seq(n, n->idle_seq); } n->alert_until = now + 2; return; }
+        if (n->npath == 0 || dist3(n->goal, g) > 128 || n->stuck_time > 1.0f) start_moving(n, g, false);
+        if (follow_route(n, n->speed, dt, 96)) { n->npath = 0; set_seq(n, n->idle_seq); }
+        return;
+    } else if (n->alert_until > 0 && now >= n->alert_until) {
+        n->alert_until = 0;
+        if (n->npath && !n->following) { n->npath = 0; set_seq(n, n->idle_seq); }
     }
     (void)i;
 }
@@ -2550,11 +2593,31 @@ static void item_think(npc_t *n, int i)
     }
 }
 
+// CBarney's "gun" body group: 0 in the holster, 1 in his hand (2: gone)
+static void barney_gun(npc_t *n, int state)
+{
+    studio_t *m = n->model;
+    if (!m || m->numbodyparts < 2 || m->bodyparts[1].nummodels < 2) return;
+    int base = m->bodyparts[1].base ? m->bodyparts[1].base : 1;
+    int cur = (n->body / base) % m->bodyparts[1].nummodels;
+    if (cur == 2 || cur == state) return;   // no gun at all (scripted) / already so
+    n->body += (state - cur) * base;
+    if (state) n->gun_time = game_time();
+}
+
 void npcs_think(float dt)
 {
     float now = game_time();
     pm_get_origin(player_pos);
     player_get_eye(player_eye);
+#ifdef SWARMDEBUG
+    { static float shot, rep; if (shot == 0 && now > 4) { shot = now; npc_hear(player_eye, 1000, 0); debugf("SWARM: bang\n"); }
+      if (now > rep) { rep = now + 1; int c = 0, a = 0, h = 0; float md = 1e9f;
+        for (int k = 0; k < num_npcs; k++) { if (!npc_alive(k) || !hates(&npcs[k], 0)) continue; h++;
+            if (npcs[k].ai == AI_COMBAT && npcs[k].enemy == 0) { c++; md = fminf(md, dist3(npcs[k].origin, player_pos)); }
+            else if (now < npcs[k].alert_until) a++; }
+        debugf("SWARM t=%.0f hostile=%d combat=%d alert=%d nearest_combat=%.0f\n", now, h, c, a, md); } }
+#endif
     // the player's PVS, for "can the player see me" checks (FIND_CLIENT_IN_PVS)
     int pl = bsp_leaf_for_point(player_eye);
     if (pl != pvs_leaf) {   // decompress only when the player changes leaf (reset at map start)
@@ -2586,6 +2649,9 @@ void npcs_think(float dt)
         if (n->flags & NF_ITEM) { item_think(n, i); continue; }
         studio_t *m = n->model;
         sseq_t *s = &m->seqs[n->seq];
+        // Barney puts the pistol away a while after the fight (CBarney: m_fGunDrawn without an enemy)
+        if (n->gun_time > 0 && n->enemy < 0 && now - n->gun_time > 6 && npc_alive(i)) { barney_gun(n, 0); n->gun_time = 0; }
+        else if (n->gun_time > 0 && n->enemy >= 0) n->gun_time = now;
         float fps = s->fps > 0 ? s->fps : 10;
         int before = (int)n->frame;
         n->frame += fps * dt * n->framerate;

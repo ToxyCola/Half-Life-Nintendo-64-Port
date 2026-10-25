@@ -230,6 +230,20 @@ typedef struct { int kind; float o[3], rad, start, life; uint8_t r, g, b; bool v
 #define MAX_BILLS 16
 static bill_t bills[MAX_BILLS];
 static int bill_next;
+// TE_BEAMCYLINDER (the houndeye's sonic blast): a ring of wall 'height' units tall around o that
+// grows to maxr over its life and fades
+typedef struct { float o[3], maxr, height, start, life; uint8_t r, g, b; } ring_t;
+#define MAX_RINGS 8
+static ring_t rings[MAX_RINGS];
+void game_effect_shockring(const float *o, float maxr, float height, float life, int r, int g, int b)
+{
+    int best = 0;
+    for (int i = 0; i < MAX_RINGS; i++) { if (rings[i].start + rings[i].life < wtime) { best = i; break; } if (rings[i].start < rings[best].start) best = i; }
+    ring_t *rg = &rings[best];
+    memcpy(rg->o, o, 12);
+    rg->maxr = maxr; rg->height = height; rg->start = wtime; rg->life = life;
+    rg->r = r; rg->g = g; rg->b = b;
+}
 static void add_bill(int kind, const float *o, float rad, float life, int r, int g, int b)
 {
     bill_t *bl = &bills[bill_next++ % MAX_BILLS];
@@ -661,6 +675,7 @@ void weapons_clear_world(void)
     memset(projs, 0, sizeof(projs));
     memset(beams, 0, sizeof(beams));
     memset(flashes, 0, sizeof(flashes));
+    memset(rings, 0, sizeof(rings));
     satchel_out = 0;
     egon_state = 0;
     gauss_charging = false;
@@ -1413,6 +1428,33 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         }
     }
 #endif
+#ifdef TESTRING
+    {   // houndeye blasts in front of the camera
+        static float nt = 4;
+        if (wtime > nt) {
+            nt = wtime + 0.6f;
+            float o[3]; pm_get_origin(o);
+            float y = view_angles[1] * (float)M_PI / 180;
+            float c[3] = {o[0] + cosf(y) * 260, o[1] + sinf(y) * 260, o[2] - 36 + 8};
+            game_effect_shockring(c, 384, 16, 0.3f, 101, 133, 221);
+            game_effect_shockring(c, 192, 16, 0.3f, 101, 133, 221);
+        }
+    }
+#endif
+#ifdef TESTZAP
+    {   // a vortigaunt zap from far away ending at the player (R_ZAP: game_effect_beam)
+        static float nt = 4;
+        if (wtime > nt) {
+            nt = wtime + 0.5f;
+            float o[3]; pm_get_origin(o);
+            float y = view_angles[1] * (float)M_PI / 180, f[3] = {cosf(y), sinf(y), 0}, r[3] = {sinf(y), -cosf(y), 0};
+            float a[3], c[3];
+            for (int k = 0; k < 3; k++) { a[k] = o[k] + f[k] * 500 + r[k] * -120; c[k] = o[k] + r[k] * 6; }
+            a[2] += 60; c[2] += 20;
+            game_effect_beam(a, c, 96, 128, 16);
+        }
+    }
+#endif
 #ifdef TESTPROJ
     {   // effects test: the three PC-sprite projectiles drifting in front of the camera
         static float nt = 4;
@@ -1444,6 +1486,9 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         else if (select_show <= 1.0f || fire) { egon_stop(); deploy(pending); }
     }
     const wdef_t *w = wdef(cur);
+#ifdef TESTVSEQ
+    { static int ts = -1; static float tn = 5; if (vmodel && wtime > tn) { tn = wtime + 2.5f; ts = (ts + 1) % vmodel->numseqs; vseq = ts; vframe = 0; idle_time = wtime + 100; debugf("VSEQ %d %s\n", ts, vmodel->seqs[ts].name); } }
+#endif
     if (vmodel && vseq >= 0 && vseq < vmodel->numseqs) {
         sseq_t *s = &vmodel->seqs[vseq];
         vframe += (s->fps > 0 ? s->fps : 10) * dt;
@@ -2190,6 +2235,61 @@ void weapons_draw_effects(void)
         if (anyp) rdpq_set_mode_standard();
     }
     PSTAMP(3);
+    // shock rings: wall segments around the centre, the laser beam's soft profile across the height
+    {
+        bool mode = false;
+        sprite_t *sp = fx_spr[1];
+        for (int i = 0; i < MAX_RINGS; i++) {
+            ring_t *rg = &rings[i];
+            float age = wtime - rg->start;
+            if (rg->life <= 0 || age < 0 || age > rg->life) continue;
+            float f = age / rg->life, rad = rg->maxr * f;
+#ifdef TESTRING
+            { static float nd; if (wtime > nd) { nd = wtime + 0.2f; float x, y; bool ok = project(rg->o, &x, &y); debugf("RING %d age %.2f rad %.0f proj %d %.0f %.0f\n", i, age, rad, ok, x, y); } }
+#endif
+            if (rad < 4) continue;
+            int alpha = (int)(255 * (1 - f * f));
+            if (!mode) {
+                rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
+                rdpq_set_mode_standard();
+                rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+                rdpq_mode_zbuf(true, false);
+                if (sp) {
+                    rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (TEX0, 0, PRIM, 0)));
+                    rdpq_mode_filter(FILTER_BILINEAR);
+                    rdpq_sprite_upload(TILE0, sp, &(rdpq_texparms_t){.s.repeats = REPEAT_INFINITE, .t.repeats = REPEAT_INFINITE});
+                } else rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+                mode = true;
+            }
+            rdpq_set_prim_color(RGBA32(rg->r, rg->g, rg->b, alpha));
+            const int N = 24;
+            float tw = sp ? sp->width : 1, th = sp ? sp->height : 1;
+            float pv[2][4];   // previous column: bottom x,y,z, top x,y,z (+valid)
+            bool havep = false;
+            for (int k = 0; k <= N; k++) {
+                float a = k * (2 * (float)M_PI / N);
+                float lo[3] = {rg->o[0] + cosf(a) * rad, rg->o[1] + sinf(a) * rad, rg->o[2]};
+                float hi[3] = {lo[0], lo[1], lo[2] + rg->height};
+                float bx, by, tx, ty;
+                bool ok = project(lo, &bx, &by);
+                float bz = proj_z;
+                ok = ok && project(hi, &tx, &ty);
+                float tz = proj_z;
+                if (!ok) { havep = false; continue; }
+                float tcoord = k * th * 0.5f;
+                if (havep) {
+                    float v0[6] = {pv[0][0], pv[0][1], pv[0][2], 0, pv[0][3], 1}, v1[6] = {pv[1][0], pv[1][1], pv[1][2], tw, pv[1][3], 1};
+                    float v2[6] = {bx, by, bz, 0, tcoord, 1}, v3[6] = {tx, ty, tz, tw, tcoord, 1};
+                    if (sp) { rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2); rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2); }
+                    else { rdpq_triangle(&TRIFMT_ZBUF, v0, v1, v2); rdpq_triangle(&TRIFMT_ZBUF, v1, v3, v2); }
+                }
+                pv[0][0] = bx; pv[0][1] = by; pv[0][2] = bz; pv[0][3] = tcoord;
+                pv[1][0] = tx; pv[1][1] = ty; pv[1][2] = tz; pv[1][3] = tcoord;
+                havep = true;
+            }
+        }
+        if (mode) rdpq_set_mode_standard();
+    }
     bool any = false;
     for (int i = 0; i < MAX_BEAMS; i++) if (beams[i].end >= wtime) any = true;
     for (int i = 0; i < 8; i++) if (flashes[i].end >= wtime) any = true;

@@ -58,6 +58,9 @@ typedef struct {
     float trig_check;
     float att[1][3];         // the gun's muzzle (model attachment 0) where it was last drawn
     float att_time;
+    float alert_until, investigate, heard[3];   // a noise was heard (walk over to it until alert_until)
+    float ground_check;      // next look at the ground when standing still on the world
+    float gun_time;          // Barney: when the pistol was last needed (0: holstered)
     float ctl0;              // bone controller 0 (barnacle: tongue length)
     float alt;               // barnacle: how far down the tongue reaches
     float tongue_len;        // barnacle: distance to the floor (traced once)
