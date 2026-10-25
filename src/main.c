@@ -1151,6 +1151,35 @@ int main(void)
                 sprite_free(sp);
             } } }
 #endif
+#ifdef TESTNIH
+        {   // the Nihilanth fight, scripted: crystals, then shots into the open head from above it
+            static float nt = 3; static int stage;
+            extern void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir);
+            if (in_game && game_clock > nt && stage == 0) { stage = 1; dbg_give_all = true; dbg_god = true; nt = game_clock + 22; }
+            else if (in_game && game_clock > nt && stage == 1) {
+                stage = 2; nt = game_clock + 2;
+                for (int k = 1; k <= 3; k++) {
+                    char nm[16]; snprintf(nm, sizeof(nm), "crystal%d", k);
+                    int e = ents_find_targetname(nm, 1);
+                    float d[3] = {0, 0, -1};
+                    // three RPG hits each
+                    for (int h = 0; h < 3 && e > 0; h++) ents_damage_brush(e, 40, DMG_BLAST, d);
+                    debugf("TESTNIH crystal%d ent %d removed %d\n", k, e, e > 0 ? entities[e].removed : -1);
+                }
+            } else if (in_game && game_clock > nt && stage >= 2 && stage < 400 && !strcmp(world.name, "c4a3")) {
+                nt = game_clock + 0.5f; stage++;
+                for (int i = 0; i < num_npcs; i++) {
+                    if (npcs[i].bkind != 1) continue;
+                    npc_t *n = &npcs[i];
+                    // stand level with his skull (the launch pads' job)
+                    float o[3] = {n->origin[0] + 260, n->origin[1], n->origin[2] + 330};
+                    if (n->bstate != 3) { pm_reset_player(o); }
+                    npc_take_damage(i, 60, DMG_BLAST, NULL, 0);
+                    debugf("TESTNIH t=%.1f health %.0f open %d state %d\n", game_clock, n->health, n->bi[2], n->bstate);
+                }
+            }
+        }
+#endif
 #ifdef TESTCORPSE
         {   // weapons reach corpses: a downward trace onto each body, then crowbar hits until it gibs
             static float nt = 3; static int k;

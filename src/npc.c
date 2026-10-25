@@ -2108,14 +2108,18 @@ static void nihilanth_think(npc_t *n, float dt)
         n->origin[2] += sinf(n->bt[3]) * 6 * dt;
         return;
     }
-    if (n->bstate == 3) {   // dying: the death animation, then the end (n_dead) and the last teleport
-        if (now > n->bt[0] && n->bi[3] == 0) {
+    if (n->bstate == 3) {
+        // CNihilanth::DyingThink: he rises to the top of his column, and once there fires n_dead.
+        // The map's end sequence (end_mm, end2_mm: beams, explosions, flashes) runs from that, and
+        // its n_end_relay uses him at the end, which sends the player through n_ending (nihilanth.cpp
+        // CommandUse: the m_szDeadTouch trigger touched by the player)
+        float top = n->bi[0] ? n->bt[2] - 420 : n->origin[2];
+        float dz = top - n->origin[2];
+        n->origin[2] += fmaxf(fminf(dz, 120 * dt), -120 * dt);
+        if (n->bi[3] == 0 && ((fabsf(dz) < 16 && now > n->bt[0]) || now > n->bt[0] + 8)) {
             n->bi[3] = 1;
             boss_explode(n, 4);
             ents_fire_targets("n_dead");
-            extern bool ents_teleport_player(const char *name);
-            ents_teleport_player("n_ending");
-            entities[n->ent].removed = true;
         }
         return;
     }
@@ -2500,6 +2504,11 @@ bool npc_used(int ent)
     if (i < 0) return false;
     npc_t *n = &npcs[i];
     if (n->bkind != 1 && n->bkind != 3 && n->bkind != 4) return false;
+    if (n->bkind == 1 && n->bstate == 3) {   // dead: the end of the game's last map (n_end_relay)
+        extern bool ents_teleport_player(const char *name);
+        ents_teleport_player("n_ending");
+        return true;
+    }
     if (n->bstate == 0) n->bstate = 1;
     return true;
 }
