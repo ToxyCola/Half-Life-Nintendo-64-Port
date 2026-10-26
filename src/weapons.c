@@ -657,6 +657,7 @@ static void projs_think(float dt)
                 char s[32];
                 snprintf(s, sizeof(s), p->kind == P_SATCHEL ? "weapons/g_bounce%d.wav" : "weapons/grenade_hit%d.wav", 1 + rand() % 3);
                 snd_emit(-1, CHAN_VOICE, s, 0.25f, ATTN_NORM, PITCH_NORM, p->o);
+                npc_hear(p->o, 400, -1);   // CGrenade::BounceSound: CSoundEnt::InsertSound(bits_SOUND_DANGER)
             }
             break;
         }

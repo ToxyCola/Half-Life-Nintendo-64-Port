@@ -1300,6 +1300,12 @@ void npc_hear(const float *origin, float radius, int source)
 {
     for (int i = 0; i < num_npcs; i++) {
         npc_t *n = &npcs[i];
+        if (n->model && !strcmp(n->model->name, "tentacle2") && dist3(n->origin, origin) <= radius + 400) {
+            // tentacles hunt by sound (CTentacle::Cycle: the loudest recent sound in reach)
+            memcpy(n->heard, origin, 12);
+            n->alert_until = game_time() + 1.5f;
+            continue;
+        }
         if (npc_alive(i) && dist3(n->origin, origin) <= radius) ai_trigger(n, 9);   // AITRIGGER_HEARCOMBAT
         if (!npc_alive(i) || (n->flags & NF_NOAI) || n->script >= 0) continue;
         if (dist3(n->origin, origin) > radius) continue;
@@ -1538,7 +1544,12 @@ static void attack_hit(npc_t *n)
     float dist = target_dist(n, t);
     if (n->attack_kind == 1) {
         // melee: claws, kicks, bites
-        if (!strcmp(d->model, "tentacle2") && t == 0) dist = dist2d(n->origin, player_pos);   // it reaches up to the player's level
+        if (!strcmp(d->model, "tentacle2")) {
+            // the strike lands where the sound was: whoever stands there is hit (the player, at that level)
+            if (player_alive() && dist2d(n->last_seen, player_pos) < 72 && fabsf(player_pos[2] - 36 - n->last_seen[2]) < 96)
+                damage_target(n, 0, skill_get(d->melee_dmg), DMG_SLASH);
+            return;
+        }
         if (dist <= d->melee_range + 24) {
             damage_target(n, t, skill_get(d->melee_dmg), DMG_SLASH);
             if (!strcmp(d->model, "zombie")) snd_emit(n->ent, CHAN_WEAPON, rand() & 1 ? "zombie/claw_strike1.wav" : "zombie/claw_strike2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
@@ -2630,34 +2641,50 @@ static int tentacle_level(npc_t *n, float z)
 }
 static void tentacle_think(npc_t *n, float dt)
 {
-    float pd = dist2d(n->origin, player_pos);
     float now = game_time();
-    // stand up out of the pit at the player's height (the PC's tentacles rise and follow the
-    // level of the noise they hear); idle there, always visible above the pit
+    // what it is listening to: a recent noise (grenade bounces, explosions, gunfire), or the
+    // player's footsteps on a floor it can reach (walking or running, not crouching or still)
+    float tgt[3];
+    bool have = false;
+    if (now < n->alert_until) { memcpy(tgt, n->heard, 12); have = true; }
+    else if (player_alive() && !pm_noclip_active()) {
+        float v[3];
+        pm_get_velocity(v);
+        extern int pm_get_groundent(void);
+        bool on_ground = pm_get_groundent() >= 0;
+        bool steps = on_ground && !pm_ducking() && sqrtf(v[0] * v[0] + v[1] * v[1]) > 90;
+        if (steps && dist2d(n->origin, player_pos) < 420) {
+            memcpy(tgt, player_pos, 12); tgt[2] -= 36;   // the feet
+            memcpy(n->heard, tgt, 12);
+            n->alert_until = now + 0.6f;
+            have = true;
+        }
+    }
     static const char *idle[4] = {"Floor_Idle", "Lev1_Idle", "Lev2_Idle", "Lev3_Idle"};
-    int lv = tentacle_level(n, player_pos[2]);
+    static const char *strike[4] = {"Floor_Strike", "Lev1_Strike", "Lev2_Strike", "Lev3_Strike"};
+    // stay at the level last heard (start at the floor), always risen out of the pit
+    if (have) n->bt[0] = (float)tentacle_level(n, tgt[2]);
+    int lv = (int)n->bt[0];
     int is = studio_find_seq(n->model, idle[lv]);
     if (is >= 0 && n->idle_seq != is) { n->idle_seq = is; if (n->ai != AI_ATTACK) set_seq(n, is); }
     else if (is >= 0 && n->ai != AI_ATTACK && n->seq != is) set_seq(n, is);
-    if (pd < 380 && player_alive() && now > n->next_attack && !pm_noclip_active()) {
-        float v[3];
-        pm_get_velocity(v);
-        bool noisy = sqrtf(v[0] * v[0] + v[1] * v[1]) > 160 || !pm_ducking();
-        if (noisy && player_pos[2] > n->origin[2] - 64) {
-            n->next_attack = now + 2.5f;
-            static const char *strike[4] = {"Floor_Strike", "Lev1_Strike", "Lev2_Strike", "Lev3_Strike"};
-            int ss = studio_find_seq(n->model, strike[lv]);
-            if (ss >= 0) set_seq(n, ss);
-            else if (!set_activity(n, ACT_MELEE_ATTACK1)) set_activity(n, ACT_RANGE_ATTACK1);
-            restart_seq(n, n->seq);
-            n->ai = AI_ATTACK;
-            n->enemy = 0;
-            n->attack_kind = 1;
-            n->attack_hit_done = false;
-            n->attack_hit_time = now + 0.6f;
-            npc_sound(n, CHAN_VOICE, "tentacle/te_strike%d.wav", 2, 1, ATTN_NORM);
-        }
-    }
+    if (!have || n->ai == AI_ATTACK) return;
+    float hd = dist2d(n->origin, tgt);
+    if (hd > 420) return;
+    // turn towards the sound, then strike at it
+    n->yaw = yaw_to(n->origin, tgt);
+    if (now <= n->next_attack) return;
+    n->next_attack = now + 1.6f;
+    int ss = studio_find_seq(n->model, strike[lv]);
+    if (ss >= 0) set_seq(n, ss);
+    restart_seq(n, n->seq);
+    n->ai = AI_ATTACK;
+    n->enemy = 0;
+    n->attack_kind = 1;
+    n->attack_hit_done = false;
+    n->attack_hit_time = now + 0.5f;
+    memcpy(n->last_seen, tgt, 12);   // where the strike lands (attack_hit)
+    npc_sound(n, CHAN_VOICE, "tentacle/te_strike%d.wav", 2, 1, ATTN_NORM);
 }
 
 static void item_think(npc_t *n, int i)

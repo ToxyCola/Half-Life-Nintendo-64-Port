@@ -1267,6 +1267,10 @@ int main(void)
             if (k >= 5) in.btn.z = 1;
         }
 #endif
+#ifdef TESTTENT
+        { static float nt = 3; if (in_game && game_clock > nt) { nt = game_clock + 3; extern void npc_hear(const float *o, float r, int s);
+            float o[3] = {-640, -980, -1010}; npc_hear(o, 400, -1); debugf("TT noise\n"); } }
+#endif
 #ifdef TESTSAVELOAD
         { static int st; if (in_game && game_clock > 3 && st == 0) { st = 1; game_save_manual(); debugf("TSL saved\n"); }
           if (in_game && game_clock > 5 && st == 1) { st = 2; debugf("TSL loading\n"); load_save(-1); debugf("TSL loaded\n"); } }
