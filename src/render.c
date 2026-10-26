@@ -746,13 +746,24 @@ static void draw_npcs(const float *eye)
         float mn[3], mx[3];
         for (int k = 0; k < 3; k++) { mn[k] = c->origin[k] + c->mins[k]; mx[k] = c->origin[k] + c->maxs[k]; }
         mn[2] -= 8; mx[2] += 8;
+        // tentacles (Blast Pit) rise ~800 units out of a pit from an origin at its bottom: cull
+        // by the whole reach of the model, and don't require the pit floor's leaf to be visible
+        bool tall = !strncmp(c->model->name, "tentacle", 8);
+        if (tall) for (int k = 0; k < 3; k++) { mn[k] = c->origin[k] - (k < 2 ? 400 : 0); mx[k] = c->origin[k] + (k < 2 ? 400 : 900); }
         if (box_culled(mn, mx)) continue;
+        if (tall) {
+#ifdef TENTDBG
+            { static int cn; if ((cn++ & 63) == 0) debugf("TENT %d seq %d %s frame %.1f\n", i, c->seq, c->model->seqs[c->seq].name, c->frame); }
+#endif
+            goto visible;
+        }
         float mid[3] = {c->origin[0], c->origin[1], c->origin[2] + (c->mins[2] + c->maxs[2]) * 0.5f};
         int lf = bsp_leaf_for_point(mid);
         if (lf <= 0 || lf >= world.numleafs || !leaf_inpvs[lf]) {
             lf = bsp_leaf_for_point(c->origin);   // origin can sit exactly on the floor plane
             if (lf <= 0 || lf >= world.numleafs || !leaf_inpvs[lf]) continue;
         }
+    visible:
         if (npc_is_item(i)) d2 *= 4;   // characters before pickups when there are too many to draw
         // insertion sort by distance, keep the nearest
         int j = n++;

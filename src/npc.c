@@ -1538,6 +1538,7 @@ static void attack_hit(npc_t *n)
     float dist = target_dist(n, t);
     if (n->attack_kind == 1) {
         // melee: claws, kicks, bites
+        if (!strcmp(d->model, "tentacle2") && t == 0) dist = dist2d(n->origin, player_pos);   // it reaches up to the player's level
         if (dist <= d->melee_range + 24) {
             damage_target(n, t, skill_get(d->melee_dmg), DMG_SLASH);
             if (!strcmp(d->model, "zombie")) snd_emit(n->ent, CHAN_WEAPON, rand() & 1 ? "zombie/claw_strike1.wav" : "zombie/claw_strike2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
@@ -2621,17 +2622,33 @@ static bool boss_think(npc_t *n, float dt)
 }
 
 // tentacles strike at things that make noise nearby (CTentacle, simplified)
+// CTentacle::MyLevel: which of the four heights (floor, lev1-3) the tentacle reaches for
+static int tentacle_level(npc_t *n, float z)
+{
+    float dz = z - n->origin[2];
+    return dz < 216 ? 0 : dz < 408 ? 1 : dz < 600 ? 2 : 3;
+}
 static void tentacle_think(npc_t *n, float dt)
 {
     float pd = dist2d(n->origin, player_pos);
     float now = game_time();
+    // stand up out of the pit at the player's height (the PC's tentacles rise and follow the
+    // level of the noise they hear); idle there, always visible above the pit
+    static const char *idle[4] = {"Floor_Idle", "Lev1_Idle", "Lev2_Idle", "Lev3_Idle"};
+    int lv = tentacle_level(n, player_pos[2]);
+    int is = studio_find_seq(n->model, idle[lv]);
+    if (is >= 0 && n->idle_seq != is) { n->idle_seq = is; if (n->ai != AI_ATTACK) set_seq(n, is); }
+    else if (is >= 0 && n->ai != AI_ATTACK && n->seq != is) set_seq(n, is);
     if (pd < 380 && player_alive() && now > n->next_attack && !pm_noclip_active()) {
         float v[3];
         pm_get_velocity(v);
         bool noisy = sqrtf(v[0] * v[0] + v[1] * v[1]) > 160 || !pm_ducking();
         if (noisy && player_pos[2] > n->origin[2] - 64) {
             n->next_attack = now + 2.5f;
-            if (!set_activity(n, ACT_MELEE_ATTACK1)) set_activity(n, ACT_RANGE_ATTACK1);
+            static const char *strike[4] = {"Floor_Strike", "Lev1_Strike", "Lev2_Strike", "Lev3_Strike"};
+            int ss = studio_find_seq(n->model, strike[lv]);
+            if (ss >= 0) set_seq(n, ss);
+            else if (!set_activity(n, ACT_MELEE_ATTACK1)) set_activity(n, ACT_RANGE_ATTACK1);
             restart_seq(n, n->seq);
             n->ai = AI_ATTACK;
             n->enemy = 0;

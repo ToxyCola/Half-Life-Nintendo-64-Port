@@ -100,6 +100,10 @@ def build_models(a, maps):
         used.setdefault(mdl, set()).add('*')
     for mdl in ('grenade', 'rpgrocket', 'crossbow_bolt', 'hornet', 'w_squeak', 'w_satchel', 'w_grenade', 'hgibs', 'agibs'):
         used.setdefault(mdl, set())
+    # tentacles (Blast Pit) idle and strike at the level of their target (CTentacle::MyLevel)
+    if 'tentacle2' in used:
+        used['tentacle2'] |= {'floor_idle', 'lev1_idle', 'lev2_idle', 'lev3_idle',
+                              'floor_strike', 'lev1_strike', 'lev2_strike', 'lev3_strike'}
     os.makedirs(os.path.join(a.out, 'models'), exist_ok=True)
     jobs = []
     for mdl, ws in sorted(used.items()):
