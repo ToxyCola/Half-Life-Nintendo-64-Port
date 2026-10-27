@@ -4,7 +4,7 @@ A Nintendo 64 port of Half-Life's single-player campaign: the original maps, tex
 lighting, played with Valve's own player-movement code, running on stock N64 hardware with an
 Expansion Pak.
 
-**Current release: 1.0.** Get `HL64Builder.exe` from the [Releases](../../releases) page; it
+**Current release: 1.1.** Get `HL64Builder.exe` from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
 [Building the ROM on Windows](#building-the-rom-on-windows-the-easy-way)).
 
@@ -57,6 +57,8 @@ It is built from:
 * A few of the largest maps use nearly all of the Expansion Pak's memory.
 * A report of the shotgun's view model briefly covering the lower half of the screen while
   moving hasn't been reproduced yet.
+* The tentacles in Blast Pit snap between heights instead of playing their rise/lower animations,
+  and only the player's footsteps and noises draw them (not other characters walking).
 * The Debug map loader's arrival spot is worked out from the previous map's level change; on a
   few maps it falls back to the map's own start point, which can be a little off the usual path.
 * With the flashlight on and the view held still, a character walking into the beam can take a
@@ -133,6 +135,8 @@ To make HL64Builder.exe yourself (on Linux, with mingw-w64): `builder/build_wind
 (`.github/workflows/release.yml`): changing `builder/VERSION` on `main` builds the .exe and
 publishes it as release `v<VERSION>`. "Run workflow" on the Actions tab builds it too, and with
 "publish" ticked publishes it as (or replaces it in) the release for the current `builder/VERSION`.
+The builder's version includes the commit, so a new exe never reuses files an older one unpacked
+or converted in `%LOCALAPPDATA%\HL64Builder`.
 
 ## Building from source
 
