@@ -26,7 +26,8 @@
 #define HL64_VERSION "dev"
 #endif
 
-static char g_root[MAX_PATH];     // %LOCALAPPDATA%\HL64Builder\<version>
+static char g_root[MAX_PATH];     // %LOCALAPPDATA%\HL64Builder\<version> (version = tag + commit: a rebuilt
+                                   // release never reuses an older build's engine or converted data)
 static char g_work[MAX_PATH];     // %LOCALAPPDATA%\HL64Builder\work
 static char g_exedir[MAX_PATH];
 

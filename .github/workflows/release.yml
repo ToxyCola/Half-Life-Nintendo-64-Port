@@ -68,7 +68,7 @@ jobs:
 
       - name: HL64Builder.exe
         run: |
-          HL64_VERSION=${{ steps.ver.outputs.tag }} T3D_INST=$RUNNER_TEMP/tiny3d LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_windows.sh
+          HL64_VERSION=${{ steps.ver.outputs.tag }}-${GITHUB_SHA::7} T3D_INST=$RUNNER_TEMP/tiny3d LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_windows.sh
           ls -la builder/out/HL64Builder.exe
 
       - uses: actions/upload-artifact@v4
