@@ -34,9 +34,11 @@ jobs:
           fetch-depth: 0        # git describe names the version
 
       - name: Host packages
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q mingw-w64 libz-mingw-w64-dev python3-pip python3-numpy python3-pil
+          # the runner's package mirror sometimes hangs: time out and retry instead of waiting forever
+          sudo apt-get update -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 || true
+          sudo apt-get install -y -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 mingw-w64 libz-mingw-w64-dev python3-pip python3-numpy python3-pil
 
       - name: N64 toolchain
         run: |
