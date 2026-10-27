@@ -103,7 +103,8 @@ def build_models(a, maps):
     # tentacles (Blast Pit) idle and strike at the level of their target (CTentacle::MyLevel)
     if 'tentacle2' in used:
         used['tentacle2'] |= {'floor_idle', 'lev1_idle', 'lev2_idle', 'lev3_idle',
-                              'floor_strike', 'lev1_strike', 'lev2_strike', 'lev3_strike'}
+                              'floor_strike', 'lev1_strike', 'lev2_strike', 'lev3_strike',
+                              'engine_idle', 'engine_death1'}   # the rocket engine burns them (CommandUse)
     os.makedirs(os.path.join(a.out, 'models'), exist_ok=True)
     jobs = []
     for mdl, ws in sorted(used.items()):

@@ -1269,7 +1269,9 @@ int main(void)
 #endif
 #ifdef TESTTENT
         { static float nt = 3; if (in_game && game_clock > nt) { nt = game_clock + 3; extern void npc_hear(const float *o, float r, int s);
-            float o[3] = {-640, -980, -1010}; npc_hear(o, 400, -1); debugf("TT noise\n"); } }
+            float o[3] = {-640, -980, -1010}; npc_hear(o, 400, -1); debugf("TT noise\n"); }
+          static bool burnt; if (in_game && game_clock > 12 && !burnt) { burnt = true; ents_fire_targets("tentacle_thrash"); }
+          static bool died; if (in_game && game_clock > 16 && !died) { died = true; ents_fire_targets("tentacle_die"); } }
 #endif
 #ifdef TESTSAVELOAD
         { static int st; if (in_game && game_clock > 3 && st == 0) { st = 1; game_save_manual(); debugf("TSL saved\n"); }

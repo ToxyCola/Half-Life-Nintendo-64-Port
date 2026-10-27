@@ -1163,6 +1163,7 @@ void ents_maker_child_died(int maker)
         entities[maker].maker_live--;
 }
 
+int g_use_type = 2;   // USE_TOGGLE unless a trigger_relay says otherwise
 static void ent_use(entity_t *e)
 {
     if (e->removed) return;
@@ -1207,7 +1208,16 @@ static void ent_use(entity_t *e)
         e->visible = !e->visible;
         e->solid = e->visible ? SOLID_BSP : SOLID_NOT;
         break;
-    case ENT_TRIGGER_RELAY:
+    case ENT_TRIGGER_RELAY: {
+        // triggerstate: 0 USE_OFF, 1 USE_ON, 2 USE_TOGGLE (what the targets' Use() receives)
+        const char *ts = ent_value(e, "triggerstate");
+        extern int g_use_type;
+        int saved = g_use_type;
+        g_use_type = ts ? atoi(ts) : 2;
+        fire_entity_target(e);
+        g_use_type = saved;
+        break;
+    }
     case ENT_TRIGGER_ONCE:
     case ENT_TRIGGER_MULTIPLE:
         fire_entity_target(e);

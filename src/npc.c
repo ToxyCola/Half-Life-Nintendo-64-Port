@@ -2573,6 +2573,20 @@ bool npc_used(int ent)
     int i = npc_for_entity(ent);
     if (i < 0) return false;
     npc_t *n = &npcs[i];
+    if (n->model && !strcmp(n->model->name, "tentacle2")) {
+        // CTentacle::CommandUse: off = die (the rocket engine burns them), on = a sound at the
+        // player (climbing the ladders), toggle = thrash in the flames
+        extern int g_use_type;
+        if (g_use_type == 0) {
+            if (!(n->flags & NF_DEAD)) { play_named(n, "Engine_death1", true); n->flags |= NF_DEAD; n->ai = AI_DEAD; n->solid = false; }
+        } else if (g_use_type == 1) {
+            float f[3] = {player_pos[0], player_pos[1], player_pos[2] - 36};
+            memcpy(n->heard, f, 12); n->alert_until = game_time() + 1.5f;
+        } else if (!(n->flags & NF_DEAD)) {
+            play_named(n, "Engine_Idle", false); n->bt[2] = 1;   // thrashing: no more strikes
+        }
+        return true;
+    }
     if (n->bkind != 1 && n->bkind != 3 && n->bkind != 4) return false;
     if (n->bkind == 1 && n->bstate == 3) {   // dead: the end of the game's last map (n_end_relay)
         extern bool ents_teleport_player(const char *name);
@@ -2642,6 +2656,7 @@ static int tentacle_level(npc_t *n, float z)
 static void tentacle_think(npc_t *n, float dt)
 {
     float now = game_time();
+    if (n->bt[2] > 0) return;   // burning in the rocket's flames (Engine_Idle until it dies)
     // what it is listening to: a recent noise (grenade bounces, explosions, gunfire), or the
     // player's footsteps on a floor it can reach (walking or running, not crouching or still)
     float tgt[3];
