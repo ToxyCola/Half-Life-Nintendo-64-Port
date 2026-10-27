@@ -63,6 +63,8 @@ It is built from:
   few maps it falls back to the map's own start point, which can be a little off the usual path.
 * With the flashlight on and the view held still, a character walking into the beam can take a
   few frames to be lit.
+* Maps do not remember the last thing done in them. When things are broken, NPCs are killed, they
+  will be in their original state when backtracking.
 
 ## What is not there (yet)
 
