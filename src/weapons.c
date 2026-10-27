@@ -2090,7 +2090,10 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
 #ifndef NOCLEARZ
     t3d_screen_clear_depth();
 #endif
+    extern void render_viewmodel_projection(bool on);
+    render_viewmodel_projection(true);
     studio_draw(&d);
+    render_viewmodel_projection(false);
     WD(3);
     vm_att_ok = vmodel->numatt > 0;
 #ifdef PROFX

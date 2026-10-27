@@ -314,6 +314,17 @@ static inline bool face_back(int fi, const float *eye)
     return d < 0.01f;
 }
 
+static float cur_fovy = 74, cur_far = 4096;
+// the first-person weapon gets a near plane of 1 unit (the world's is 4): its barrel and hands
+// come within 4 units of the eye when the view bobs back, and triangles crossing the near plane
+// were clipped into screen-wide slivers (the shotgun's yellow band when walking backwards)
+void render_viewmodel_projection(bool on)
+{
+    if (on) t3d_viewport_set_projection(&viewport, cur_fovy * M_PI / 180, 1.0f, 256.0f);
+    else t3d_viewport_set_projection(&viewport, cur_fovy * M_PI / 180, 4.0f, cur_far);
+    t3d_viewport_attach(&viewport);
+}
+
 // ---------------------------------------------------------------- world
 static void mark_visible(const float *eye)
 {
@@ -842,6 +853,7 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
                               (float[3]){0, 0, 0}, (float[3]){0, 0, 0});
 
     t3d_viewport_set_projection(&viewport, fovy * M_PI / 180, 4.0f, fog_on ? FOG_END + 64 : 4096.0f);
+    cur_fovy = fovy; cur_far = fog_on ? FOG_END + 64 : 4096.0f;
     fog_on = !sky_visible;   // indoors: fog hides distant geometry, far plane culls it
     T3DVec3 e = {{eye[0], eye[1], eye[2]}};
     T3DVec3 tgt = {{eye[0] + f[0], eye[1] + f[1], eye[2] + f[2]}};

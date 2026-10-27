@@ -1548,6 +1548,12 @@ static void attack_hit(npc_t *n)
             // the strike lands where the sound was: whoever stands there is hit (the player, at that level)
             if (player_alive() && dist2d(n->last_seen, player_pos) < 72 && fabsf(player_pos[2] - 36 - n->last_seen[2]) < 96)
                 damage_target(n, 0, skill_get(d->melee_dmg), DMG_SLASH);
+            for (int o = 0; o < num_npcs; o++) {   // and whoever else stands there (Barney, scientists)
+                npc_t *v = &npcs[o];
+                if (v == n || !npc_alive(o) || (v->model && !strcmp(v->model->name, "tentacle2"))) continue;
+                if (dist2d(n->last_seen, v->origin) < 72 && fabsf(v->origin[2] - n->last_seen[2]) < 96)
+                    damage_target(n, o + 1, skill_get(d->melee_dmg), DMG_SLASH);
+            }
             return;
         }
         if (dist <= d->melee_range + 24) {
@@ -2413,10 +2419,21 @@ static void heli_move(npc_t *n, const float *goal, float maxspeed, float accel, 
     static const float smn[3] = {-48, -48, -48}, smx[3] = {48, 48, 24};
     gtrace_t tr;
     game_trace(n->origin, to, smn, smx, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, n - npcs, &tr);
-    if (tr.startsolid) memcpy(n->origin, to, 12);   // squeezed: fly through rather than stick
-    else {
+    if (tr.startsolid) {
+        // inside something (a hillside): rise out of it instead of flying through the terrain
+        float up[3] = {n->origin[0], n->origin[1], n->origin[2] + 48};
+        gtrace_t tu;
+        game_trace(up, up, smn, smx, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, n - npcs, &tu);
+        memcpy(n->origin, up, 12);
+        n->bv[0] *= 0.5f; n->bv[1] *= 0.5f; if (n->bv[2] < 0) n->bv[2] = 0;
+    } else {
         memcpy(n->origin, tr.endpos, 12);
-        if (tr.fraction < 1) { float vn = n->bv[0] * tr.normal[0] + n->bv[1] * tr.normal[1] + n->bv[2] * tr.normal[2]; for (int k = 0; k < 3; k++) n->bv[k] -= vn * tr.normal[k]; }
+        if (tr.fraction < 1) {
+            // slide along what it hit, and climb over it (CApache keeps above the ground)
+            float vn = n->bv[0] * tr.normal[0] + n->bv[1] * tr.normal[1] + n->bv[2] * tr.normal[2];
+            for (int k = 0; k < 3; k++) n->bv[k] -= vn * tr.normal[k];
+            if (n->bv[2] < 150) n->bv[2] = 150;
+        }
     }
     memcpy(entities[n->ent].origin, n->origin, 12);
 }
@@ -2461,6 +2478,19 @@ static void apache_think(npc_t *n, float dt)
         n->bt[1] += dt * 0.4f;
         float r = 520;
         goal[0] = player_pos[0] + cosf(n->bt[1]) * r; goal[1] = player_pos[1] + sinf(n->bt[1]) * r; goal[2] = player_pos[2] + 260;
+        // a hunting spot in open air with a clear line to the player, else come in higher and closer
+        for (int tries = 0; tries < 3; tries++) {
+            gtrace_t tg;
+            game_trace(player_pos, goal, NULL, NULL, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS | TR_WORLD_ONLY, -1, &tg);
+            if (tg.fraction >= 1 && !tg.startsolid) break;
+            for (int k = 0; k < 2; k++) goal[k] = player_pos[k] + (goal[k] - player_pos[k]) * 0.6f;
+            goal[2] += 200;
+        }
+        {   // and don't fly a straight line through a hill to get there: go up first
+            gtrace_t tp;
+            game_trace(n->origin, goal, NULL, NULL, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS | TR_WORLD_ONLY, -1, &tp);
+            if (tp.fraction < 1) { goal[0] = n->origin[0]; goal[1] = n->origin[1]; goal[2] = fmaxf(goal[2], n->origin[2] + 200); }
+        }
         memcpy(n->last_seen, player_pos, 12);
     } else if (n->bi[0] > 0) {
         memcpy(goal, entities[n->bi[0]].origin, 12);
