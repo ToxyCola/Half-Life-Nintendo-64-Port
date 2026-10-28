@@ -140,6 +140,23 @@ publishes it as release `v<VERSION>`. "Run workflow" on the Actions tab builds i
 The builder's version includes the commit, so a new exe never reuses files an older one unpacked
 or converted in `%LOCALAPPDATA%\HL64Builder`.
 
+## Building the ROM on Linux (the easy way)
+
+Download **hl64builder** from the [Releases](../../releases) page, then:
+
+```sh
+chmod +x hl64builder
+./hl64builder                      # finds Half-Life through Steam (native, Flatpak or Snap)
+./hl64builder ~/Games/Half-Life    # or give it the folder that contains "valve"
+```
+
+It works like the Windows builder: the engine, libdragon's tools and the converters are packed
+inside, and **`hl64.z64` is written next to the program**. It needs `python3`; if numpy or Pillow
+are missing it installs them into a private virtual environment (`python3-venv` on Debian/Ubuntu).
+Data is unpacked to `~/.local/share/HL64Builder` (or `$XDG_DATA_HOME`); a second run reuses the
+converted data, and `--clean` converts everything again. To make it yourself:
+`builder/build_linux.sh` (see the comments at its top).
+
 ## Building from source
 
 You need Linux or WSL, Python 3 with `numpy` and `Pillow`, and your Half-Life install.
@@ -222,7 +239,7 @@ src/weapons.c     weapons, projectiles, view model, ammo HUD, effects and env_sp
 src/skill.c       skill.cfg
 valve_sdk/        files from Valve's Half-Life SDK (see valve_sdk/LICENSE)
 tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, spr2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py
-builder/          HL64Builder.exe: Windows launcher (hl64builder.c), packer, build_windows.sh
+builder/          HL64Builder.exe / hl64builder: Windows and Linux launchers (hl64builder.c, hl64builder_linux.c), packer, build_windows.sh, build_linux.sh
 test/             PC test harness: runs the same game code on a converted map
 ```
 

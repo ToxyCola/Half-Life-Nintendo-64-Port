@@ -1,8 +1,8 @@
-# Builds HL64Builder.exe (the Windows ROM builder, see builder/) and publishes it as a release.
+# Builds HL64Builder.exe (Windows) and hl64builder (Linux) (the ROM builders, see builder/) and publishes them as a release.
 # A release is made when builder/VERSION changes on main (tag v<VERSION>, made here) or when a
 # tag like v1.0 is pushed; "Run workflow" on the Actions tab builds it (download it from the run), and
 # with "publish" ticked also replaces the exe in the release for the current builder/VERSION.
-name: Release HL64Builder.exe
+name: Release HL64Builder
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: 'Also publish it to the release named in builder/VERSION (replaces its HL64Builder.exe)'
+        description: 'Also publish it to the release named in builder/VERSION (replaces its builders)'
         type: boolean
         default: false
 
@@ -38,7 +38,7 @@ jobs:
         run: |
           # the runner's package mirror sometimes hangs: time out and retry instead of waiting forever
           sudo apt-get update -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 || true
-          sudo apt-get install -y -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 mingw-w64 libz-mingw-w64-dev python3-pip python3-numpy python3-pil
+          sudo apt-get install -y -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 mingw-w64 libz-mingw-w64-dev zlib1g-dev python3-pip python3-numpy python3-pil
 
       - name: N64 toolchain
         run: |
@@ -73,10 +73,17 @@ jobs:
           HL64_VERSION=${{ steps.ver.outputs.tag }}-${GITHUB_SHA::7} T3D_INST=$RUNNER_TEMP/tiny3d LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_windows.sh
           ls -la builder/out/HL64Builder.exe
 
+      - name: hl64builder (Linux)
+        run: |
+          HL64_VERSION=${{ steps.ver.outputs.tag }}-${GITHUB_SHA::7} T3D_INST=$RUNNER_TEMP/tiny3d LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_linux.sh
+          ls -la builder/out/hl64builder
+
       - uses: actions/upload-artifact@v4
         with:
           name: HL64Builder
-          path: builder/out/HL64Builder.exe
+          path: |
+            builder/out/HL64Builder.exe
+            builder/out/hl64builder
 
       - name: Release
         if: github.event_name == 'push' || inputs.publish
@@ -85,7 +92,9 @@ jobs:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: Half-Life 64 ${{ steps.ver.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          files: builder/out/HL64Builder.exe
+          files: |
+            builder/out/HL64Builder.exe
+            builder/out/hl64builder
           body: |
             **HL64Builder.exe** builds the Half-Life 64 ROM (`hl64.z64`) from your own copy of Half-Life.
 
@@ -96,4 +105,6 @@ jobs:
             Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.
 
             The program contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.
+            **Linux:** download **hl64builder**, then `chmod +x hl64builder && ./hl64builder`. It finds Half-Life through Steam (or pass the folder: `./hl64builder ~/path/to/Half-Life`) and needs python3; numpy and Pillow are installed into a private environment if missing.
+
             Windows may warn that the program is unrecognised (it isn't code-signed): choose "More info", then "Run anyway".
