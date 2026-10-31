@@ -67,6 +67,8 @@ typedef struct {
     int att_n;
     int16_t *cache_slot;     // optional: where a fixed pose's cached bone matrices are (-1 none)
     bool cacheable;          // the pose is final (a body on the floor): cache it
+    const void *lod_inst;    // optional: the instance (npc) this is, for half-rate animation far away
+    bool lod_half;           // far away: reuse last frame's bones every other frame
 } studio_draw_t;
 
 void studio_begin_frame(int frame_index);

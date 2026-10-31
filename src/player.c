@@ -293,7 +293,9 @@ void player_think(float dt)
     // falling damage (CBasePlayer::PostThink: PLAYER_MAX_SAFE_FALL_SPEED 580, fatal 1024)
     bool onground = pm_get_groundent() >= 0;
     float fv = pm_get_fall_velocity();
-    if (!onground && fv > max_fall) max_fall = fv;
+    // the speed of the fall at the moment it ends (pmove's flFallVelocity, -velocity z while in the
+    // air), not the most it ever reached: a ladder or a lift on the way down catches the fall
+    if (!onground) max_fall = fv;
     if (onground && !was_onground) {
         if (max_fall > 580 && pm_get_waterlevel() == 0 && !pm_noclip_active()) {
             float dmg = (max_fall - 580) * 100.0f / (1024 - 580);

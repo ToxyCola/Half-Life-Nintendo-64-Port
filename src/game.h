@@ -81,6 +81,7 @@ typedef struct entity_s {
     float mpos, mdir, mlast;
     int leaf;               // env_sprite: BSP leaf (PVS test), 0 unknown
     int16_t sprid;          // env_sprite: converted PC sprite (weapons.c fxspr), -1 none
+    uint8_t texframe;       // brush entity texture frame (pev->frame: 1 = the alternate +a.. textures)
     float sprt0;            // env_sprite: when its animation started   // momentary_rot_button position 0..1, direction, last held; pendulum phase
 } entity_t;
 

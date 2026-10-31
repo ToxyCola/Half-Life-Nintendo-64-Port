@@ -73,6 +73,12 @@ typedef struct {
     bool spawned;            // made during play (its slots can be reused once the body is gone)
     int16_t bone_cache;      // studio.c static pose slot (-1 none)
     float bone_cache_org[4]; // where/how it was when cached (origin, yaw)
+    struct {                     // Blast Pit tentacle (CTentacle): where it is and what it heard
+        bool init;
+        int8_t pos, goal_kind, goal_lvl, kind, trans, dir, slevel, at_goal, tapsnd;
+        float syaw, stime, prevtime, prev[3], maxyaw, inityaw, nextsong, hittime, fradj, hit_top;
+    } tn;
+    bool ceiling;                // turrets hung from the ceiling ("orientation" 1): drawn upside down
     int bkind, bstate, bi[4];    // bosses (nihilanth, big momma, apache, osprey): kind, state, ints
     float bt[4], bv[3];          //   timers, flying velocity
     int weapons;                 // human grunt "weapons" bits (1 mp5, 2 hand grenades, 4 launcher, 8 shotgun)

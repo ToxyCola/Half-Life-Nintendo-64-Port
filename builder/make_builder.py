@@ -76,7 +76,7 @@ if pth_files:
 stub_exe = os.path.join(REPO, 'builder', 'stub.exe')
 if not os.path.exists(stub_exe):
     print("Building stub.exe...")
-    cmd = "export MSYSTEM=MINGW64; . /etc/profile; cd /i/Half-Life-Nintendo-64-Port; gcc -O2 -s -o builder/stub.exe builder/hl64builder.c -lz -ladvapi32 -lshell32"
+    cmd = "export MSYSTEM=MINGW64; . /etc/profile; cd /i/Half-Life-Nintendo-64-Port; windres builder/hl64builder.rc -O coff -o builder/hl64builder_res.o && gcc -O2 -s -mwindows -o builder/stub.exe builder/hl64builder.c builder/hl64builder_res.o -lz -ladvapi32 -lshell32 -lcomctl32 -lole32"
     subprocess.run([r'C:\msys64\usr\bin\bash.exe', '-lc', cmd], check=True)
 
 print("== 5. Packing HL64Builder.exe")

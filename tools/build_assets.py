@@ -100,11 +100,18 @@ def build_models(a, maps):
         used.setdefault(mdl, set()).add('*')
     for mdl in ('grenade', 'rpgrocket', 'crossbow_bolt', 'hornet', 'w_squeak', 'w_satchel', 'w_grenade', 'hgibs', 'agibs'):
         used.setdefault(mdl, set())
+    # turrets: off / deploy / fire / spin / retire / die (turret.cpp plays them by name)
+    for t in ('turret', 'miniturret', 'sentry'):
+        if t in used:
+            used[t].add('*')
     # tentacles (Blast Pit) idle and strike at the level of their target (CTentacle::MyLevel)
     if 'tentacle2' in used:
-        used['tentacle2'] |= {'floor_idle', 'lev1_idle', 'lev2_idle', 'lev3_idle',
-                              'floor_strike', 'lev1_strike', 'lev2_strike', 'lev3_strike',
-                              'engine_idle', 'engine_death1'}   # the rocket engine burns them (CommandUse)
+        used['tentacle2'] |= {'pit_idle', 'rise_to_temp1', 'temp1_to_floor',   # out of the pit and back
+                              'floor_to_lev1', 'lev1_to_lev2', 'lev2_to_lev3'}   # rising and sinking between levels
+        for lv in ('floor', 'lev1', 'lev2', 'lev3'):      # CTentacle::Cycle: idle, strike, tap, look behind
+            used['tentacle2'] |= {lv + '_idle', lv + '_strike', lv + '_tap', lv + '_rear_idle'}
+        # the rocket engine burns them (CommandUse / DieThink)
+        used['tentacle2'] |= {'engine_idle', 'engine_sway', 'engine_swat', 'engine_bob', 'engine_death1'}
     os.makedirs(os.path.join(a.out, 'models'), exist_ok=True)
     jobs = []
     for mdl, ws in sorted(used.items()):

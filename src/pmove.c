@@ -681,6 +681,12 @@ void pm_set_gravity(float g) { pm->gravity = g; }
 float pm_get_gravity(void) { return pm->gravity; }
 void pm_set_friction(float f) { pm->friction = f; }
 
+// held by a barnacle (PFLAG_ONBARNACLE): no walking, the barnacle moves the player
+void pm_set_frozen(bool on)
+{
+    if (on) pm->flags |= FL_FROZEN;
+    else pm->flags &= ~FL_FROZEN;
+}
 void pm_set_ontrain(bool on)
 {
     if (on) pm->flags |= FL_ONTRAIN;
@@ -782,6 +788,7 @@ void game_trace_begin_frame(void)
             nboxes[i].mn[k] = n->origin[k] + fminf(n->mins[k], -48) - 64;
             nboxes[i].mx[k] = n->origin[k] + fmaxf(n->maxs[k], 48) + 64;
         }
+        if (n->tn.hit_top > 0) nboxes[i].mx[2] = fmaxf(nboxes[i].mx[2], n->origin[2] + n->tn.hit_top);   // a risen tentacle
     }
     update_brush_ents();
     for (int bi = 0; bi < num_brush_ents && num_solid < 256; bi++) {
@@ -880,6 +887,9 @@ void game_trace_(const float *start, const float *end, const float *mins, const 
             if (i == ignore_npc || entities[n->ent].removed) continue;
             const float *nmn = n->mins, *nmx = n->maxs;
             float cmn[3], cmx[3];
+            // a risen Blast Pit tentacle: shots hit its whole column (its hitboxes on the PC), moving things only its base
+            float tmn[3] = {-40, -40, 0}, tmx[3] = {40, 40, n->tn.hit_top};
+            if (!mins && n->tn.hit_top > 0) { nmn = tmn; nmx = tmx; }
             if (!n->solid) {
                 extern bool npc_corpse_box(int i, float *mn, float *mx);
                 if (!(flags & TR_HIT_CORPSES) || !npc_corpse_box(i, cmn, cmx)) continue;

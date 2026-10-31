@@ -11,7 +11,7 @@
 #include "studio.h"
 #include "render.h"
 
-#define MAX_MODELS 64
+#define MAX_MODELS 96
 #define MAX_DRAWN_BONES 768         // per frame, all NPCs together
 #define FB_COUNT 3
 
@@ -28,6 +28,12 @@ static int pool_frame, pool_used;
 #define MAX_POSES 64
 static struct { studio_t *m; int16_t seq, frame, off, natt; float att[4][3]; } poses[MAX_POSES];
 static int num_poses;
+// far characters animate at half rate: every other frame reuses the previous frame's bones
+#define LOD_SLOTS 10
+#define LOD_BONES 64
+static T3DMat4FP lod_store[LOD_SLOTS][LOD_BONES] __attribute__((aligned(16)));   // static: no heap blocks mid-map
+static struct { const void *inst; studio_t *m; int stamp, nb, natt; bool reused; float att[4][3]; T3DMat4FP *mats; } lod[LOD_SLOTS];
+static int lod_frame;
 
 static void *lump(uint8_t *buf, uint32_t *tab, int i, int *count)
 {
@@ -226,7 +232,10 @@ studio_t *studio_get(const char *name)
         free(buf);
         buf = a;
     }
-    if (strncmp(name, "v_", 2)) buf = compact_anims(buf, &size);
+    // (not the view models, nor monsters whose code plays their sequences by name: the Blast Pit
+    // tentacles' level idles / strikes / rises, the turrets' deploy / fire / retire)
+    if (strncmp(name, "v_", 2) && strncmp(name, "tentacle", 8) && !strstr(name, "turret") && strcmp(name, "sentry"))
+        buf = compact_anims(buf, &size);
     studio_t *m = calloc(1, sizeof(studio_t));
     strncpy(m->name, name, sizeof(m->name) - 1);
     m->base = buf;
@@ -280,6 +289,9 @@ studio_t *studio_get(const char *name)
     build_model_strips(m);
     cache[num_cached++] = m;
     debugf("studio: %s %d bones %d seqs %d chunks (%d KB) at %p tex %p\n", name, m->numbones, m->numseqs, m->numchunks, size / 1024, buf, m->texdata);
+#ifdef TENTDBG
+    if (!strncmp(name, "tentacle", 8)) for (int i = 0; i < m->numseqs; i++) debugf("  seq %d %s nf %d ofs %lu\n", i, m->seqs[i].name, m->seqs[i].numframes, (unsigned long)m->seqs[i].animofs);
+#endif
     return m;
 }
 
@@ -347,6 +359,7 @@ void studio_begin_frame(int frame_index)
     if (!static_pool) static_pool = malloc_uncached(sizeof(T3DMat4FP) * STATIC_BONES);
     pool_frame = frame_index % FB_COUNT;
     pool_used = 0;
+    lod_frame++;
 }
 
 // ---------------------------------------------------------------- bones
@@ -401,6 +414,9 @@ void studio_draw(const studio_draw_t *d)
     }
     // keep room for the first-person weapon (drawn last): busy scenes used to run the pool dry
     if (pool_used + (cached ? 0 : m->numbones) + 1 > MAX_DRAWN_BONES - (d->use_xform ? 0 : 160)) return;
+#ifdef TENTDBG
+    if (!strncmp(m->name, "tentacle", 8)) { static int c; if ((c++ & 63) == 0) debugf("TDRAW seq %d f %.1f cached %d pose %d pool %d org %.0f %.0f %.0f\n", seq, fr, cached, pose, pool_used, d->origin[0], d->origin[1], d->origin[2]); }
+#endif
     // compact keys (tools/mdl2n64.py): position mask, constant positions, then per frame
     // x,y,z of each bone's quaternion followed by the positions of the moving bones
     const uint8_t *abase = m->anim + s->animofs;
@@ -439,6 +455,32 @@ void studio_draw(const studio_draw_t *d)
 #ifdef PROFX
     uint32_t pb0 = TICKS_READ();
 #endif
+    // half-rate animation far away
+    int ls = -1;
+    if (!cached && d->lod_inst && !d->use_xform && m->numbones <= LOD_BONES) {
+        int fr_ = -1;
+        for (int i = 0; i < LOD_SLOTS; i++) {
+            if (lod[i].inst == d->lod_inst) { ls = i; break; }
+            if (fr_ < 0 && lod[i].stamp < lod_frame - 1) fr_ = i;
+        }
+        if (ls >= 0 && d->lod_half && !lod[ls].reused && lod[ls].stamp == lod_frame - 1 && lod[ls].m == m && lod[ls].nb == m->numbones) {
+            memcpy(out, lod[ls].mats, sizeof(T3DMat4FP) * m->numbones);
+            for (int a = 0; a < d->att_n && a < lod[ls].natt; a++)
+                for (int r = 0; r < 3; r++) d->att_out[a][r] = ent[r][0] * lod[ls].att[a][0] + ent[r][1] * lod[ls].att[a][1] + ent[r][2] * lod[ls].att[a][2] + ent[r][3];
+            lod[ls].stamp = lod_frame;
+            lod[ls].reused = true;
+            pool_used += m->numbones;
+            cached = true;   // skip the bone pass below
+            ls = -2;
+        } else if (d->lod_half) {
+            if (ls < 0) ls = fr_;
+            if (ls >= 0) {
+                if (m->numbones > LOD_BONES) ls = -1;
+                else { lod[ls].mats = lod_store[ls]; lod[ls].nb = m->numbones; }
+            }
+        } else ls = -1;
+    }
+    T3DMat4FP *wout = ls >= 0 ? lod[ls].mats : out;   // a kept pose is built in cached RAM, then copied
     if (!cached) {
     for (int b = 0; b < m->numbones && b < 128; b++) {
         float qa[4], qb[4], q[4], p[3], dot = 0;
@@ -503,9 +545,16 @@ void studio_draw(const studio_draw_t *d)
         }
         tm.m[0][3] = tm.m[1][3] = tm.m[2][3] = 0;
         tm.m[3][3] = 1;
-        t3d_mat4_to_fixed_3x4(&out[b], &tm);
+        t3d_mat4_to_fixed_3x4(&wout[b], &tm);
     }
     pool_used += m->numbones;
+#ifdef TENTDBG
+    if (!strncmp(m->name, "tentacle", 8)) { static int c; if ((c++ & 0) == 0) { int b = m->numbones - 1; debugf("TBONE seq %d nb %d tip %.0f %.0f %.0f mid %.0f %.0f %.0f inv %f\n", seq, m->numbones, bonemat[b][0][3], bonemat[b][1][3], bonemat[b][2][3], bonemat[b/2][0][3], bonemat[b/2][1][3], bonemat[b/2][2][3], inv); } }
+#endif
+    if (ls >= 0) {
+        memcpy(out, wout, sizeof(T3DMat4FP) * m->numbones);
+        lod[ls].inst = d->lod_inst; lod[ls].m = m; lod[ls].nb = m->numbones; lod[ls].stamp = lod_frame; lod[ls].reused = false;
+    }
     float latt[4][3];
     int natt = 0;
     for (int a = 0; a < m->numatt && a < 4; a++) {
@@ -517,6 +566,7 @@ void studio_draw(const studio_draw_t *d)
     }
     for (int a = 0; a < d->att_n && a < natt; a++)
         for (int r = 0; r < 3; r++) d->att_out[a][r] = ent[r][0] * latt[a][0] + ent[r][1] * latt[a][1] + ent[r][2] * latt[a][2] + ent[r][3];
+    if (ls >= 0) { lod[ls].natt = natt; memcpy(lod[ls].att, latt, sizeof(latt)); }
     if (keyed && num_poses < MAX_POSES && static_pool && static_used + m->numbones <= STATIC_BONES) {
         memcpy(&static_pool[static_used], out, sizeof(T3DMat4FP) * m->numbones);
         poses[num_poses].m = m; poses[num_poses].seq = seq; poses[num_poses].frame = f0;
@@ -546,6 +596,7 @@ void studio_draw(const studio_draw_t *d)
 
     int family = (d->skin >= 0 && d->skin < m->numskinfamilies) ? d->skin : 0;
     int cur_tex = -1, cur_alpha = -1;
+    bool fx_chrome = false;
     t3d_matrix_push(emat);
     t3d_matrix_push_pos(1);
     for (int bp = 0; bp < m->numbodyparts; bp++) {
@@ -560,6 +611,14 @@ void studio_draw(const studio_draw_t *d)
                 int alpha = (m->tex[tex].flags & 0x40) ? 1 : 0;
                 if (alpha != cur_alpha) { rdpq_mode_alphacompare(alpha ? 128 : 0); cur_alpha = alpha; }
                 rspq_block_run(m->texblocks[tex]);
+                // chrome (STUDIO_NF_CHROME: the guns' metal, Barney's helmet): a reflection that
+                // slides over the surface with the view, as the PC's R_StudioChrome
+                bool chrome = (m->tex[tex].flags & 0x02) != 0;
+                if (chrome != fx_chrome) {
+                    if (chrome) t3d_state_set_vertex_fx(T3D_VERTEX_FX_SPHERICAL_UV, m->tex[tex].tw, m->tex[tex].th);
+                    else t3d_state_set_vertex_fx(T3D_VERTEX_FX_NONE, 0, 0);
+                    fx_chrome = chrome;
+                }
                 cur_tex = tex;
             }
             for (int l = 0; l < ch->numloads; l++) {
@@ -581,6 +640,7 @@ void studio_draw(const studio_draw_t *d)
         }
     }
     t3d_matrix_pop(2);
+    if (fx_chrome) t3d_state_set_vertex_fx(T3D_VERTEX_FX_NONE, 0, 0);
 #ifdef PROFX
     { static uint32_t ab, as; static int an, nb; ab += TICKS_DISTANCE(pb0, pb1); as += TICKS_DISTANCE(pb1, TICKS_READ()); nb += m->numbones;
       if (++an == 120) { debugf("  studio: bones %d us/model (%d bones avg), submit %d us/model\n", (int)TICKS_TO_US(ab / an), nb / an, (int)TICKS_TO_US(as / an)); ab = as = an = nb = 0; } }

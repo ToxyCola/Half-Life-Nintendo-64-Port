@@ -257,7 +257,7 @@ void snd_init(void)
     sentences_load();
     return;
 #endif
-    audio_init(22050, AUDIO_DEFAULT_LATENCY);
+    audio_init(22050, AUDIO_INIT_LATENCY_MS(240));   // headroom for slow frames on real hardware
     mixer_init(NUM_MIX);
     wav64_init_compression(2);
     mixer_ch_set_limits(MUSIC_CH, 16, 22050, 0);   // allocate the music channel's buffer now, not mid-game
@@ -428,6 +428,9 @@ int snd_emit(int ent, int chan, const char *sample, float vol, float attn, int p
     spatialize(&tmp, &l, &r);
     bool loop = w->wav.wave.loop_len > 0;
     if (!loop && l + r < 0.002f) return -1;            // out of earshot: nothing to hear
+#ifdef SNDDBG
+    debugf("SND %s ent %d chan %d loop %d\n", sample, ent, chan, loop);
+#endif
     slot_t *s = slot_new(ent, chan);
     if (!s) return -1;
     *s = tmp;
@@ -554,6 +557,9 @@ void snd_update(const float *listener, const float *right)
     if (listener) memcpy(lis_org, listener, 12);
     if (right) memcpy(lis_right, right, 12);
     extern int trace_frames;
+#ifdef SNDDBG
+    { static int pc; if (++pc % 90 == 0) { for (int i = 0; i < MAX_SLOTS; i++) if (slots[i].active) debugf("  slot %d %s ent %d mix %d loop %d play %d\n", i, slots[i].wave ? slots[i].wave->name : "?", slots[i].ent, slots[i].mix, slots[i].loop, slots[i].mix >= 0 ? mixer_ch_playing(slots[i].mix) : -1); debugf("--\n"); } }
+#endif
     for (int i = 0; i < MAX_SLOTS; i++) {
         slot_t *s = &slots[i];
         if (!s->active) continue;
@@ -617,5 +623,14 @@ void snd_stop_all(void)
 // keep the mixer fed during long loads
 void snd_poll(void)
 {
-    if (audio_ok) mixer_try_play();
+    if (!audio_ok) return;
+    // sentences: cut each word at its end mark and start the next one right away, rather
+    // than waiting for the next frame (at a low frame rate that left gaps and overruns)
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        slot_t *s = &slots[i];
+        if (!s->active || !s->words || s->mix < 0) continue;
+        if (s->word_end < 1e29f && mixer_ch_get_pos(s->mix) >= s->word_end) mixer_ch_stop(s->mix);
+        if (!mixer_ch_playing(s->mix)) sentence_next_word(s);
+    }
+    mixer_try_play();
 }

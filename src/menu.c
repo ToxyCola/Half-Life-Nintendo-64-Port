@@ -21,7 +21,106 @@ void snd_play(const char *sample, float volume, int channel);
 void snd_set_volume(float v);
 
 settings_t settings = {.control_scheme = 0, .invert_y = false, .look_sens = 5, .volume = 8,
-                       .show_stats = false, .crosshair = false, .cheats = false, .skill = 2};
+                       .show_stats = false, .crosshair = false, .cheats = false, .skill = 2,
+                       .bind = {PAD_Z, PAD_R, PAD_A, PAD_L, PAD_B, PAD_DD, PAD_DU, PAD_DL, PAD_DR}};
+
+// ---- button mapping (Options -> Controller Settings -> Button Mapping)
+const char *bind_names[NUM_BINDS] = {"Fire", "Alternate fire", "Jump", "Duck", "Use", "Reload", "Flashlight", "Previous weapon", "Next weapon"};
+const char *pad_names[NUM_PADS] = {"A", "B", "Z", "L", "R", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "C-up", "C-down", "C-left", "C-right",
+                                   "Stick up", "Stick down", "Stick left", "Stick right", "X (GameCube)", "Y (GameCube)"};
+// the stick as four buttons, for the schemes where it doesn't move or look (pushed past half way)
+static uint8_t stick_held, stick_pressed;
+void pad_stick_update(const joypad_inputs_t *in)
+{
+    uint8_t h = (in->stick_y > 45 ? 1 : 0) | (in->stick_y < -45 ? 2 : 0) | (in->stick_x < -45 ? 4 : 0) | (in->stick_x > 45 ? 8 : 0);
+    stick_pressed = h & ~stick_held;
+    stick_held = h;
+}
+// the scheme's own moving / looking inputs can't also be actions: an action on one of them moves to
+// the same direction on the input the scheme leaves free (D-pad <-> C buttons <-> stick)
+void settings_fit_binds(void)
+{
+    int s = settings.control_scheme;
+    bool dpad_used = s == 3 || s == 4, c_used = s != 3, stick_used = s != 4;
+    for (int i = 0; i < NUM_BINDS; i++) {
+        int b = settings.bind[i];
+        int grp = b >= PAD_DU && b <= PAD_DR ? 0 : b >= PAD_CU && b <= PAD_CR ? 1 : b >= PAD_SU && b <= PAD_SR ? 2 : -1;
+        if (grp < 0) continue;
+        int dir = b - (grp == 0 ? PAD_DU : grp == 1 ? PAD_CU : PAD_SU);
+        bool used = grp == 0 ? dpad_used : grp == 1 ? c_used : stick_used;
+        if (!used) continue;
+        int to = !dpad_used ? PAD_DU : !c_used ? PAD_CU : !stick_used ? PAD_SU : -1;
+        if (to >= 0) settings.bind[i] = to + dir;
+    }
+}
+void settings_default_binds(void)
+{
+    static const uint8_t def[NUM_BINDS] = {PAD_Z, PAD_R, PAD_A, PAD_L, PAD_B, PAD_DD, PAD_DU, PAD_DL, PAD_DR};
+    memcpy(settings.bind, def, sizeof(def));
+}
+bool pad_held(const joypad_inputs_t *in, int pad)
+{
+    switch (pad) {
+    case PAD_A: return in->btn.a; case PAD_B: return in->btn.b; case PAD_Z: return in->btn.z;
+    case PAD_L: return in->btn.l; case PAD_R: return in->btn.r;
+    case PAD_DU: return in->btn.d_up; case PAD_DD: return in->btn.d_down; case PAD_DL: return in->btn.d_left; case PAD_DR: return in->btn.d_right;
+    case PAD_CU: return in->btn.c_up; case PAD_CD: return in->btn.c_down; case PAD_CL: return in->btn.c_left; case PAD_CR: return in->btn.c_right;
+    case PAD_SU: case PAD_SD: case PAD_SL: case PAD_SR: return (stick_held >> (pad - PAD_SU)) & 1;
+    case PAD_X: return in->btn.x; case PAD_Y: return in->btn.y;
+    }
+    return false;
+}
+bool pad_pressed(const joypad_buttons_t *b, int pad)
+{
+    switch (pad) {
+    case PAD_A: return b->a; case PAD_B: return b->b; case PAD_Z: return b->z;
+    case PAD_L: return b->l; case PAD_R: return b->r;
+    case PAD_DU: return b->d_up; case PAD_DD: return b->d_down; case PAD_DL: return b->d_left; case PAD_DR: return b->d_right;
+    case PAD_CU: return b->c_up; case PAD_CD: return b->c_down; case PAD_CL: return b->c_left; case PAD_CR: return b->c_right;
+    case PAD_SU: case PAD_SD: case PAD_SL: case PAD_SR: return (stick_pressed >> (pad - PAD_SU)) & 1;
+    case PAD_X: return b->x; case PAD_Y: return b->y;
+    }
+    return false;
+}
+// settings live in the last 2 KB of the 32 KB SRAM (the three save slots use 30 KB)
+#define SETTINGS_SRAM_OFS (3 * 10240)
+#define SETTINGS_MAGIC 0x484C5331   // "HLS1"
+typedef struct { uint32_t magic; settings_t s; } __attribute__((aligned(16))) settings_blob_t;
+#define SETTINGS_PAK_FILE "cpak1:/NHLE.01-HL64 CONFIG"
+bool game_pak_ready(void);
+// on the cartridge's save memory and, when one is in, on the Controller Pak (to take to another console)
+void settings_save(void)
+{
+    settings_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.magic = SETTINGS_MAGIC;
+    b.s = settings;
+    b.s.cheats = false;   // cheats are per session
+    if (sram_detect() > 0) sram_write(&b, SETTINGS_SRAM_OFS, sizeof(b));
+    if (game_pak_ready()) {
+        FILE *f = fopen(SETTINGS_PAK_FILE, "wb");
+        if (f) { fwrite(&b, 1, sizeof(b), f); fclose(f); }
+    }
+}
+void settings_load(void)
+{
+    sram_init();
+    settings_blob_t b;
+    bool got = false;
+    if (sram_detect() > 0) { sram_read(&b, SETTINGS_SRAM_OFS, sizeof(b)); got = b.magic == SETTINGS_MAGIC; }
+    if (!got && game_pak_ready()) {   // a new cartridge (or one without save memory): the pak's copy
+        FILE *f = fopen(SETTINGS_PAK_FILE, "rb");
+        if (f) { got = fread(&b, 1, sizeof(b), f) == sizeof(b) && b.magic == SETTINGS_MAGIC; fclose(f); }
+    }
+    if (!got) return;
+    bool cheats = settings.cheats;
+    settings = b.s;
+    settings.cheats = cheats;
+    for (int i = 0; i < NUM_BINDS; i++) if (settings.bind[i] >= NUM_PADS) { settings_default_binds(); break; }
+    if (settings.control_scheme < 0 || settings.control_scheme >= NUM_SCHEMES) settings.control_scheme = 0;
+    if (settings.look_sens < 1 || settings.look_sens > 10) settings.look_sens = 5;
+    if (settings.volume < 0 || settings.volume > 10) settings.volume = 8;
+}
 
 #define SW 320
 #define SH 240
@@ -41,10 +140,15 @@ settings_t settings = {.control_scheme = 0, .invert_y = false, .look_sens = 5, .
 #define C_SEL_BG      RGBA32(149, 136, 49, 255)
 #define C_CTRL_BRIGHT RGBA32(196, 181, 80, 255)
 
-typedef enum { SCR_MAIN, SCR_NEWGAME, SCR_LOAD, SCR_SAVE, SCR_OPTIONS, SCR_OPTIONS_LEGACY, SCR_OPTIONS_CTRL, SCR_OPTIONS_CTRL_ADV, SCR_OPTIONS_AV, SCR_OPTIONS_CREDITS, SCR_LEAVE } screen_t;
+typedef enum { SCR_MAIN, SCR_NEWGAME, SCR_LOAD, SCR_SAVE, SCR_OPTIONS, SCR_OPTIONS_LEGACY, SCR_OPTIONS_CTRL, SCR_OPTIONS_CTRL_ADV, SCR_OPTIONS_BINDS, SCR_OPTIONS_AV, SCR_OPTIONS_CREDITS, SCR_OPTIONS_CHEATS, SCR_LEAVE } screen_t;
 
 static bool open, in_game;
 static screen_t screen;
+static int bind_sel;
+static int cheat_sel;
+static int cheat_count(void);
+static bool bind_listen;
+static float bind_listen_t;
 static int main_sel, new_sel = 2, load_sel, load_scroll, opt_tab, opt_sel, opt_menu_sel, ctrl_sel, adv_sel, av_sel, leave_sel;
 static float anim_t, repeat_t;
 static float menu_time;
@@ -179,6 +283,13 @@ void game_save_to_slot(int slot);
 bool game_save_slot_info(int slot, char *map_out, int map_len);
 int game_saves_list(int *slots, char (*labels)[48]);
 static int pak_sel;
+// the Controller Pak column: is one in, and its saves (slots 3..5, see main.c)
+static bool pak_ok;
+static int pak_slots[3], num_pak_saves;
+bool game_pak_ready(void);
+int game_pak_saves_list(int *slots);
+void game_saves_scan(void);
+static void pak_refresh(void) { pak_ok = game_pak_ready(); game_saves_scan(); num_pak_saves = pak_ok ? game_pak_saves_list(pak_slots) : 0; }
 static sprite_t *colorstrip2_spr;
 static bool colorstrip2_tried;
 static int num_saves, save_slots[6];
@@ -201,7 +312,7 @@ static int main_items(mitem_t *out)
 
 // ------------------------------------------------------------------ options
 typedef struct { const char *label; int *ival; bool *bval; int min, max; const char **names; } opt_t;
-static const char *scheme_names[] = {"Stick moves, C looks", "Stick looks, C moves", "Stick moves + turns"};
+static const char *scheme_names[NUM_SCHEMES] = {"Stick moves, C looks", "Stick looks, C moves", "Stick moves + turns", "D-pad moves, stick looks", "D-pad moves, C looks"};
 static const char *onoff[] = {"Off", "On"};
 static const char *tab_names[] = {"Controls", "Audio", "Video", "Debug"};
 extern bool dbg_god, dbg_noclip, dbg_give_all;
@@ -218,7 +329,7 @@ static int options_for_tab(int tab, opt_t *o)
 {
     int n = 0;
     if (tab == 0) {
-        o[n++] = (opt_t){"Control scheme", &settings.control_scheme, NULL, 0, 2, scheme_names};
+        o[n++] = (opt_t){"Control scheme", &settings.control_scheme, NULL, 0, NUM_SCHEMES - 1, scheme_names};
         o[n++] = (opt_t){"Look sensitivity", &settings.look_sens, NULL, 1, 10, NULL};
         o[n++] = (opt_t){"Reverse up-down axis", NULL, &settings.invert_y, 0, 1, onoff};
         o[n++] = (opt_t){"Cheats", NULL, &settings.cheats, 0, 1, onoff};
@@ -335,6 +446,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
             if (pak_sel != old_pak) {
                 load_sel = 0;
                 load_scroll = 0;
+                if (pak_sel == 1) pak_refresh();
                 snd_play("ui/select.wav", 1.0f, 3);
             }
         }
@@ -342,9 +454,13 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         int total = 1;
         if (pak_sel == 0) {
             total = is_save ? 2 : num_saves;   // load: autosaves and saved games only
+        } else {
+            total = !pak_ok ? 0 : is_save ? 3 : num_pak_saves;
         }
         if (!total) {
-            if (pressed.b || pressed.a) screen = SCR_MAIN;
+            if (pressed.b) { snd_play("ui/cancel.wav", 1.0f, 3); screen = SCR_MAIN; }
+            if (pressed.a && pak_sel == 1) { pak_refresh(); snd_play("ui/select.wav", 1.0f, 3); }   // check for a pak again
+            else if (pressed.a) screen = SCR_MAIN;
             break;
         }
 
@@ -364,23 +480,15 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
 
         if (pressed.a || pressed.start) {
             if (is_save) {
-                if (pak_sel == 0) {
-                    snd_play("ui/confirm.wav", 1.0f, 3);
-                    open = false;
-                    game_save_to_slot(load_sel + 1);
-                    return MENU_ACT_RESUME;
-                } else {
-                    snd_play("ui/cancel.wav", 1.0f, 3);
-                }
+                snd_play("ui/confirm.wav", 1.0f, 3);
+                open = false;
+                game_save_to_slot(pak_sel == 0 ? load_sel + 1 : 3 + load_sel);
+                return MENU_ACT_RESUME;
             } else {
-                if (pak_sel == 0 && total > 0) {
-                    snd_play("ui/confirm.wav", 1.0f, 3);
-                    open = false;
-                    snprintf(map_out, map_out_len, "*save%d", save_slots[load_sel]);
-                    return MENU_ACT_START_MAP;
-                } else {
-                    snd_play("ui/cancel.wav", 1.0f, 3);
-                }
+                snd_play("ui/confirm.wav", 1.0f, 3);
+                open = false;
+                snprintf(map_out, map_out_len, "*save%d", pak_sel == 0 ? save_slots[load_sel] : pak_slots[load_sel]);
+                return MENU_ACT_START_MAP;
             }
         }
         break;
@@ -388,12 +496,13 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
     case SCR_OPTIONS: {
         int d = nav_dir(dt, in, pressed, false);
         if (d) {
-            opt_menu_sel = (opt_menu_sel + d + 5) % 5;
+            opt_menu_sel = (opt_menu_sel + d + 4) % 4;
             snd_play("ui/select.wav", 1.0f, 3);
         }
         if (pressed.b) {
             snd_play("ui/cancel.wav", 1.0f, 3);
             screen = SCR_MAIN;
+            settings_save();   // control scheme, sensitivity, volume, button mapping: kept on the cartridge
             break;
         }
         if (pressed.a || pressed.start) {
@@ -407,19 +516,13 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
                 screen = SCR_OPTIONS_CTRL;
                 ctrl_sel = 0;
                 break;
-            case 2: // Cheat Codes
-                settings.cheats = true;
-                screen = SCR_OPTIONS_LEGACY;
-                opt_tab = 3;
-                opt_sel = 0;
+            case 2: // Cheat Codes: only with "Enable cheats" ticked (Controller Settings > Advanced)
+                if (!settings.cheats) { snd_play("ui/cancel.wav", 1.0f, 3); break; }
+                screen = SCR_OPTIONS_CHEATS;
+                cheat_sel = 0;
                 break;
             case 3: // Credits
                 screen = SCR_OPTIONS_CREDITS;
-                break;
-            case 4: // Options (Legacy)
-                screen = SCR_OPTIONS_LEGACY;
-                opt_tab = 0;
-                opt_sel = 0;
                 break;
             }
         }
@@ -428,7 +531,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
     case SCR_OPTIONS_CTRL: {
         int d = nav_dir(dt, in, pressed, false);
         if (d) {
-            ctrl_sel = (ctrl_sel + d + 2) % 2;
+            ctrl_sel = (ctrl_sel + d + 3) % 3;
             snd_play("ui/select.wav", 1.0f, 3);
         }
         if (pressed.b) {
@@ -453,19 +556,22 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
             if (lr < 0) {
                 if (settings.control_scheme > 0) {
                     settings.control_scheme--;
+                    settings_fit_binds();
                     snd_play("ui/select.wav", 1.0f, 3);
                 }
             } else if (lr > 0) {
-                if (settings.control_scheme < 2) {
+                if (settings.control_scheme < NUM_SCHEMES - 1) {
                     settings.control_scheme++;
+                    settings_fit_binds();
                     snd_play("ui/confirm.wav", 1.0f, 3);
                 }
             } else if (pressed.a || pressed.start) {
-                if (settings.control_scheme < 2) {
+                if (settings.control_scheme < NUM_SCHEMES - 1) {
                     settings.control_scheme++;
                 } else {
                     settings.control_scheme = 0;
                 }
+                settings_fit_binds();
                 snd_play("ui/confirm.wav", 1.0f, 3);
             }
         } else if (ctrl_sel == 1) { // Advanced...
@@ -477,6 +583,48 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
                 screen = SCR_OPTIONS_CTRL_ADV;
                 adv_sel = 0;
             }
+        } else if (ctrl_sel == 2) { // Button Mapping...
+            if (pressed.a || pressed.start) {
+                snd_play("ui/confirm.wav", 1.0f, 3);
+                screen = SCR_OPTIONS_BINDS;
+                bind_sel = 0;
+                bind_listen = false;
+            }
+        }
+        break;
+    }
+    case SCR_OPTIONS_BINDS: {
+        if (bind_listen) {
+            // the next button pressed becomes this action's (Start cancels); the action that had
+            // that button takes this one's old button, so nothing is left unbound
+            bind_listen_t += dt;
+            if (pressed.start) { bind_listen = false; snd_play("ui/cancel.wav", 1.0f, 3); break; }
+            if (bind_listen_t < 0.2f) break;
+            pad_stick_update(&in);
+            for (int p = 0; p < NUM_PADS; p++) {
+                if (!pad_pressed(&pressed, p)) continue;
+                {   // not one the control scheme moves or looks with
+                    int sc = settings.control_scheme;
+                    bool dpad_used = sc == 3 || sc == 4, c_used = sc != 3, stick_used = sc != 4;
+                    if ((p >= PAD_DU && p <= PAD_DR && dpad_used) || (p >= PAD_CU && p <= PAD_CR && c_used) ||
+                        (p >= PAD_SU && p <= PAD_SR && stick_used)) continue;
+                }
+                int old = settings.bind[bind_sel];
+                for (int j = 0; j < NUM_BINDS; j++) if (j != bind_sel && settings.bind[j] == p) settings.bind[j] = old;
+                settings.bind[bind_sel] = p;
+                bind_listen = false;
+                snd_play("ui/confirm.wav", 1.0f, 3);
+                break;
+            }
+            break;
+        }
+        int d = nav_dir(dt, in, pressed, false);
+        if (d) { bind_sel = (bind_sel + d + NUM_BINDS + 1) % (NUM_BINDS + 1); snd_play("ui/select.wav", 1.0f, 3); }
+        if (pressed.b) { snd_play("ui/cancel.wav", 1.0f, 3); screen = SCR_OPTIONS_CTRL; settings_save(); break; }
+        if (pressed.a) {
+            snd_play("ui/confirm.wav", 1.0f, 3);
+            if (bind_sel == NUM_BINDS) { settings_default_binds(); settings_fit_binds(); }
+            else { bind_listen = true; bind_listen_t = 0; }
         }
         break;
     }
@@ -570,6 +718,37 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
                 snd_play("ui/confirm.wav", 1.0f, 3);
             }
             break;
+        }
+        break;
+    }
+    case SCR_OPTIONS_CHEATS: {
+        int nc = cheat_count();
+        int d = nav_dir(dt, in, pressed, false);
+        if (d) { cheat_sel = (cheat_sel + d + nc) % nc; snd_play("ui/select.wav", 1.0f, 3); }
+        if (pressed.b) { snd_play("ui/cancel.wav", 1.0f, 3); screen = SCR_OPTIONS; break; }
+        int h = nav_dir(dt, in, pressed, true);
+        if (cheat_sel == 3 && h) {   // map: left / right
+            int nm = game_num_maps();
+            dbg_map = (dbg_map + h + nm) % nm;
+            snd_play("ui/select.wav", 1.0f, 3);
+        }
+        if (pressed.a || pressed.start || (h && cheat_sel < 2)) {
+            switch (cheat_sel) {
+            case 0: dbg_god = !dbg_god; snd_play("ui/confirm.wav", 1.0f, 3); break;
+            case 1: dbg_noclip = !dbg_noclip; snd_play("ui/confirm.wav", 1.0f, 3); break;
+            case 2:
+                if (!pressed.a && !pressed.start) break;
+                if (in_game) { dbg_give_all = true; snd_play("ui/confirm.wav", 1.0f, 3); open = false; return MENU_ACT_RESUME; }
+                snd_play("ui/cancel.wav", 1.0f, 3);   // nothing to give on the title screen
+                break;
+            case 3: case 4:
+                if (!pressed.a && !pressed.start) break;
+                snd_play("ui/confirm.wav", 1.0f, 3);
+                warped = true;
+                open = false;
+                strncpy(map_out, game_map_name(dbg_map), map_out_len);
+                return MENU_ACT_START_MAP;
+            }
         }
         break;
     }
@@ -740,6 +919,18 @@ static void draw_title_hl(void)
     }
 }
 
+// the title art's arc: menu items sit along it, so each item's indent follows from its height
+// (the Options list's spacing: 106 -> 2%, 126 -> 3%, 146 -> 5%, 166 -> 9% of the screen width)
+static int arc_x(int y)
+{
+    static const float py[] = {86, 106, 126, 146, 166, 186, 206, 226, 246};
+    static const float px[] = {5.5f, 6.4f, 9.6f, 16.0f, 28.8f, 46.0f, 68.0f, 95.0f, 128.0f};
+    if (y <= py[0]) return (int)px[0];
+    for (int i = 1; i < 9; i++)
+        if (y <= py[i]) return (int)(px[i - 1] + (px[i] - px[i - 1]) * (y - py[i - 1]) / (py[i] - py[i - 1]) + 0.5f);
+    return (int)px[8];
+}
+
 static void draw_main(void)
 {
     draw_title_hl();
@@ -775,13 +966,7 @@ static void draw_main(void)
     int y_cursor = y;
 
     for (int i = 0; i < n; i++) {
-        float off_pct = 0.02f;
-        if (items[i] == MI_LOAD) off_pct = 0.03f;
-        else if (items[i] == MI_OPTIONS) off_pct = 0.07f;
-        else if (items[i] == MI_LEAVE) off_pct = 0.09f;
-        else if (i == 0) off_pct = 0.02f;
-        else off_pct = 0.02f + i * 0.015f;
-        int item_x = x + (int)(SW * off_pct);
+        int item_x = x + arc_x(y_cursor);
 
         bool is_newgame_item = (items[i] == MI_NEWGAME);
         bool armed = false;
@@ -1024,6 +1209,8 @@ static void draw_load_save(bool is_save)
     int total = 1;
     if (pak_sel == 0) {
         total = is_save ? 2 : num_saves;   // load: autosaves and saved games only
+    } else {
+        total = !pak_ok || (!is_save && num_pak_saves == 0) ? 1 : is_save ? 3 : num_pak_saves;
     }
 
     for (int i = 0; i < 6 && load_scroll + i < total; i++) {
@@ -1043,7 +1230,14 @@ static void draw_load_save(bool is_save)
 
         char line[64];
         if (pak_sel == 1) {
-            strcpy(line, "-- Unused Data --");
+            char mapname[32];
+            int slot = is_save ? 3 + k : (num_pak_saves ? pak_slots[k] : -1);
+            if (!pak_ok) strcpy(line, "No Controller Pak (A: look again)");
+            else if (slot >= 0 && game_save_slot_info(slot, mapname, sizeof(mapname))) {
+                char tc[48];
+                to_title_case(tc, get_chapter_title_for_map(mapname), sizeof(tc));
+                snprintf(line, sizeof(line), "Controller Pak %d - %s", slot - 2, tc);
+            } else strcpy(line, is_save ? "-- Unused Data --" : "-- No saved games --");
         } else if (is_save) {
             char mapname[32];
             int slot = k + 1;
@@ -1139,25 +1333,18 @@ static void draw_options(void)
         "Audio / Video Settings",
         "Controller Settings",
         "Cheat Codes",
-        "Credits",
-        "Options (Legacy)"
+        "Credits"
     };
     static const char *opt_hints[] = {
         "Configure sound volume, video and display options.",
         "Configure control schemes, sensitivity and look axes.",
-        "Toggle cheats and developer options.",
-        "View the team and contributors who made this possible.",
-        "Open the legacy options dialog."
+        "Toggle cheats and developer options (needs Enable cheats).",
+        "View the team and contributors who made this possible."
     };
-    int n = 5;
+    int n = 4;
     int x = 36, y = 106, step = 20;
     for (int i = 0; i < n; i++) {
-        float off_pct = 0.02f;
-        if (i == 1) off_pct = 0.03f;
-        else if (i == 2) off_pct = 0.05f;
-        else if (i == 3) off_pct = 0.09f;
-        else if (i >= 4) off_pct = 0.11f;
-        int item_x = x + (int)(SW * off_pct);
+        int item_x = x + arc_x(y + i * step);
         bool armed = (i == opt_menu_sel && screen == SCR_OPTIONS);
         if (anim_t < 0.06f * i) continue;
 
@@ -1186,7 +1373,7 @@ static void draw_options(void)
         }
         font_begin(BLEND_ALPHA);
         rdpq_mode_filter(FILTER_BILINEAR);
-        font_color(armed ? C_MENU_ARMED : C_MENU);
+        font_color(i == 2 && !settings.cheats ? RGBA32(196, 181, 80, 90) : armed ? C_MENU_ARMED : C_MENU);
         font_draw_scaled(FONT_MEDIUM, item_x, y + i * step, opt_labels[i], 1.10f);
     }
     if (screen == SCR_OPTIONS) {
@@ -1211,6 +1398,192 @@ static void draw_options(void)
         font_color(C_MENU);
         font_draw(FONT_SMALL, text_x, hy, opt_hints[opt_menu_sel]);
     }
+}
+
+// a text button in the controller screens' style: amber outline and glow when armed
+static void draw_menu_button(int x, int y, const char *label, bool armed)
+{
+    int w = (int)(font_width(FONT_MEDIUM, label) * 1.05f);
+    int bx = x - 7, bw = w + 14, by = y - 2, bh = 18;
+    if (armed) {
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_set_prim_color(RGBA32(255, 178, 67, 255));
+        rdpq_fill_rectangle(bx + 1, by, bx + bw - 1, by + 1);
+        rdpq_fill_rectangle(bx + 1, by + bh - 1, bx + bw - 1, by + bh);
+        rdpq_fill_rectangle(bx, by + 1, bx + 1, by + bh - 1);
+        rdpq_fill_rectangle(bx + bw - 1, by + 1, bx + bw, by + bh - 1);
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_scaled(FONT_MEDIUM, x + 1, y + 1, label, 1.05f);
+        float pulse = 0.75f + 0.25f * sinf(anim_t * 4.0f);
+        font_begin(BLEND_ADD);
+        font_color(RGBA32(255 * pulse * 0.55f, 178 * pulse * 0.55f, 67 * pulse * 0.55f, 255));
+        font_draw_scaled(FONT_GLOW, x, y, label, 1.05f);
+        font_begin(BLEND_ALPHA);
+        font_color(C_MENU_ARMED);
+        font_draw_scaled(FONT_MEDIUM, x, y, label, 1.05f);
+    } else {
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_scaled(FONT_MEDIUM, x + 1, y + 1, label, 1.05f);
+        font_color(RGBA32(235, 235, 235, 255));
+        font_draw_scaled(FONT_MEDIUM, x, y, label, 1.05f);
+    }
+}
+
+// ---- shared pieces of the new menu's settings screens (Audio / Video style)
+static void ui_load_common(void)
+{
+    if (!buttons_a_tried) { buttons_a_tried = true; FILE *f = fopen("rom:/ui/buttons_a.sprite", "rb"); if (f) { fclose(f); buttons_a_spr = sprite_load("rom:/ui/buttons_a.sprite"); } }
+    if (!buttons_b_tried) { buttons_b_tried = true; FILE *f = fopen("rom:/ui/buttons_b.sprite", "rb"); if (f) { fclose(f); buttons_b_spr = sprite_load("rom:/ui/buttons_b.sprite"); } }
+    if (!box_tried) { box_tried = true; FILE *f = fopen("rom:/ui/box.sprite", "rb"); if (f) { fclose(f); box_spr = sprite_load("rom:/ui/box.sprite"); } }
+}
+static void ui_header(int x, int y, const char *label)
+{
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, x + 1, y + 1, label, 1.15f);
+    font_color(RGBA32(235, 195, 65, 255));
+    font_draw_scaled(FONT_MEDIUM, x, y, label, 1.15f);
+}
+// a label where '|' marks an extra pixel of space (letters the font runs together: "cl")
+static void draw_spaced(int f, int x, int y, const char *label, float sc)
+{
+    char part[64];
+    const char *p = label;
+    while (*p) {
+        int n = 0;
+        while (p[n] && p[n] != '|' && n < 63) n++;
+        memcpy(part, p, n); part[n] = 0;
+        x = font_draw_scaled(f, x, y, part, sc);
+        p += n;
+        if (*p == '|') { p++; x += 2; }
+    }
+}
+static void ui_item(int x, int y, const char *label, bool armed, color_t col)
+{
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    draw_spaced(FONT_MEDIUM, x + 1, y + 1, label, 1.05f);
+    if (armed) {
+        float pulse = 0.75f + 0.25f * sinf(anim_t * 4.0f);
+        font_begin(BLEND_ADD);
+        font_color(RGBA32(255 * pulse * 0.55f, 178 * pulse * 0.55f, 67 * pulse * 0.55f, 255));
+        draw_spaced(FONT_GLOW, x, y, label, 1.05f);
+    }
+    font_begin(BLEND_ALPHA);
+    font_color(armed ? C_MENU_ARMED : col);
+    draw_spaced(FONT_MEDIUM, x, y, label, 1.05f);
+}
+static void ui_tickbox(int x, int y, bool on)
+{
+    if (!box_spr) return;
+    rdpq_set_mode_standard();
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    rdpq_sprite_blit(box_spr, x, y, &(rdpq_blitparms_t){ .s0 = 0, .t0 = 0, .width = 16, .height = 16 });
+    if (on) rdpq_sprite_blit(box_spr, x, y, &(rdpq_blitparms_t){ .s0 = 16, .t0 = 0, .width = 16, .height = 16 });
+}
+// the bottom hint bar: (A) label, (B) label
+static void ui_hints(const char *a_label, const char *b_label)
+{
+    int hy = SH - 22;
+    float btn_scale = 0.459f;
+    int bx = 170;
+    if (a_label) {
+        if (buttons_a_spr) {
+            int by_btn = hy + (font_height(FONT_SMALL) - (int)(buttons_a_spr->height * btn_scale)) / 2 - 2;
+            rdpq_set_mode_standard();
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(buttons_a_spr, 24, by_btn, &(rdpq_blitparms_t){ .scale_x = btn_scale, .scale_y = btn_scale });
+        }
+        font_begin(BLEND_ALPHA);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw(FONT_SMALL, 42 + 1, hy + 1, a_label);
+        font_color(C_MENU);
+        font_draw(FONT_SMALL, 42, hy, a_label);
+        int w = font_width(FONT_SMALL, a_label);
+        if (42 + w + 24 > bx) bx = 42 + w + 24;
+    }
+    if (b_label) {
+        if (!a_label) bx = 24;
+        if (buttons_b_spr) {
+            int by_btn = hy + (font_height(FONT_SMALL) - (int)(buttons_b_spr->height * btn_scale)) / 2 - 2;
+            rdpq_set_mode_standard();
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(buttons_b_spr, bx, by_btn, &(rdpq_blitparms_t){ .scale_x = btn_scale, .scale_y = btn_scale });
+        }
+        font_begin(BLEND_ALPHA);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw(FONT_SMALL, bx + 18 + 1, hy + 1, b_label);
+        font_color(C_MENU);
+        font_draw(FONT_SMALL, bx + 18, hy, b_label);
+    }
+}
+
+// Options -> Controller Settings -> Button Mapping: each action and its button; A then a button
+// to change one, the last row restores the standard layout
+static void draw_button_mapping(void)
+{
+    draw_title_hl();
+    ui_load_common();
+    int hx = 28, x = 38, vx = 196, y = 80, step = 13;
+    ui_header(hx, 58, "Button Mapping");
+    for (int i = 0; i <= NUM_BINDS; i++) {
+        int ry = y + i * step + (i == NUM_BINDS ? 4 : 0);
+        bool armed = i == bind_sel;
+        const char *l = i < NUM_BINDS ? bind_names[i] : "Restore standard layout";
+        ui_item(x, ry, l, armed, C_MENU);
+        if (i < NUM_BINDS) {
+            const char *v = (armed && bind_listen) ? ((int)(anim_t * 3) & 1 ? "press a button" : "") : pad_names[settings.bind[i]];
+            font_begin(BLEND_ALPHA);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            font_color(RGBA32(0, 0, 0, 217));
+            font_draw_scaled(FONT_MEDIUM, vx + 1, ry + 1, v, 1.05f);
+            font_color(armed ? C_MENU_ARMED : RGBA32(235, 235, 235, 255));
+            font_draw_scaled(FONT_MEDIUM, vx, ry, v, 1.05f);
+        }
+    }
+    if (bind_listen) ui_hints("Press the new button  (Start: cancel)", NULL);
+    else ui_hints(bind_sel < NUM_BINDS ? "Change" : "Restore", "Back");
+}
+
+// Options -> Cheat Codes
+static int cheat_count(void) { return game_num_maps() > 0 ? 5 : 3; }
+static void draw_cheats(void)
+{
+    draw_title_hl();
+    ui_load_common();
+    int hx = 28, x = 38, vx = 196;
+    ui_header(hx, 60, "Cheats");
+    ui_item(x, 84, "God mode", cheat_sel == 0, C_MENU);
+    ui_tickbox(vx, 83, dbg_god);
+    ui_item(x, 101, "No c|lipping", cheat_sel == 1, C_MENU);
+    ui_tickbox(vx, 100, dbg_noclip);
+    ui_item(x, 118, in_game ? "Give everything" : "Give everything (in game)", cheat_sel == 2, in_game ? C_MENU : RGBA32(196, 181, 80, 110));
+    if (cheat_count() > 3) {
+        ui_header(hx, 142, "Chapter select");
+        ui_item(x, 166, "Map", cheat_sel == 3, C_MENU);
+        char v[48];
+        snprintf(v, sizeof(v), "%s", game_map_name(dbg_map));
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_scaled(FONT_MEDIUM, vx + 1, 167, v, 1.05f);
+        font_color(cheat_sel == 3 ? C_MENU_ARMED : RGBA32(235, 235, 235, 255));
+        font_draw_scaled(FONT_MEDIUM, vx, 166, v, 1.05f);
+        ui_item(x, 183, "Go to map", cheat_sel == 4, C_MENU);
+    }
+    const char *a = cheat_sel <= 1 ? "Toggle" : cheat_sel == 2 ? "Give" : cheat_sel == 3 ? "Go  (Left / Right: pick map)" : "Go";
+    ui_hints(a, "Back");
 }
 
 static void draw_controller_settings(void)
@@ -1300,7 +1673,7 @@ static void draw_controller_settings(void)
                 rdpq_fill_rectangle(lx - r, ay + r, lx - r + 1, ay + 10 - r);
             }
         }
-        if (settings.control_scheme < 2) {
+        if (settings.control_scheme < NUM_SCHEMES - 1) {
             int ax = bx + bw + 4;
             for (int r = 0; r < 5; r++) {
                 rdpq_fill_rectangle(ax + r, ay + r, ax + r + 1, ay + 10 - r);
@@ -1334,44 +1707,9 @@ static void draw_controller_settings(void)
         rdpq_sprite_blit(ctrl_spr, cx, cy, NULL);
     }
 
-    // 3. "Advanced..." button moved down to the bottom-right
-    int adv_x = 230, adv_y = 174;
-    bool adv_armed = (ctrl_sel == 1);
-    int adv_w = (int)(font_width(FONT_MEDIUM, "Advanced...") * 1.05f);
-    int abx = adv_x - 7, abw = adv_w + 14;
-    int aby = adv_y - 2, abh = 18;
-
-    if (adv_armed) {
-        rdpq_set_mode_standard();
-        rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
-        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-        rdpq_set_prim_color(RGBA32(255, 178, 67, 255));
-        rdpq_fill_rectangle(abx + 1, aby, abx + abw - 1, aby + 1);
-        rdpq_fill_rectangle(abx + 1, aby + abh - 1, abx + abw - 1, aby + abh);
-        rdpq_fill_rectangle(abx, aby + 1, abx + 1, aby + abh - 1);
-        rdpq_fill_rectangle(abx + abw - 1, aby + 1, abx + abw, aby + abh - 1);
-
-        font_begin(BLEND_ALPHA);
-        rdpq_mode_filter(FILTER_BILINEAR);
-        font_color(RGBA32(0, 0, 0, 217));
-        font_draw_scaled(FONT_MEDIUM, adv_x + 1, adv_y + 1, "Advanced...", 1.05f);
-
-        float pulse = 0.75f + 0.25f * sinf(anim_t * 4.0f);
-        font_begin(BLEND_ADD);
-        font_color(RGBA32(255 * pulse * 0.55f, 178 * pulse * 0.55f, 67 * pulse * 0.55f, 255));
-        font_draw_scaled(FONT_GLOW, adv_x, adv_y, "Advanced...", 1.05f);
-
-        font_begin(BLEND_ALPHA);
-        font_color(C_MENU_ARMED);
-        font_draw_scaled(FONT_MEDIUM, adv_x, adv_y, "Advanced...", 1.05f);
-    } else {
-        font_begin(BLEND_ALPHA);
-        rdpq_mode_filter(FILTER_BILINEAR);
-        font_color(RGBA32(0, 0, 0, 217));
-        font_draw_scaled(FONT_MEDIUM, adv_x + 1, adv_y + 1, "Advanced...", 1.05f);
-        font_color(RGBA32(235, 235, 235, 255));
-        font_draw_scaled(FONT_MEDIUM, adv_x, adv_y, "Advanced...", 1.05f);
-    }
+    // 3. "Advanced..." and "Button Mapping..." buttons at the bottom-right
+    draw_menu_button(230, 150, "Advanced...", ctrl_sel == 1);
+    draw_menu_button(204, 174, "Button Mapping...", ctrl_sel == 2);
 
     // Bottom hint bar
     int hy = SH - 22;
@@ -1791,6 +2129,13 @@ static void draw_credits(void)
     font_draw_scaled(FONT_MEDIUM, tx + 1, y + 1, "ToxyCola", 1.05f);
     font_color(RGBA32(255, 255, 255, 255));
     font_draw_scaled(FONT_MEDIUM, tx, y, "ToxyCola", 1.05f);
+    {
+        int ux = tx + (int)(font_width(FONT_MEDIUM, "ToxyCola") * 1.05f) + 6;
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_scaled(FONT_MEDIUM, ux + 1, y + 1, "using Claude Opus 5.5", 1.05f);
+        font_color(RGBA32(196, 181, 80, 255));
+        font_draw_scaled(FONT_MEDIUM, ux, y, "using Claude Opus 5.5", 1.05f);
+    }
 
     // Block 2: Port of PS2 Menu \ Additional Graphics: / UnhealthyGrapejuice
     y += 20;
@@ -1879,10 +2224,12 @@ static void draw_options_legacy(void)
     }
     if (opt_tab == 0) {
         // the controls, two columns filling the space under the options
-        static const char *help[3][8] = {
+        static const char *help[NUM_SCHEMES][8] = {
             {"Stick: move", "C buttons: look", "Z: fire", "R: alt fire", "A: jump (hold: tuck)", "L: duck", "B: use", "D-pad: guns, reload, light"},
             {"Stick: look", "C buttons: move", "Z: fire", "R: alt fire", "A: jump (hold: tuck)", "L: duck", "B: use", "D-pad: guns, reload, light"},
             {"Stick: move / turn", "C buttons: look / strafe", "Z: fire", "R: alt fire", "A: jump (hold: tuck)", "L: duck", "B: use", "D-pad: guns, reload, light"},
+            {"D-pad: move", "Stick: look", "Z: fire", "R: alt fire", "A: jump (hold: tuck)", "L: duck", "B: use", "C buttons: guns, reload, light"},
+            {"D-pad: move", "C buttons: look", "Z: fire", "R: alt fire", "A: jump (hold: tuck)", "L: duck", "B: use", "Stick: guns, reload, light"},
         };
         int lh = font_height(FONT_SMALL), top = y + 40 + no * 16 + 2;
         for (int k = 0; k < 8; k++)
@@ -1893,11 +2240,18 @@ static void draw_options_legacy(void)
 
 static void draw_leave(void)
 {
-    int x = 70, y = 80, w = 180, h = 70;
-    frame(x, y, w, h, "Leave game");
-    text_c(FONT_SMALL, x + w / 2, y + 24, C_TEXT, "Return to the main menu?");
-    button(x + w / 2 - 62, y + h - 22, 56, "OK", leave_sel == 0);
-    button(x + w / 2 + 6, y + h - 22, 56, "Cancel", leave_sel == 1);
+    ui_load_common();
+    int hx = 28;
+    ui_header(hx, 92, "Leave game");
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, 39, 117, "Return to the main menu? Unsaved progress is lost.", 1.0f);
+    font_color(RGBA32(235, 235, 235, 255));
+    font_draw_scaled(FONT_MEDIUM, 38, 116, "Return to the main menu? Unsaved progress is lost.", 1.0f);
+    ui_item(48, 140, "Yes", leave_sel == 0, C_MENU);
+    ui_item(110, 140, "No", leave_sel == 1, C_MENU);
+    ui_hints("Select", "Back");
 }
 
 // the title backdrop is 150 KB: give it back before a map loads (maps need big contiguous blocks)
@@ -1976,10 +2330,13 @@ void menu_draw(void)
     if (screen == SCR_OPTIONS || screen == SCR_OPTIONS_LEGACY) draw_options();
     else if (screen == SCR_OPTIONS_CTRL) draw_controller_settings();
     else if (screen == SCR_OPTIONS_CTRL_ADV) draw_controller_advanced();
+    else if (screen == SCR_OPTIONS_BINDS) draw_button_mapping();
     else if (screen == SCR_OPTIONS_AV) draw_options_av();
     else if (screen == SCR_OPTIONS_CREDITS) draw_credits();
+    else if (screen == SCR_OPTIONS_CHEATS) draw_cheats();
     else if (screen == SCR_LOAD) draw_load();
     else if (screen == SCR_SAVE) draw_save();
+    else if (screen == SCR_LEAVE) draw_title_hl();
     else draw_main();
     switch (screen) {
     case SCR_OPTIONS_LEGACY: draw_options_legacy(); break;

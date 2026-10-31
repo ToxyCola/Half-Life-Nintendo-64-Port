@@ -62,5 +62,7 @@ cp valve_sdk/LICENSE "$STAGE/licenses/valve-sdk-LICENSE" 2>/dev/null || true
 cp README.md "$STAGE/licenses/HL64-README.md"
 
 echo "== HL64Builder.exe ($VERSION)"
-x86_64-w64-mingw32-gcc -O2 -static -o "$WORK/stub.exe" -DHL64_VERSION="\"$VERSION\"" builder/hl64builder.c -lz -ladvapi32 -lshell32
+x86_64-w64-mingw32-windres builder/hl64builder.rc -O coff -o "$WORK/hl64builder_res.o"   # visual styles manifest
+x86_64-w64-mingw32-gcc -O2 -static -mwindows -o "$WORK/stub.exe" -DHL64_VERSION="\"$VERSION\"" builder/hl64builder.c "$WORK/hl64builder_res.o" \
+    -lz -ladvapi32 -lshell32 -lcomctl32 -lole32
 python3 builder/pack.py "$WORK/stub.exe" "$STAGE" "$OUT/HL64Builder.exe"

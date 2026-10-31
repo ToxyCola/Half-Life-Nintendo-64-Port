@@ -451,7 +451,6 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
       { extern void heapdbg_dump(void); debugf("HEAPDUMP %s\n", name); heapdbg_dump(); }
 #endif
     }
-    autosave_pending = true;
     return true;
 }
 
@@ -472,17 +471,54 @@ int npcs_base_ents(void);
 int npcs_snapshot(uint8_t *b, int max);
 void npcs_apply_snapshot(const uint8_t *b, int len);
 static bool sram_ok(void) { static int ok = -1; if (ok < 0) { sram_init(); ok = sram_detect() > 0; } return ok; }
-static struct { bool valid; uint32_t serial; char map[32]; } save_dir[NUM_SAVE_SLOTS];
+// slots NUM_SAVE_SLOTS.. are on a Controller Pak in port 1, one note each (40 pages of 256 bytes)
+#define PAK_SLOTS 3
+#define ALL_SLOTS (NUM_SAVE_SLOTS + PAK_SLOTS)
+static struct { bool valid; uint32_t serial; char map[32]; } save_dir[ALL_SLOTS];
+static bool pak_mounted;
+// is there a Controller Pak to use? (mounted on demand, unmounted when it is taken out)
+bool game_pak_ready(void)
+{
+    bool there = joypad_get_accessory_type(JOYPAD_PORT_1) == JOYPAD_ACCESSORY_TYPE_CONTROLLER_PAK;
+    if (!there) { if (pak_mounted) { cpakfs_unmount(JOYPAD_PORT_1); pak_mounted = false; } return false; }
+    if (!pak_mounted) pak_mounted = cpakfs_mount(JOYPAD_PORT_1, "cpak1:/") >= 0;
+    return pak_mounted;
+}
+static void pak_slot_name(int slot, char *out, int n) { snprintf(out, n, "cpak1:/NHLE.01-HL64 SAVE.%d", slot - NUM_SAVE_SLOTS + 1); }
+// read / write a whole slot (or its first len bytes) wherever it lives
+static bool slot_read(int slot, void *buf, int len)
+{
+    if (slot < NUM_SAVE_SLOTS) { sram_read(buf, slot * SAVE_SLOT_BYTES, len); return true; }
+    if (!game_pak_ready()) return false;
+    char nm[48]; pak_slot_name(slot, nm, sizeof(nm));
+    FILE *f = fopen(nm, "rb");
+    if (!f) return false;
+    bool ok = fread(buf, 1, len, f) == (size_t)len;
+    fclose(f);
+    return ok;
+}
+static bool slot_write(int slot, const void *buf, int len)
+{
+    if (slot < NUM_SAVE_SLOTS) { sram_write((void *)buf, slot * SAVE_SLOT_BYTES, len); return true; }
+    if (!game_pak_ready()) return false;
+    char nm[48]; pak_slot_name(slot, nm, sizeof(nm));
+    FILE *f = fopen(nm, "wb");
+    if (!f) return false;
+    bool ok = fwrite(buf, 1, len, f) == (size_t)len;
+    fclose(f);
+    return ok;
+}
 
 // read every slot header (at launch and after each write)
 void game_saves_scan(void)
 {
     bool ok = sram_ok();
-    for (int k = 0; k < NUM_SAVE_SLOTS; k++) {
+    bool pak = game_pak_ready();
+    for (int k = 0; k < ALL_SLOTS; k++) {
         save_dir[k].valid = false;
-        if (!ok) continue;
+        if (k < NUM_SAVE_SLOTS ? !ok : !pak) continue;
         struct { uint32_t magic, serial; char map[32]; } h __attribute__((aligned(16)));
-        sram_read(&h, k * SAVE_SLOT_BYTES, sizeof(h));
+        if (!slot_read(k, &h, sizeof(h))) continue;
         if (h.magic != SAVE_MAGIC) continue;
         save_dir[k].valid = true;
         save_dir[k].serial = h.serial;
@@ -494,11 +530,18 @@ void game_saves_scan(void)
 int game_saves_list(int *slots, char (*labels)[48])
 {
     int n = 0;
-    for (int k = 0; k < NUM_SAVE_SLOTS; k++) if (save_dir[k].valid) slots[n++] = k;
+    for (int k = 0; k < NUM_SAVE_SLOTS; k++) if (save_dir[k].valid) slots[n++] = k;   // (the Controller Pak's: game_pak_saves_list)
     for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++)
         if (save_dir[slots[b]].serial > save_dir[slots[a]].serial) { int t = slots[a]; slots[a] = slots[b]; slots[b] = t; }
     for (int a = 0; a < n; a++)
         snprintf(labels[a], 48, "%s - %s", slots[a] == 0 ? "Autosave" : "Saved game", save_dir[slots[a]].map);
+    return n;
+}
+// the Controller Pak's saves for the load menu: count; slots[i] (NUM_SAVE_SLOTS..)
+int game_pak_saves_list(int *slots)
+{
+    int n = 0;
+    for (int k = NUM_SAVE_SLOTS; k < ALL_SLOTS; k++) if (save_dir[k].valid) slots[n++] = k;
     return n;
 }
 bool game_save_exists(void)
@@ -506,11 +549,12 @@ bool game_save_exists(void)
     for (int k = 0; k < NUM_SAVE_SLOTS; k++) if (save_dir[k].valid) return true;
     return false;
 }
-static void write_slot(int slot, const float *o, const float *a)
+static bool write_slot(int slot, const float *o, const float *a)
 {
-    if (!sram_ok()) { hud_message("No save memory"); return; }
+    if (slot < NUM_SAVE_SLOTS && !sram_ok()) { hud_message("No save memory"); return false; }
+    if (slot >= NUM_SAVE_SLOTS && !game_pak_ready()) { hud_message("No Controller Pak"); return false; }
     uint32_t serial = 0;
-    for (int k = 0; k < NUM_SAVE_SLOTS; k++) if (save_dir[k].valid && save_dir[k].serial > serial) serial = save_dir[k].serial;
+    for (int k = 0; k < ALL_SLOTS; k++) if (save_dir[k].valid && save_dir[k].serial > serial) serial = save_dir[k].serial;
     memset(&save_buf, 0, sizeof(save_buf));
     save_buf.s.magic = SAVE_MAGIC;
     save_buf.s.serial = serial + 1;
@@ -525,6 +569,27 @@ static void write_slot(int slot, const float *o, const float *a)
     save_buf.raw[pos] = ne & 255; save_buf.raw[pos + 1] = ne >> 8; pos += 2 + ne;
     int nn = npcs_snapshot(save_buf.raw + pos + 2, SAVE_SLOT_BYTES - pos - 2 - SAVE_GLOBALS);
     save_buf.raw[pos] = nn & 255; save_buf.raw[pos + 1] = nn >> 8;
+    pos += 2 + nn;
+    {   // the other maps visited (what was done in them), newest first, as many as fit
+        int cpos = pos++, c = 0;
+        int lim = SAVE_SLOT_BYTES - SAVE_GLOBALS;
+        bool used[MAPMEM_N] = {0};
+        for (;;) {
+            int best = -1;
+            for (int i = 0; i < MAPMEM_N; i++)
+                if (!used[i] && mapmem[i].blob && strcasecmp(mapmem[i].map, cur_map) && (best < 0 || mapmem[i].age > mapmem[best].age)) best = i;
+            if (best < 0) break;
+            used[best] = true;
+            int need = 16 + 4 + mapmem[best].ne + mapmem[best].nn;
+            if (pos + need > lim) continue;
+            memcpy(save_buf.raw + pos, mapmem[best].map, 16);
+            uint16_t ne2 = mapmem[best].ne, nn2 = mapmem[best].nn;
+            memcpy(save_buf.raw + pos + 16, &ne2, 2); memcpy(save_buf.raw + pos + 18, &nn2, 2);
+            memcpy(save_buf.raw + pos + 20, mapmem[best].blob, ne2 + nn2);
+            pos += need; c++;
+        }
+        save_buf.raw[cpos] = c;
+    }
     {   // the last SAVE_GLOBALS bytes: player gravity (Xen) and the global states (env_global)
         extern int ents_globals_save(uint8_t *b, int max);
         extern float pm_get_gravity(void);
@@ -533,10 +598,13 @@ static void write_slot(int slot, const float *o, const float *a)
         memcpy(g, &grav, 4);
         ents_globals_save(g + 4, SAVE_GLOBALS - 4);
     }
-    sram_write(save_buf.raw, slot * SAVE_SLOT_BYTES, SAVE_SLOT_BYTES);
+    bool ok = slot_write(slot, save_buf.raw, SAVE_SLOT_BYTES);
+    if (!ok) hud_message("The Controller Pak is full");
     game_saves_scan();
+    return ok;
 }
-static void autosave(void) { write_slot(0, arrive_origin, arrive_angles); }
+// trigger_autosave (the PC's autosave points in the maps): where the player is now
+static void autosave(void) { float o[3]; pm_get_origin(o); write_slot(0, o, view_angles); }
 // pause menu "Save game": an empty manual slot, else the oldest one
 void game_save_manual(void)
 {
@@ -548,23 +616,22 @@ void game_save_manual(void)
     }
     float o[3];
     pm_get_origin(o);
-    write_slot(best, o, view_angles);
-    hud_message("Game saved");
+    if (write_slot(best, o, view_angles)) hud_message("Game saved");
 }
 
+// slots 1..NUM_SAVE_SLOTS-1 on the cartridge, NUM_SAVE_SLOTS.. on the Controller Pak
 void game_save_to_slot(int slot)
 {
     if (!in_game) return;
-    if (slot < 1 || slot >= NUM_SAVE_SLOTS) slot = 1;
+    if (slot < 1 || slot >= ALL_SLOTS) slot = 1;
     float o[3];
     pm_get_origin(o);
-    write_slot(slot, o, view_angles);
-    hud_message("Game saved");
+    if (write_slot(slot, o, view_angles)) hud_message(slot >= NUM_SAVE_SLOTS ? "Game saved to the Controller Pak" : "Game saved");
 }
 
 bool game_save_slot_info(int slot, char *map_out, int map_len)
 {
-    if (slot < 0 || slot >= NUM_SAVE_SLOTS || !save_dir[slot].valid) return false;
+    if (slot < 0 || slot >= ALL_SLOTS || !save_dir[slot].valid) return false;
     if (map_out && map_len > 0) {
         strncpy(map_out, save_dir[slot].map, map_len - 1);
         map_out[map_len - 1] = 0;
@@ -575,10 +642,10 @@ static bool load_save(int slot)
 {
     if (slot < 0) {   // newest
         uint32_t s = 0;
-        for (int k = 0; k < NUM_SAVE_SLOTS; k++) if (save_dir[k].valid && save_dir[k].serial >= s) { s = save_dir[k].serial; slot = k; }
+        for (int k = 0; k < ALL_SLOTS; k++) if (save_dir[k].valid && save_dir[k].serial >= s) { s = save_dir[k].serial; slot = k; }
     }
-    if (slot < 0 || slot >= NUM_SAVE_SLOTS || !save_dir[slot].valid) return false;
-    sram_read(save_buf.raw, slot * SAVE_SLOT_BYTES, SAVE_SLOT_BYTES);
+    if (slot < 0 || slot >= ALL_SLOTS || !save_dir[slot].valid) return false;
+    if (!slot_read(slot, save_buf.raw, SAVE_SLOT_BYTES)) return false;
     save_t sv = save_buf.s;
     mapmem_clear();
     num_visited = 0; noclip = false; end_requested = false;
@@ -605,6 +672,22 @@ static bool load_save(int slot)
             pos += 2 + ne;
             int nn = save_buf.raw[pos] | (save_buf.raw[pos + 1] << 8);
             if (pos + 2 + nn <= SAVE_SLOT_BYTES) npcs_apply_snapshot(save_buf.raw + pos + 2, nn);
+            pos += 2 + nn;
+            // the other maps' remembered states
+            int c = pos < SAVE_SLOT_BYTES - SAVE_GLOBALS ? save_buf.raw[pos++] : 0;
+            for (int k = 0; k < c && k < MAPMEM_N; k++) {
+                if (pos + 20 > SAVE_SLOT_BYTES - SAVE_GLOBALS) break;
+                uint16_t ne2, nn2;
+                memcpy(&ne2, save_buf.raw + pos + 16, 2); memcpy(&nn2, save_buf.raw + pos + 18, 2);
+                if (pos + 20 + ne2 + nn2 > SAVE_SLOT_BYTES - SAVE_GLOBALS) break;
+                uint8_t *blob = malloc(ne2 + nn2);
+                if (blob) {
+                    memcpy(mapmem[k].map, save_buf.raw + pos, 16); mapmem[k].map[15] = 0;
+                    memcpy(blob, save_buf.raw + pos + 20, ne2 + nn2);
+                    mapmem[k].blob = blob; mapmem[k].ne = ne2; mapmem[k].nn = nn2; mapmem[k].age = ++mapmem_clock;
+                }
+                pos += 20 + ne2 + nn2;
+            }
         }
     }
     pm_reset_player(sv.o);
@@ -648,6 +731,7 @@ static void leave_game(void)
     snd_music_stop();
     hud_reset();
     ents_player_teleported();
+    settings_load();
     menu_open(false);
     snd_menu_music_start();
 }
@@ -706,6 +790,13 @@ static void restart_map(void)
     memcpy(view_angles, a, 12);
     memcpy(arrive_origin, o, 12);
     memcpy(arrive_angles, a, 12);
+}
+
+// after a death the PC loads the most recent save (the last autosave point or the player's own
+// save); with none yet, the map starts again from where the player came in
+static void death_reload(void)
+{
+    if (!load_save(-1)) restart_map();
 }
 
 // ------------------------------------------------------------------ HUD
@@ -795,6 +886,12 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
         // short ramp so taps can aim precisely), D-pad = move
         fwd = sy * speed;
         side = sx * speed;
+        if (joypad_get_style(JOYPAD_PORT_1) == JOYPAD_STYLE_GCN) {   // the GameCube C-stick is analog
+            float cx = axis(in.cstick_x, 0.15f), cy = axis(in.cstick_y, 0.15f);
+            view_angles[1] -= (200.0f * cx * fabsf(cx) + 40.0f * cx) * sens * dt;
+            view_angles[0] -= inv * (140.0f * cy * fabsf(cy) + 30.0f * cy) * sens * dt;
+            break;
+        }
         bool turning = in.btn.c_left || in.btn.c_right || in.btn.c_up || in.btn.c_down;
         turn_held = turning ? turn_held + dt : 0;
         float ramp = fminf(1.0f, 0.35f + turn_held * 2.5f);
@@ -816,6 +913,28 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
         if (in.btn.c_right) side += speed;
         break;
     }
+    case 3: case 4: {
+        // D-pad = move; the stick (3) or the C buttons (4) look; the other is free for actions
+        if (in.btn.d_up) fwd += speed;
+        if (in.btn.d_down) fwd -= speed;
+        if (in.btn.d_left) side -= speed;
+        if (in.btn.d_right) side += speed;
+        if (settings.control_scheme == 3) {
+            float yawrate = (200.0f * sx * fabsf(sx) + 40.0f * sx) * sens;
+            float pitchrate = (140.0f * sy * fabsf(sy) + 30.0f * sy) * sens;
+            view_angles[1] -= yawrate * dt;
+            view_angles[0] -= inv * pitchrate * dt;
+        } else {
+            bool turning = in.btn.c_left || in.btn.c_right || in.btn.c_up || in.btn.c_down;
+            turn_held = turning ? turn_held + dt : 0;
+            float ramp = fminf(1.0f, 0.35f + turn_held * 2.5f);
+            if (in.btn.c_left) view_angles[1] += 210.0f * sens * ramp * dt;
+            if (in.btn.c_right) view_angles[1] -= 210.0f * sens * ramp * dt;
+            if (in.btn.c_up) view_angles[0] -= inv * 225.0f * sens * ramp * dt;
+            if (in.btn.c_down) view_angles[0] += inv * 225.0f * sens * ramp * dt;
+        }
+        break;
+    }
     default:
         // GoldenEye 1.1: stick = forward/back + turn, C = look up/down + strafe
         view_angles[1] -= (180.0f * sx * fabsf(sx) + 30.0f * sx) * sens * dt;
@@ -831,21 +950,34 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
     view_angles[1] = fmodf(view_angles[1] + 360.0f, 360.0f);
     // Z fires, R is the secondary attack, L ducks; the D-pad picks weapons (left/right),
     // reloads (down) and switches the flashlight (up)
-    if (in.btn.a) input.buttons |= IN_JUMP;
-    if (in.btn.l) input.buttons |= IN_DUCK;
-    {   // PS2-style crouch-jump: keep A held after jumping and the legs tuck up in the air
+    // the action buttons go through the mapping in Options -> Controller Settings -> Button Mapping
+    const uint8_t *bd = settings.bind;
+    pad_stick_update(&in);
+    bool b_jump = pad_held(&in, bd[BIND_JUMP]), b_duck = pad_held(&in, bd[BIND_DUCK]);
+    if (b_jump) input.buttons |= IN_JUMP;
+    if (b_duck) input.buttons |= IN_DUCK;
+    {   // PS2-style crouch-jump: keep jump held after jumping and the legs tuck up in the air
         static float a_held;
         extern int pm_get_groundent(void);
-        a_held = in.btn.a ? a_held + dt : 0;
+        a_held = b_jump ? a_held + dt : 0;
         extern int pm_get_waterlevel(void);
         if (a_held > 0.2f && pm_get_groundent() < 0 && !noclip && pm_get_waterlevel() < 2) input.buttons |= IN_DUCK;
     }
-    if (in.btn.b) input.buttons |= IN_USE;
-    weapon_fire = in.btn.z;
-    weapon_fire2 = in.btn.r;
-    weapon_reload = pressed.d_down;
-    weapon_select = pressed.d_right ? 1 : (pressed.d_left ? -1 : 0);
-    if (pressed.d_up && !in.btn.l) player_toggle_flashlight();
+    if (pad_held(&in, bd[BIND_USE])) input.buttons |= IN_USE;
+    weapon_fire = pad_held(&in, bd[BIND_FIRE]);
+    weapon_fire2 = pad_held(&in, bd[BIND_ALTFIRE]);
+    weapon_reload = pad_pressed(&pressed, bd[BIND_RELOAD]);
+    // a GameCube controller (JoyBus, through a plug adapter): X reloads and Y uses unless the
+    // mapping already gives them a job
+    bool gcn = joypad_get_style(JOYPAD_PORT_1) == JOYPAD_STYLE_GCN;
+    if (gcn) {
+        bool x_bound = false, y_bound = false;
+        for (int i = 0; i < NUM_BINDS; i++) { x_bound |= bd[i] == PAD_X; y_bound |= bd[i] == PAD_Y; }
+        if (!x_bound && pressed.x) weapon_reload = true;
+        if (!y_bound && in.btn.y) input.buttons |= IN_USE;
+    }
+    weapon_select = pad_pressed(&pressed, bd[BIND_NEXTWEAP]) ? 1 : (pad_pressed(&pressed, bd[BIND_PREVWEAP]) ? -1 : 0);
+    if (pad_pressed(&pressed, bd[BIND_FLASHLIGHT]) && !(settings.cheats && b_duck)) player_toggle_flashlight();
     // driving a train: forward/back change speed in steps, a deliberate sidestep gets off
     if (ents_player_driving()) {
         if (fwd > speed * 0.5f) input.buttons |= IN_FORWARD;
@@ -869,12 +1001,12 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
         g_wish_move[1] = sinf(yr) * fwd - cosf(yr) * side;
     }
     if (noclip) {
-        if (in.btn.a) input.up += speed;
-        if (in.btn.l) input.up -= speed;
+        if (b_jump) input.up += speed;
+        if (b_duck) input.up -= speed;
     }
-    // cheats: L + D-up toggles noclip, L + D-down gives every weapon (impulse 101)
-    if (settings.cheats && in.btn.l && pressed.d_up) noclip = !noclip;
-    if ((settings.cheats && in.btn.l && pressed.d_down) || dbg_give_all) {
+    // cheats: duck + flashlight toggles noclip, duck + reload gives every weapon (impulse 101)
+    if (settings.cheats && b_duck && pad_pressed(&pressed, bd[BIND_FLASHLIGHT])) noclip = !noclip;
+    if ((settings.cheats && b_duck && pad_pressed(&pressed, bd[BIND_RELOAD])) || dbg_give_all) {
         dbg_give_all = false;
         static const char *all[] = {"item_suit", "weapon_crowbar", "weapon_9mmhandgun", "weapon_357", "weapon_9mmAR", "weapon_shotgun",
                                     "weapon_crossbow", "weapon_rpg", "weapon_gauss", "weapon_egon", "weapon_hornetgun",
@@ -1224,6 +1356,9 @@ int main(void)
         { extern void weapons_test_select(int id); static int k = 0; static float nt = 3;
           if (in_game && game_clock > nt && k < 15) { nt = game_clock + 2.5f; k++; dbg_give_all = true; weapons_test_select(k); debugf("TESTWEAPONS %d\n", k); } }
 #endif
+#ifdef TESTFLASH
+        if (in_game && game_clock > 2) { player.suit = true; player.flashlight = true; }
+#endif
 #ifdef TESTWEAPON
         { extern void weapons_test_select(int id); static bool done; if (!done && in_game && game_clock > 2) { done = true; dbg_give_all = true; } else if (done == 1 && in_game && game_clock > 2.5f) { static bool d2; if (!d2) { d2 = true; weapons_test_select(TESTWEAPON); } } }
 #endif
@@ -1342,7 +1477,7 @@ int main(void)
                 nt = game_clock + 1.0f; k++;
                 float y = view_angles[1] * (float)M_PI / 180;
                 float o[3]; pm_get_origin(o);
-                o[0] += cosf(y) * 200; o[1] += sinf(y) * 200;
+                o[0] += cosf(y) * 130; o[1] += sinf(y) * 130;
                 if (k == 1) { dbg_give_all = true; dbg_god = true; }
                 if (k >= 2 && k <= 4) { game_effect_explosion(o, 120); debugf("TESTFX explosion\n"); }
                 if (k == 5) { weapons_test_select(4); debugf("TESTFX mp5\n"); }
@@ -1351,6 +1486,18 @@ int main(void)
             if (k >= 5) in.btn.z = 1;
         }
 #endif
+#ifdef TESTSPAWN
+        { static bool done; if (!done && in_game && game_clock > 3) { done = true; extern int npc_spawn_monster(const char *, const float *, float, const char *, int);
+            float y = view_angles[1] * (float)M_PI / 180, o[3]; pm_get_origin(o); o[0] += cosf(y) * 130; o[1] += sinf(y) * 130; o[2] -= 20;
+            debugf("TESTSPAWN %d\n", npc_spawn_monster(TESTSPAWN, o, view_angles[1] + 180, "", 0)); } }
+#endif
+#ifdef TESTZAP
+        { static float nz = 4; if (in_game && game_clock > nz) { nz = game_clock + 0.25f; extern void game_effect_zap(const float *, const float *, int, int, int);
+            extern void game_effect_armbeam(const float *, int, int, int);
+            float y = view_angles[1] * (float)M_PI / 180, a[3], b[3]; pm_get_origin(a); memcpy(b, a, 12);
+            a[0] += cosf(y) * 300 + sinf(y) * 80; a[1] += sinf(y) * 300 - cosf(y) * 80; b[0] += cosf(y) * 60 - sinf(y) * 40; b[1] += sinf(y) * 60 + cosf(y) * 40; b[2] -= 10;
+            if (((int)(game_clock * 4)) & 1) game_effect_zap(a, b, 180, 255, 96); else game_effect_armbeam(a, 96, 128, 16); } }
+#endif
 #ifdef TESTTENT
         { static float nt = 3; if (in_game && game_clock > nt) { nt = game_clock + 3; extern void npc_hear(const float *o, float r, int s);
             float o[3] = {-640, -980, -1010}; npc_hear(o, 400, -1); debugf("TT noise\n"); }
@@ -1358,8 +1505,11 @@ int main(void)
           static bool died; if (in_game && game_clock > 16 && !died) { died = true; ents_fire_targets("tentacle_die"); } }
 #endif
 #ifdef TESTSAVELOAD
-        { static int st; if (in_game && game_clock > 3 && st == 0) { st = 1; game_save_manual(); debugf("TSL saved\n"); }
-          if (in_game && game_clock > 5 && st == 1) { st = 2; debugf("TSL loading\n"); load_save(-1); debugf("TSL loaded\n"); } }
+#ifndef TSL_AT
+#define TSL_AT 3
+#endif
+        { static int st; if (in_game && game_clock > TSL_AT && st == 0) { st = 1; game_save_manual(); debugf("TSL saved\n"); }
+          if (in_game && game_clock > TSL_AT + 2 && st == 1) { st = 2; debugf("TSL loading\n"); load_save(-1); debugf("TSL loaded\n"); for (int i = 0; i < MAPMEM_N; i++) if (mapmem[i].blob) debugf("TSL mem %s %d %d\n", mapmem[i].map, mapmem[i].ne, mapmem[i].nn); } }
 #endif
 #ifdef TESTCHANGE
 #ifndef TESTLANDMARK
@@ -1370,6 +1520,7 @@ int main(void)
         { static bool d2; if (!d2 && in_game && game_clock > 9 && !strcmp(cur_map, TESTCHANGE)) { d2 = true; game_request_changelevel(TESTCHANGEBACK, TESTLANDMARK); } }
 #endif
 #endif
+        if (!settings.cheats) { dbg_god = false; dbg_noclip = false; dbg_give_all = false; }   // cheats only when enabled
         TR("V"); snd_set_volume(settings.volume / 10.0f);
         {
             float y = last_ang[1] * M_PI / 180;
@@ -1424,12 +1575,12 @@ int main(void)
         }
         hud_set_train(ents_player_train_update(input.buttons, newly));
 
-        if (restart_at > 0 && game_clock >= restart_at) { restart_at = 0; restart_map(); continue; }   // player_loadsaved
+        if (restart_at > 0 && game_clock >= restart_at) { restart_at = 0; death_reload(); continue; }   // player_loadsaved
         if (player.dead) {
             // dead: no moving; a button press after a moment starts the map again
             input.forward = input.side = input.up = 0;
             input.buttons = 0;
-            if (player_dead_time() > 2.5f && (pressed.a || pressed.b || pressed.z)) { restart_map(); continue; }
+            if (player_dead_time() > 2.5f && (pressed.a || pressed.b || pressed.z)) { death_reload(); continue; }
         }
         hud_dt = dt;
         pm_clear_basevelocity();

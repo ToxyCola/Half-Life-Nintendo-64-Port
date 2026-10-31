@@ -271,6 +271,7 @@ float npc_eye_height(int i) { npc_t *n = &npcs[i]; return n->maxs[2] * 0.9f; }
 
 static void npc_eye(npc_t *n, float *o)
 {
+    if (n->ceiling) { o[0] = n->origin[0]; o[1] = n->origin[1]; o[2] = n->origin[2] - 12; return; }   // hanging below the ceiling
     o[0] = n->origin[0]; o[1] = n->origin[1]; o[2] = n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f + (n->maxs[2] - n->mins[2]) * 0.35f;
 }
 
@@ -437,7 +438,16 @@ static void spawn_one(int i, const char *cls_override)
     if (!strcmp(mname, "hgrunt") && !ent_value(e, "body")) n->body = 0;
     n->pitch = head_pitch(n);
     n->bkind = !strcmp(mname, "nihilanth") ? 1 : !strcmp(mname, "big_mom") ? 2 : !strcmp(mname, "apache") ? 3 : !strcmp(mname, "osprey") ? 4 :
-               !strcmp(mname, "light") && !strcmp(cls, "xen_plantlight") ? 5 : !strcmp(mname, "tree") && !strcmp(cls, "xen_tree") ? 6 : 0;
+               !strcmp(mname, "light") && !strcmp(cls, "xen_plantlight") ? 5 : !strcmp(mname, "tree") && !strcmp(cls, "xen_tree") ? 6 :
+               (!strcmp(mname, "turret") || !strcmp(mname, "miniturret") || !strcmp(mname, "sentry")) ? 7 : 0;
+    if (n->bkind == 7) {
+        // CBaseTurret / CSentry: start retracted; on when used or (SF_MONSTER_TURRET_AUTOACTIVATE 32,
+        // without STARTINACTIVE 64) when they see the enemy. "orientation" 1 hangs them from the ceiling
+        const char *ori = ent_value(e, "orientation");
+        n->ceiling = ori && atoi(ori) == 1;
+        n->bi[0] = (e->spawnflags & 32) && !(e->spawnflags & 64);   // auto start
+        n->bstate = 0;
+    }
     if (!strcmp(mname, "hgrunt") && !(n->flags & NF_DEAD)) {
         // CHGrunt::Spawn: weapons 0 means MP5 + hand grenades; a shotgun shows in the gun bodygroup
         const char *w = ent_value(e, "weapons");
@@ -523,8 +533,10 @@ static void set_anim_filter(void)
 }
 
 static int pvs_leaf = -1;   // player leaf whose PVS is in pvs_buf
+static void barnacle_release_player(void);
 void npcs_spawn_all(void)
 {
+    barnacle_release_player();
     num_npcs = 0;
     pvs_leaf = -1;
     talk_wait_time = 0;
@@ -578,7 +590,7 @@ int npc_spawn_monster(const char *classname, const float *origin, float yaw, con
         memcpy(tmp.mins, defs[di].mins, 12); memcpy(tmp.maxs, defs[di].maxs, 12);
         gtrace_t tr;
         game_trace(origin, origin, tmp.mins, tmp.maxs, 0, -1, &tr);
-        if (tr.startsolid) return -1;
+        if (tr.startsolid) { debugf("spawn %s: no room at %.0f %.0f %.0f (ent %d npc %d)\n", classname, origin[0], origin[1], origin[2], tr.ent, tr.npc); return -1; }
         float pmn[3], pmx[3], po[3];
         pm_get_hull(pmn, pmx); pm_get_origin(po);
         bool overlap = true;
@@ -1062,7 +1074,16 @@ static void script_done(npc_t *n)
     int sci = n->script;
     n->script = -1;
     n->sstate = NS_IDLE;
-    if (sci >= 0 && (entities[sci].spawnflags & 8)) {
+    int sact = (n->seq >= 0 && n->seq < n->model->numseqs) ? n->model->seqs[n->seq].activity : 0;
+    bool death_anim = sact >= ACT_DIESIMPLE && sact <= ACT_DIESIMPLE + 4;   // DIESIMPLE..DIEVIOLENT, DIE_HEADSHOT
+    if (n->seq >= 0 && n->seq < n->model->numseqs) {   // a sequence with SCRIPT_EVENT_DEAD (1000) ends dead
+        sseq_t *ss = &n->model->seqs[n->seq];
+        for (int i = 0; i < ss->numevents; i++)
+            if (((sevent_t *)((uint8_t *)n->model->events + ss->eventofs))[i].event == 1000) death_anim = true;
+    }
+    if (sci >= 0 && ((entities[sci].spawnflags & 8) || death_anim || n->health <= 0)) {
+        // a monster scripted to die (its sequence is a death animation, or it was killed while it played)
+        // stays down instead of getting up and going back to its idle
         // SF_SCRIPT_LEAVECORPSE: the monster stays as a corpse in the script's last frame
         // (the guards cut in half by the laser in c1a1)
         n->flags |= NF_DEAD | NF_NOTSOLID;
@@ -1168,6 +1189,10 @@ static void fire_anim_events(npc_t *n, int from, int to)
         char opt[60];
         strncpy(opt, ev->options, 59); opt[59] = 0;
         switch (ev->event) {
+        case 1000:   // SCRIPT_EVENT_DEAD: the script kills it (the scientist the tentacle drags away in c1a4i);
+                     // script_done then leaves the body in the sequence's last frame
+            if (n->script >= 0) { n->health = 0; n->solid = false; n->flags |= NF_NOTSOLID; if (n->following) stop_following(n, false); }
+            break;
         case 1003: ents_fire_targets(opt); break;                                         // SCRIPT_EVENT_FIREEVENT
         case 1004: snd_emit(n->ent, CHAN_BODY, opt, 1.0f, ATTN_NORM, PITCH_NORM, NULL); break; // SCRIPT_EVENT_SOUND
         case 1008: snd_emit(n->ent, CHAN_VOICE, opt, 1.0f, ATTN_NORM, n->pitch, NULL); break;  // SOUND_VOICE
@@ -1296,14 +1321,14 @@ static int look_for_enemy(npc_t *n)
     return best;
 }
 
+static void tent_hear(npc_t *n, const float *so, float volume);
 void npc_hear(const float *origin, float radius, int source)
 {
     for (int i = 0; i < num_npcs; i++) {
         npc_t *n = &npcs[i];
-        if (n->model && !strcmp(n->model->name, "tentacle2") && dist3(n->origin, origin) <= radius + 400) {
-            // tentacles hunt by sound (CTentacle::Cycle: the loudest recent sound in reach)
-            memcpy(n->heard, origin, 12);
-            n->alert_until = game_time() + 1.5f;
+        if (n->model && !strcmp(n->model->name, "tentacle2")) {
+            // tentacles hunt by sound; quiet ones (the crowbar, breaking things) don't reach them
+            if (radius >= 300) tent_hear(n, origin, radius);
             continue;
         }
         if (npc_alive(i) && dist3(n->origin, origin) <= radius) ai_trigger(n, 9);   // AITRIGGER_HEARCOMBAT
@@ -1413,6 +1438,10 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
             if (n->corpse_hp <= dmg) npc_gib(n);
             else n->corpse_hp -= dmg * 0.1f;
         }
+        return;
+    }
+    if (n->model && !strcmp(n->model->name, "tentacle2") && npc_alive(i)) {
+        n->health = dmg >= n->health ? 1 : n->health - dmg;   // CTentacle::TakeDamage: down to 1, then it hides
         return;
     }
     if (!npc_alive(i) || (n->flags & NF_INVULN)) return;
@@ -1591,11 +1620,17 @@ static void attack_hit(npc_t *n)
         npc_hear(n->origin, 600, (n - npcs) + 1);
         break;
     }
-    case R_ZAP:
-        snd_emit(n->ent, CHAN_WEAPON, "debris/zap4.wav", 1, ATTN_NORM, 130, NULL);
-        game_effect_beam(eye, tp, 96, 128, 16);
+    case R_ZAP: {
+        // CISlave::ZapBeam: a bright green bolt from the hands to the target (180 255 96, full brightness)
+        snd_emit(n->ent, CHAN_WEAPON, "hassault/hw_shoot1.wav", 1, ATTN_NORM, 130 + rand() % 30, NULL);
+        snd_emit(n->ent, CHAN_ITEM, "weapons/electro4.wav", 0.5f, ATTN_NORM, 130, NULL);
+        extern void game_effect_zap(const float *from, const float *to, int r, int g, int b);
+        const float *src = (n->model && n->model->numatt > 0 && game_time() - n->att_time < 0.5f) ? n->att[0] : eye;
+        game_effect_zap(src, tp, 180, 255, 96);
+        game_effect_particles(tp, 8, 120, 180, 255, 96, 0.4f, 0);
         if (can_see(n, t, false)) damage_target(n, t, dmg, DMG_SHOCK);
         break;
+    }
     case R_SONIC: {
         // CHoundeye::SonicAttack: everything around takes damage, falling off with distance
         char s[32];
@@ -2075,40 +2110,108 @@ static void ai_flee(npc_t *n, float dt)
 // barnacle (CBarnacle::BarnacleThink): the tongue hangs down to the floor (TongueTouchEnt traces
 // 2048 units down), grows back at BARNACLE_PULL_SPEED after letting go, grabs the player who
 // touches it and reels them up into the mouth
+// CBarnacle: whatever touches the tongue (the player, monsters: TongueTouchEnt's box 8 units
+// around it, down to the floor) is caught at once, can't move, and is hauled up at
+// BARNACLE_PULL_SPEED; at the mouth the player is chewed, monsters are eaten whole
+static int barnacle_holding = -1;   // the barnacle that has the player (npc index), -1 none
+void pm_set_origin(const float *o);
+static void barnacle_release_player(void)
+{
+    extern void pm_set_frozen(bool on);
+    if (barnacle_holding >= 0) pm_set_frozen(false);
+    barnacle_holding = -1;
+}
 static void barnacle_think(npc_t *n, float dt)
 {
+    int me = n - npcs;
     if (n->tongue_len <= 0) {   // the floor under it (traced once: barnacles never move)
         gtrace_t tr;
         float st[3] = {n->origin[0], n->origin[1], n->origin[2] - 2};
         float end[3] = {n->origin[0], n->origin[1], n->origin[2] - 2048};
-        game_trace(st, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, n - npcs, &tr);
+        game_trace(st, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, me, &tr);
         n->tongue_len = fmaxf(fabsf(n->origin[2] - tr.endpos[2]), 1);
         n->alt = n->tongue_len;                 // already hanging down
+        n->bi[0] = 0;
+#ifdef BARNGRABDBG
+        debugf("barnacle %d at %.0f %.0f %.0f floor %.0f\n", me, n->origin[0], n->origin[1], n->origin[2], tr.endpos[2]);
+#endif
     }
-    float len = n->tongue_len;
+    float len = n->tongue_len, now = game_time();
+    const float reach = 8 + 16;   // the tongue's box against a 32-wide hull
+    // ---- the player
     float dx = player_pos[0] - n->origin[0], dy = player_pos[1] - n->origin[1];
     float below = n->origin[2] - player_pos[2];
-    // player hull top is 36 above the origin (standing): the tongue touches them when it reaches that
-    bool touch = player_alive() && !pm_noclip_active() && dx * dx + dy * dy < 20 * 20 && below > 0 && below - 36 < n->alt;
-    if (touch) {
-        if (n->ai != AI_GRABBED) {
-            n->ai = AI_GRABBED;
-            snd_emit(n->ent, CHAN_WEAPON, "barnacle/bcl_alert2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
-        }
-        // pull the player up into the mouth, then chew
-        float v[3] = {-dx * 4, -dy * 4, below > 56 ? 40.0f : 0.0f};
-        pm_set_velocity(v);
-        n->alt = fmaxf(below - 36, 0);          // the tongue is as long as the prey is low
-        if (below <= 60 && game_time() > n->next_attack) {
-            n->next_attack = game_time() + 1.2f;
+    bool holding = barnacle_holding == me;
+    if (holding && (!player_alive() || pm_noclip_active())) { barnacle_release_player(); holding = false; }
+    if (!holding && barnacle_holding < 0 && n->bi[0] == 0 && player_alive() && !pm_noclip_active() &&
+        dx * dx + dy * dy < reach * reach && below > 0 && below - 36 < n->alt) {
+        extern void pm_set_frozen(bool on);
+        barnacle_holding = me; holding = true;
+        pm_set_frozen(true);                    // BarnacleVictimGrabbed: no walking away
+#ifdef BARNGRABDBG
+        debugf("barnacle %d grabs the player\n", me);
+#endif
+        n->ai = AI_GRABBED;
+        snd_emit(n->ent, CHAN_WEAPON, "barnacle/bcl_alert2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+    }
+    if (holding) {
+        // drawn in under the mouth and up the tongue
+        float o[3] = {player_pos[0] - dx * fminf(1, 6 * dt), player_pos[1] - dy * fminf(1, 6 * dt), player_pos[2]};
+        if (below > 60) o[2] += fminf(80 * dt, below - 60);
+        pm_set_origin(o);
+        float z0[3] = {0, 0, 0};
+        pm_set_velocity(z0);
+        below = n->origin[2] - o[2];
+        n->alt = fmaxf(below - 36, 0);
+        if (below <= 62 && now > n->next_attack) {
+            n->next_attack = now + 1.2f;
             npc_sound(n, CHAN_WEAPON, "barnacle/bcl_chew%d.wav", 3, 1, ATTN_NORM);
             player_take_damage(10, DMG_SLASH | DMG_ALWAYSGIB, n->origin, n->ent);
         }
-    } else {
-        if (n->ai == AI_GRABBED) n->ai = AI_IDLE;
-        if (n->alt < len) n->alt = fminf(n->alt + 80 * dt, len);   // BARNACLE_PULL_SPEED 8 per 0.1 s
-        else n->alt = len;
+        n->ctl0 = -(n->alt - 100);
+        return;
     }
+    // ---- monsters (scientists, guards, zombies: anything with legs that walks under it)
+    if (n->bi[0] == 0) {
+        for (int i = 0; i < num_npcs; i++) {
+            npc_t *v = &npcs[i];
+            if (i == me || !npc_alive(i) || v->script >= 0 || v->bkind || (v->flags & (NF_STATIC | NF_ITEM))) continue;
+            if (v->model && (!strcmp(v->model->name, "barnacle") || !strncmp(v->model->name, "tentacle", 8))) continue;
+            float vx = v->origin[0] - n->origin[0], vy = v->origin[1] - n->origin[1];
+            float top = v->origin[2] + v->maxs[2];
+            if (vx * vx + vy * vy < reach * reach && top < n->origin[2] && n->origin[2] - top < n->alt) {
+                n->bi[0] = i + 1;
+                v->ai = AI_GRABBED;
+                v->npath = 0;
+                v->flags |= NF_NOAI;
+                snd_emit(n->ent, CHAN_WEAPON, "barnacle/bcl_alert2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+                break;
+            }
+        }
+    }
+    if (n->bi[0] > 0) {
+        npc_t *v = &npcs[n->bi[0] - 1];
+        if (!npc_alive(n->bi[0] - 1)) { n->bi[0] = 0; }
+        else {
+            for (int k = 0; k < 2; k++) v->origin[k] += (n->origin[k] - v->origin[k]) * fminf(1, 6 * dt);
+            float gap = n->origin[2] - (v->origin[2] + v->maxs[2]);
+            v->origin[2] += fminf(80 * dt, fmaxf(gap - 8, 0));
+            v->vz = 0;
+            n->alt = fmaxf(gap, 0);
+            if (gap <= 12) {   // BarnacleVictimBitten on a monster: eaten
+                npc_sound(n, CHAN_WEAPON, "barnacle/bcl_chew%d.wav", 3, 1, ATTN_NORM);
+                v->flags &= ~NF_NOAI;
+                { float up[3] = {0, 0, 1}; npc_take_damage(n->bi[0] - 1, v->health + 50, DMG_SLASH | DMG_ALWAYSGIB, up, me + 1); }
+                n->bi[0] = 0;
+                n->next_attack = now + 2;
+            }
+            n->ctl0 = -(n->alt - 100);
+            return;
+        }
+    }
+    if (n->ai == AI_GRABBED) n->ai = AI_IDLE;
+    if (n->alt < len) n->alt = fminf(n->alt + 80 * dt, len);   // BARNACLE_PULL_SPEED 8 per 0.1 s
+    else n->alt = len;
     n->ctl0 = -(n->alt - 100);                 // SetBoneController(0, -(m_flAltitude + m_flTongueAdj)), adj = -100
 }
 
@@ -2597,6 +2700,54 @@ static bool osprey_damage(npc_t *n, float dmg, int dmgtype)
     return true;
 }
 
+// ---- turrets (turret.cpp): off -> deploy -> active (track and fire) -> retire after a while
+// without a target (auto-start ones) or when switched off. bstate: 0 off, 1 deploying, 2 active, 3 retiring
+static bool turret_think(npc_t *n, float dt)
+{
+    float now = game_time();
+    if (n->ai == AI_DYING || n->ai == AI_DEAD) {
+        if (n->ai == AI_DYING && n->bi[3] != 9) { n->bi[3] = 9; play_named(n, "die", true); }
+        return false;   // the usual dying/dead handling
+    }
+    float eye[3];
+    npc_eye(n, eye);
+    bool see = player_alive() && hates(n, 0) && dist3(eye, player_eye) < 1200 && !pm_noclip_active() && game_visible(eye, player_eye);
+    if (see) n->bt[0] = now;
+#ifdef TESTFIRE
+    { static int lastst[64]; int k = (n - npcs) & 63; if (lastst[k] != n->bstate + 1) { lastst[k] = n->bstate + 1; debugf("turret %d state %d see %d\n", k, n->bstate, see); } }
+#endif
+    switch (n->bstate) {
+    case 0:
+        play_named(n, "idle_off", false);
+        if (n->bi[0] && see) { n->bstate = 1; play_named(n, "deploy", true); npc_sound(n, CHAN_BODY, "turret/tu_deploy.wav", 1, 1, ATTN_NORM); }
+        break;
+    case 1:
+        if (n->seq_done) { n->bstate = 2; n->bt[0] = now; npc_sound(n, CHAN_VOICE, "turret/tu_alert.wav", 1, 1, ATTN_NORM); }
+        break;
+    case 2: {
+        if (see) {
+            face_yaw(n, yaw_to(n->origin, player_pos), 240, dt);
+            float aim = fabsf(angle_diff(yaw_to(n->origin, player_pos), n->yaw));
+            play_named(n, "fire", false);
+            if (aim < 20 && now >= n->next_attack) {
+                const mdef_t *d = D(n);
+                n->next_attack = now + 0.1f;
+                fire_bullet_at(n, 0, d && d->ranged_dmg ? skill_get(d->ranged_dmg) : 4, 0.08f, 1);
+            }
+        } else {
+            play_named(n, "spin", false);
+            n->yaw += 30 * dt;   // TurretSearch: sweep slowly
+            if (n->bi[0] && now - n->bt[0] > 15) { n->bstate = 3; play_named(n, "retire", true); npc_sound(n, CHAN_BODY, "turret/tu_retract.wav", 1, 1, ATTN_NORM); }
+        }
+        break;
+    }
+    case 3:
+        if (n->seq_done) n->bstate = 0;
+        break;
+    }
+    return true;
+}
+
 // a map trigger aimed at a boss: wakes it (CNihilanth/CApache/COsprey use functions)
 bool npc_used(int ent)
 {
@@ -2610,11 +2761,18 @@ bool npc_used(int ent)
         if (g_use_type == 0) {
             if (!(n->flags & NF_DEAD)) { play_named(n, "Engine_death1", true); n->flags |= NF_DEAD; n->ai = AI_DEAD; n->solid = false; }
         } else if (g_use_type == 1) {
-            float f[3] = {player_pos[0], player_pos[1], player_pos[2] - 36};
-            memcpy(n->heard, f, 12); n->alert_until = game_time() + 1.5f;
+            tent_hear(n, player_pos, 1024);   // CSoundEnt::InsertSound(bits_SOUND_WORLD, activator, 1024)
         } else if (!(n->flags & NF_DEAD)) {
-            play_named(n, "Engine_Idle", false); n->bt[2] = 1;   // thrashing: no more strikes
+            play_named(n, "Engine_Idle", true); n->bt[2] = 1; n->tn.kind = 0;   // thrashing: no more strikes
         }
+        return true;
+    }
+    if (n->bkind == 7) {   // CBaseTurret::TurretUse: on / off / toggle
+        extern int g_use_type;
+        bool on = n->bstate == 1 || n->bstate == 2;
+        bool want = g_use_type == 1 ? true : g_use_type == 0 ? false : !on;
+        if (want && !on && !is_dead(n)) { n->bstate = 1; play_named(n, "deploy", true); npc_sound(n, CHAN_BODY, "turret/tu_deploy.wav", 1, 1, ATTN_NORM); }
+        else if (!want && on) { n->bstate = 3; play_named(n, "retire", true); npc_sound(n, CHAN_BODY, "turret/tu_retract.wav", 1, 1, ATTN_NORM); }
         return true;
     }
     if (n->bkind != 1 && n->bkind != 3 && n->bkind != 4) return false;
@@ -2672,64 +2830,240 @@ static bool boss_think(npc_t *n, float dt)
     case 3: apache_think(n, dt); return true;
     case 4: osprey_think(n, dt); return true;
     case 5: case 6: xen_think(n, dt); return true;
+    case 7: return turret_think(n, dt);
     }
     return false;
 }
 
 // tentacles strike at things that make noise nearby (CTentacle, simplified)
 // CTentacle::MyLevel: which of the four heights (floor, lev1-3) the tentacle reaches for
-static int tentacle_level(npc_t *n, float z)
+// ---------------------------------------------------------------- Blast Pit tentacles (CTentacle)
+// Positions up the pit: 0 in the pit, 1 half risen (Temp1), 2 floor, 3..5 levels 1..3. The rise
+// sequences join them: transition k goes from position k-1 to k (played backwards to sink).
+enum { TK_IDLE, TK_STRIKE, TK_TAP, TK_REAR, TK_PIT };
+static const char *t_trans_seq[6] = {NULL, "rise_to_Temp1", "Temp1_to_Floor", "Floor_to_Lev1", "Lev1_to_Lev2", "Lev2_to_Lev3"};
+static const char *t_kind_seq[4][4] = {
+    {"Floor_Idle", "Lev1_Idle", "Lev2_Idle", "Lev3_Idle"},
+    {"Floor_Strike", "Lev1_Strike", "Lev2_Strike", "Lev3_Strike"},
+    {"Floor_Tap", "Lev1_Tap", "Lev2_Tap", "Lev3_Tap"},
+    {"Floor_Rear_Idle", "Lev1_Rear_Idle", "Lev2_Rear_Idle", "Lev3_Rear_Idle"},
+};
+// the killing part of each level's strike (anim events 3 .. 4, as a fraction of the sequence)
+static const float t_kill_from[4] = {6 / 15.0f, 9 / 30.0f, 13 / 25.0f, 6 / 20.0f};
+static const float t_kill_to[4] = {12 / 15.0f, 20 / 30.0f, 20 / 25.0f, 12 / 20.0f};
+static int t_level(float dz) { return dz < 216 ? 0 : dz < 408 ? 1 : dz < 600 ? 2 : 3; }   // CTentacle::Level
+static int t_mylevel(npc_t *n) { return n->tn.pos >= 2 ? n->tn.pos - 2 : -1; }
+static float t_height(int lv) { return lv == 1 ? 256 : lv == 2 ? 448 : lv == 3 ? 640 : 0; } // MyHeight
+static float t_rand(float a, float b) { return a + (b - a) * (rand() % 1000) / 1000.0f; }
+static float t_norm(float a) { while (a < -180) a += 360; while (a > 180) a -= 360; return a; }
+
+// CTentacle::Listen / PBestSound: a sound reaches it when its ear (at the tentacle's height) is
+// within twice the sound's volume (HearingSensitivity 2)
+static void tent_hear(npc_t *n, const float *so, float volume)
 {
-    float dz = z - n->origin[2];
-    return dz < 216 ? 0 : dz < 408 ? 1 : dz < 600 ? 2 : 3;
+    if (!n->tn.init || (n->flags & NF_DEAD) || n->bt[2] > 0) return;
+    float ear[3] = {n->origin[0], n->origin[1], n->origin[2] + t_height(t_mylevel(n))};
+    if (dist3(ear, so) > volume * 2) return;
+    float now = game_time(), dir[3];
+#ifdef TENTDBG
+    { static int hc; if (hc++ < 40) debugf("TN %d hears vol %.0f at %.0f %.0f %.0f (player %.0f %.0f %.0f duck %d) t %.1f\n", (int)(n - npcs), volume, so[0], so[1], so[2], player_pos[0], player_pos[1], player_pos[2], pm_ducking(), now); }
+#endif
+    float dt = now - n->tn.prevtime;
+    for (int k = 0; k < 3; k++) {
+        dir[k] = so[k] - n->origin[k];
+        if (dt > 0.02f && dt < 0.5f) dir[k] += (so[k] - n->tn.prev[k]) / dt;   // leads a moving sound
+    }
+    n->tn.prevtime = now;
+    memcpy(n->tn.prev, so, 12);
+    n->tn.syaw = t_norm(atan2f(dir[1], dir[0]) * 180 / (float)M_PI - n->tn.inityaw);
+    n->tn.slevel = t_level(dir[2]);
+    n->tn.stime = now + t_rand(5, 10);
 }
+
+// the player's own noise (CBasePlayer::UpdatePlayerSound): footsteps as loud as the speed on the
+// ground -- nothing crouched, still or in the air -- a jump, a landing; it fades at 250 a second
+static float tent_player_volume(void)
+{
+    static float last_t = -1, vol;
+    static bool was_ground = true;
+    static float prev_vz;
+    float now = game_time();
+    if (now == last_t) return vol;
+    float dt = last_t < 0 ? 0 : now - last_t;
+    last_t = now;
+    if (!player_alive() || pm_noclip_active()) { vol = 0; return 0; }
+    extern int pm_get_groundent(void);
+    float v[3];
+    pm_get_velocity(v);
+    bool ground = pm_get_groundent() >= 0;
+    float target = 0;
+    if (ground && !pm_ducking()) target = sqrtf(v[0] * v[0] + v[1] * v[1]);
+    if (!ground && was_ground && v[2] > 100) target += 100;           // the jump
+    if (ground && !was_ground && prev_vz < -200 && now > 2) target += 300;   // landing on the floor (not the drop on arrival)
+    was_ground = ground; prev_vz = v[2];
+    if (target > vol) vol = target;
+    else vol = fmaxf(0, vol - 250 * dt);
+    return vol;
+}
+
+static void tent_play(npc_t *n, const char *name, int dir)
+{
+    int s = studio_find_seq(n->model, name);
+    if (s < 0) s = 0;
+    restart_seq(n, s);
+    n->tn.dir = dir;
+    if (dir < 0) n->frame = n->model->seqs[s].numframes - 1;
+    n->tn.fradj = t_rand(-0.2f, 0.2f);
+    n->framerate = dir + n->tn.fradj;
+}
+
+// CTentacle::Cycle when a sequence ends: pick the goal, then take one step towards it (FindTransition)
+static void tent_next(npc_t *n)
+{
+    float now = game_time();
+    if (n->tn.trans) { n->tn.pos = n->tn.dir > 0 ? n->tn.trans : n->tn.trans - 1; n->tn.trans = 0; }
+    int my = t_mylevel(n);
+    if (n->health <= 1) {
+        n->tn.goal_kind = TK_PIT;   // hurt: down into the pit until it has healed
+        if (n->tn.pos == 0) n->health = 75;
+    } else if (n->tn.stime > now) {
+        float a = fabsf(n->tn.syaw), m = n->tn.maxyaw;
+        n->tn.goal_kind = a <= m + 30 ? TK_STRIKE : a <= m * 2 ? TK_TAP : TK_REAR;
+        n->tn.goal_lvl = n->tn.slevel;
+    } else if (n->tn.pos == 0) {
+        n->tn.goal_kind = TK_PIT;   // stay in the pit until it hears something
+    } else if (n->tn.at_goal) {
+        if (my < 0) { n->tn.goal_kind = TK_IDLE; n->tn.goal_lvl = 0; }
+        else {
+            if (n->tn.nextsong < now) {
+                npc_sound(n, CHAN_VOICE, "tentacle/te_sing%d.wav", 2, 1, ATTN_NORM);
+                n->tn.nextsong = now + t_rand(10, 20);
+            }
+            if (rand() % 16 == 0) { n->tn.goal_kind = TK_IDLE; n->tn.goal_lvl = rand() % 4; }   // idle on a new level
+            else if (rand() % 4 == 0) { n->tn.goal_kind = TK_TAP; n->tn.goal_lvl = my; }
+            else { n->tn.goal_kind = TK_IDLE; n->tn.goal_lvl = my; }
+        }
+        n->tn.syaw += n->tn.syaw < 0 ? t_rand(2, 8) : -t_rand(2, 8);
+    }
+    int goalpos = n->tn.goal_kind == TK_PIT ? 0 : n->tn.goal_lvl + 2;
+#ifdef TENTDBG
+    debugf("TN %d pos %d goal %d/%d syaw %.0f slev %d heard %.1f hp %.0f\n", (int)(n - npcs), n->tn.pos, n->tn.goal_kind, n->tn.goal_lvl, n->tn.syaw, n->tn.slevel, n->tn.stime - now, n->health);
+#endif
+    n->tn.at_goal = 0;
+    if (n->tn.pos == goalpos) {
+        if (goalpos == 0) tent_play(n, "Pit_Idle", 1);
+        else tent_play(n, t_kind_seq[n->tn.goal_kind][n->tn.goal_lvl], 1);
+        n->tn.kind = n->tn.goal_kind;
+        n->tn.at_goal = 1;
+        if (n->tn.kind == TK_STRIKE) npc_sound(n, CHAN_BODY, "tentacle/te_swing%d.wav", 2, 1, ATTN_NORM);
+        if (n->tn.kind == TK_STRIKE && rand() % 3 == 0) npc_sound(n, CHAN_VOICE, "tentacle/te_roar%d.wav", 2, 1, ATTN_NORM);
+    } else if (n->tn.pos < goalpos) {
+        n->tn.trans = n->tn.pos + 1;
+        tent_play(n, t_trans_seq[n->tn.trans], 1);
+        n->tn.kind = TK_IDLE;
+        if (rand() % 3 == 0) npc_sound(n, CHAN_BODY, "tentacle/te_move%d.wav", 2, 1, ATTN_NORM);
+    } else {
+        n->tn.trans = n->tn.pos;
+        tent_play(n, t_trans_seq[n->tn.trans], -1);
+        n->tn.kind = TK_IDLE;
+    }
+}
+
+// CTentacle::HitTouch: whatever the swinging tentacle touches is hit -- 200 in the killing part of
+// a strike, 25 / 20 otherwise
+static void tent_hits(npc_t *n)
+{
+    float now = game_time();
+    if ((n->tn.kind != TK_STRIKE && n->tn.kind != TK_TAP) || now < n->tn.hittime) return;
+    int lv = t_mylevel(n);
+    if (lv < 0) return;
+    sseq_t *s = &n->model->seqs[n->seq];
+    float frac = s->numframes > 1 ? n->frame / (s->numframes - 1) : 0;
+    float dmg = n->tn.kind == TK_TAP ? 20 : (frac >= t_kill_from[lv] && frac <= t_kill_to[lv]) ? 200 : 25;
+    if (n->tn.kind == TK_STRIKE && frac < t_kill_from[lv] * 0.8f) return;   // still rearing up
+    // where the head is: the model's attachment where it was last drawn, else in front at its level
+    float head[3];
+    float y = n->yaw * (float)M_PI / 180;
+    if (n->att_time > 0 && now - n->att_time < 0.3f) memcpy(head, n->att[0], 12);
+    else { head[0] = n->origin[0] + cosf(y) * 300; head[1] = n->origin[1] + sinf(y) * 300; head[2] = n->origin[2] + t_height(lv); }
+    // the body from its rise up to the head: a hit near any of a few points along it
+    float base[3] = {n->origin[0] + cosf(y) * 40, n->origin[1] + sinf(y) * 40, n->origin[2] + t_height(lv)};
+    bool hit = false;
+    for (int t = 0; t < 2 && !hit; t++) {
+        // t 0: the player, 1: the other monsters
+        if (t == 0) {
+            if (!player_alive()) continue;
+            for (int k = 0; k <= 4 && !hit; k++) {
+                float p[3]; for (int c = 0; c < 3; c++) p[c] = base[c] + (head[c] - base[c]) * (0.5f + k * 0.125f);
+                if (dist2d(p, player_pos) < 56 && fabsf(p[2] - player_pos[2]) < 72) {
+                    damage_target(n, 0, dmg, DMG_CRUSH | DMG_SLASH);
+                    hit = true;
+                }
+            }
+        }
+    }
+    for (int o = 0; o < num_npcs; o++) {
+        npc_t *v = &npcs[o];
+        if (v == n || !npc_alive(o) || (v->model && !strcmp(v->model->name, "tentacle2"))) continue;
+        for (int k = 0; k <= 4; k++) {
+            float p[3]; for (int c = 0; c < 3; c++) p[c] = base[c] + (head[c] - base[c]) * (0.5f + k * 0.125f);
+            if (dist2d(p, v->origin) < 56 && fabsf(p[2] - (v->origin[2] + 36)) < 72) { damage_target(n, o + 1, dmg, DMG_CRUSH | DMG_SLASH); hit = true; break; }
+        }
+    }
+    if (hit) {
+#ifdef TENTDBG
+        debugf("TN %d HIT dmg %.0f\n", (int)(n - npcs), dmg);
+#endif
+        n->tn.hittime = now + 0.5f;
+        snd_emit(-1, CHAN_AUTO, rand() & 1 ? "tentacle/te_strike1.wav" : "tentacle/te_strike2.wav", 1, ATTN_NORM, PITCH_NORM, head);
+    }
+}
+
 static void tentacle_think(npc_t *n, float dt)
 {
     float now = game_time();
-    if (n->bt[2] > 0) return;   // burning in the rocket's flames (Engine_Idle until it dies)
-    // what it is listening to: a recent noise (grenade bounces, explosions, gunfire), or the
-    // player's footsteps on a floor it can reach (walking or running, not crouching or still)
-    float tgt[3];
-    bool have = false;
-    if (now < n->alert_until) { memcpy(tgt, n->heard, 12); have = true; }
-    else if (player_alive() && !pm_noclip_active()) {
-        float v[3];
-        pm_get_velocity(v);
-        extern int pm_get_groundent(void);
-        bool on_ground = pm_get_groundent() >= 0;
-        bool steps = on_ground && !pm_ducking() && sqrtf(v[0] * v[0] + v[1] * v[1]) > 90;
-        if (steps && dist2d(n->origin, player_pos) < 420) {
-            memcpy(tgt, player_pos, 12); tgt[2] -= 36;   // the feet
-            memcpy(n->heard, tgt, 12);
-            n->alert_until = now + 0.6f;
-            have = true;
-        }
+    entity_t *e = &entities[n->ent];
+    if (!n->tn.init) {
+        n->tn.init = true;
+        n->tn.inityaw = n->yaw;
+        const char *sa = ent_value(e, "sweeparc");
+        n->tn.maxyaw = sa && atof(sa) > 0 ? atof(sa) / 2 : 65;
+        n->health = 75;
+        n->tn.pos = 5;            // risen, at the top level (where the player first meets them)
+        n->tn.goal_kind = TK_IDLE; n->tn.goal_lvl = 3;
+        n->tn.nextsong = now + t_rand(3, 10);
+        tent_play(n, t_kind_seq[TK_IDLE][3], 1);
+        n->tn.at_goal = 1;
+        n->tn.kind = TK_IDLE;
     }
-    static const char *idle[4] = {"Floor_Idle", "Lev1_Idle", "Lev2_Idle", "Lev3_Idle"};
-    static const char *strike[4] = {"Floor_Strike", "Lev1_Strike", "Lev2_Strike", "Lev3_Strike"};
-    // stay at the level last heard (start at the floor), always risen out of the pit
-    if (have) n->bt[0] = (float)tentacle_level(n, tgt[2]);
-    int lv = (int)n->bt[0];
-    int is = studio_find_seq(n->model, idle[lv]);
-    if (is >= 0 && n->idle_seq != is) { n->idle_seq = is; if (n->ai != AI_ATTACK) set_seq(n, is); }
-    else if (is >= 0 && n->ai != AI_ATTACK && n->seq != is) set_seq(n, is);
-    if (!have || n->ai == AI_ATTACK) return;
-    float hd = dist2d(n->origin, tgt);
-    if (hd > 420) return;
-    // turn towards the sound, then strike at it
-    n->yaw = yaw_to(n->origin, tgt);
-    if (now <= n->next_attack) return;
-    n->next_attack = now + 1.6f;
-    int ss = studio_find_seq(n->model, strike[lv]);
-    if (ss >= 0) set_seq(n, ss);
-    restart_seq(n, n->seq);
-    n->ai = AI_ATTACK;
-    n->enemy = 0;
-    n->attack_kind = 1;
-    n->attack_hit_done = false;
-    n->attack_hit_time = now + 0.5f;
-    memcpy(n->last_seen, tgt, 12);   // where the strike lands (attack_hit)
-    npc_sound(n, CHAN_VOICE, "tentacle/te_strike%d.wav", 2, 1, ATTN_NORM);
+    n->tn.hit_top = t_height(t_mylevel(n)) + 96;
+    if (n->bt[2] > 0) {   // burning in the rocket's flames (CTentacle::DieThink with Engine_Idle)
+        if (n->seq_done) {
+            static const char *sway[3] = {"Engine_Sway", "Engine_Swat", "Engine_Bob"};
+            if (!play_named(n, sway[rand() % 3], true)) play_named(n, "Engine_Idle", true);
+            n->framerate = t_rand(0.8f, 1.2f);
+        }
+        float want = n->tn.inityaw + 180;
+        float d = t_norm(want - n->yaw);
+        n->yaw += fmaxf(-24 * 10 * dt, fminf(24 * 10 * dt, d));
+        return;
+    }
+    // what it hears of the player (other sounds come in through npc_hear)
+    float pv = tent_player_volume();
+    if (pv > 1) tent_hear(n, player_pos, pv);
+    // turn towards the sound, inside its sweep (rear idles look behind)
+    float dy = n->tn.syaw, m = n->tn.maxyaw;
+    if (n->tn.kind == TK_REAR) { if (dy < 0 && dy > -m) dy = -m; if (dy > 0 && dy < m) dy = m; }
+    else dy = fmaxf(-m, fminf(m, dy));
+    float d = t_norm(n->tn.inityaw + dy - n->yaw);
+    float turn = 18 * 10 * dt;   // yaw_speed 18 a tenth of a second
+    n->yaw += fmaxf(-turn, fminf(turn, d));
+    if (n->seq_done) tent_next(n);
+    // faster while it hears things, back to normal over a few seconds
+    float since = now - n->tn.prevtime;
+    if (n->tn.prevtime > 0 && since < 2) n->framerate = n->tn.dir * 1.5f + n->tn.fradj;
+    else if (n->tn.prevtime > 0 && since < 5) n->framerate = n->tn.dir + n->tn.dir * (5 - since) / 2 + n->tn.fradj;
+    tent_hits(n);
 }
 
 static void item_think(npc_t *n, int i)
@@ -2764,6 +3098,17 @@ static void barney_gun(npc_t *n, int state)
 void npcs_think(float dt)
 {
     float now = game_time();
+    // a barnacle that has the player and is killed (or gone) lets go (CBarnacle::Killed)
+    if (barnacle_holding >= 0 && (barnacle_holding >= num_npcs || !npc_alive(barnacle_holding))) barnacle_release_player();
+    for (int i = 0; i < num_npcs; i++) {   // and drops the monster it was hauling up
+        npc_t *b = &npcs[i];
+        if (b->bi[0] > 0 && b->model && !strcmp(b->model->name, "barnacle") && !npc_alive(i)) {
+            npc_t *v = &npcs[b->bi[0] - 1];
+            v->flags &= ~NF_NOAI;
+            if (v->ai == AI_GRABBED) v->ai = AI_IDLE;
+            b->bi[0] = 0;
+        }
+    }
     pm_get_origin(player_pos);
     player_get_eye(player_eye);
 #ifdef SWARMDEBUG
@@ -2823,6 +3168,7 @@ void npcs_think(float dt)
         float fps = s->fps > 0 ? s->fps : 10;
         int before = (int)n->frame;
         n->frame += fps * dt * n->framerate;
+        if (n->frame < 0) { n->frame = 0; n->seq_done = true; }   // played backwards to the start
         if (n->frame >= s->numframes - 1) {
             n->seq_done = true;
             bool loop = (s->flags & 1) || n->sstate == NS_SCRIPT_IDLE || n->sstate == NS_MOVING || n->sstate == NS_TURNING ||
@@ -2845,6 +3191,13 @@ void npcs_think(float dt)
 
         // ---- scripted sequences take priority
         if (n->script >= 0 || n->sstate != NS_IDLE) {
+            // CTentacle::Cycle in MONSTERSTATE_SCRIPT: faces the way it was placed (the scientist's
+            // grab in c1a4i reaches the right window), and goes back to its own life afterwards
+            if (n->model && !strcmp(n->model->name, "tentacle2")) {
+                if (n->tn.init) n->yaw = n->tn.inityaw;
+                else n->yaw = entities[n->ent].angles[1];
+                n->tn.pos = 2; n->tn.trans = 0; n->tn.at_goal = 0; n->tn.kind = TK_IDLE; n->tn.dir = 1;
+            }
             switch (n->sstate) {
             case NS_MOVING: {
                 bool arrived = follow_route(n, n->speed, dt, 4);
@@ -2902,7 +3255,16 @@ void npcs_think(float dt)
             if (n->seq_done) { n->ai = n->enemy >= 0 ? AI_COMBAT : AI_IDLE; set_seq(n, n->idle_seq); }
             continue;
         case AI_ATTACK:
-            if (!n->attack_hit_done && now >= n->attack_hit_time) { n->attack_hit_done = true; attack_hit(n); }
+            if (!n->attack_hit_done && n->attack_kind == 2 && D(n) && D(n)->ranged == R_ZAP && now < n->attack_hit_time && now >= n->bt[2]) {
+                // charging: green arcs around the hands and the rising hum (CISlave::HandleAnimEvent, ISLAVE_AE_ZAP_POWERUP)
+                extern void game_effect_armbeam(const float *hand, int r, int g, int b);
+                float h[3];
+                if (n->model->numatt > 0 && now - n->att_time < 0.5f) memcpy(h, n->att[0], 12); else npc_eye(n, h);
+                game_effect_armbeam(h, 96, 128, 16);
+                if (n->bt[2] == 0 || now - n->bt[2] > 1) snd_emit(n->ent, CHAN_WEAPON, "debris/zap4.wav", 0.7f, ATTN_NORM, 100, NULL);
+                n->bt[2] = now + 0.07f;
+            }
+            if (!n->attack_hit_done && now >= n->attack_hit_time) { n->attack_hit_done = true; n->bt[2] = 0; attack_hit(n); }
             if (n->stuck_time < 0) {
                 // headcrab in the air: fly along the leap and bite on contact
                 float v[3] = {n->path[0][0] * dt, n->path[0][1] * dt, -n->vz * dt};
@@ -3003,6 +3365,7 @@ int npcs_get_boxes(npc_box_t *out, int max, const float *near, float range)
     for (int i = 0; i < num_npcs && c < max; i++) {
         npc_t *n = &npcs[i];
         if (!n->solid || entities[n->ent].removed) continue;
+        if (i == barnacle_holding) continue;   // the barnacle holding the player: it is up against its mouth
         if (fabsf(n->origin[0] - near[0]) > range || fabsf(n->origin[1] - near[1]) > range ||
             fabsf(n->origin[2] - near[2]) > range) continue;
         memcpy(out[c].origin, n->origin, 12);

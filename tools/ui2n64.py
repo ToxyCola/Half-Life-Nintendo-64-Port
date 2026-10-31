@@ -19,7 +19,8 @@ Output (filesystem/ui/):
   hud3.sprite, logo.sprite                 I4 intensity images (tinted at draw time)
   titles.txt
 """
-import os, sys, struct, subprocess, shutil
+import os
+import numpy as np, sys, struct, subprocess, shutil
 from PIL import Image, ImageFilter
 
 SIZES = [('small', 0.65), ('medium', 0.8), ('large', 1.0)]
@@ -247,6 +248,21 @@ def build_fx(valve, ui, tmp):
         many = len(idx) > 1
         for k, i in enumerate(idx):
             out('%s%d' % (name, k) if many else name, recipe(fr[min(i, len(fr) - 1)]), fmt, size, filt)
+    # decals (decals.wad): the palette index is the coverage, palette[255] the colour (tinted in
+    # the game); kept as white + alpha. dc_shot0..4, dc_bigshot0..4, dc_scorch0..2, dc_blood0..7, dc_yblood0..5
+    wad = os.path.join(valve, 'decals.wad')
+    if os.path.exists(wad):
+        import bsp2n64
+        w = bsp2n64.read_wads([wad])
+        for base, cnt, size in (('shot', 5, 16), ('bigshot', 5, 16), ('scorch', 3, 32), ('blood', 8, 32), ('yblood', 6, 32)):
+            for k in range(cnt):
+                blob = w.get('{%s%d' % (base, k + 1))
+                if blob is None:
+                    continue
+                _, dw, dh, pix, pal = bsp2n64.parse_miptex(blob)
+                a = Image.fromarray(np.asarray(pix, np.uint8).reshape(dh, dw), 'L')
+                im = Image.merge('LA', (Image.new('L', (dw, dh), 255), a))
+                out('dc_%s%d' % (base, k), im, 'IA8', (size, size) if (dw, dh) != (size, size) else None, Image.BILINEAR)
     print('effect sprites: %d%s' % (made, (', missing: ' + ' '.join(missing)) if missing else ''))
 
 

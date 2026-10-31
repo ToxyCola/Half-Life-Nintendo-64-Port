@@ -1208,6 +1208,11 @@ static void ent_use(entity_t *e)
         e->visible = !e->visible;
         e->solid = e->visible ? SOLID_BSP : SOLID_NOT;
         break;
+    case ENT_WALL: {   // CFuncWall::Use: its textures switch to the alternate set (screens, signs)
+        extern int g_use_type;
+        if (g_use_type == 2 || g_use_type != e->texframe) e->texframe = !e->texframe;
+        break;
+    }
     case ENT_TRIGGER_RELAY: {
         // triggerstate: 0 USE_OFF, 1 USE_ON, 2 USE_TOGGLE (what the targets' Use() receives)
         const char *ts = ent_value(e, "triggerstate");
@@ -1880,7 +1885,12 @@ static bool player_touches(entity_t *e, const float *porg, const float *pmins, c
         if (porg[i] + pmins[i] > e->origin[i] + bm->maxs[i]) return false;
         if (porg[i] + pmaxs[i] < e->origin[i] + bm->mins[i]) return false;
     }
-    return true;
+    // SV_TouchLinks: a brush trigger is touched only where its brushes are (its clip hull for the
+    // player's size), not anywhere in its bounding box -- a sloped or L-shaped trigger (the
+    // frictionless strip beside the Unforeseen Consequences incline lift) has a box far bigger
+    // than itself
+    extern bool pm_player_in_entity(int ent, const float *pos);
+    return pm_player_in_entity((int)(e - entities), porg);
 }
 
 // func_pushable riding on a lift / train (the specimen cart in Anomalous Materials)
@@ -2045,7 +2055,7 @@ static void mover_step(entity_t *e, int idx, float dt)
         bool riding = pm_entity_for_physent(pm_get_groundent()) == idx;
         if (!e->angular && riding) {
             float np[3] = {porg[0] + moved[0], porg[1] + moved[1], porg[2] + moved[2]};
-            if (moved[2] > 0) np[2] += 0.01f;
+            np[2] += 0.03125f;   // a hair above the floor it rides: never in it (a trace starting in it goes nowhere)
             memcpy(porg, np, 12);
             pm_set_origin(np);
         }
@@ -2303,6 +2313,9 @@ static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
     memcpy(oldorg, e->origin, 12);
     for (int i = 0; i < 3; i++) e->origin[i] += delta[i];
     e->angles[1] = fmodf(e->angles[1] + dyaw + 360.0f, 360.0f);
+#ifdef LIFTDBG
+    { static float nt; if (g_time > nt) { nt = g_time + 0.5f; debugf("LIFT %d org %.0f %.0f %.0f player %.0f %.0f %.0f riding %d ground %d\n", idx, e->origin[0], e->origin[1], e->origin[2], porg[0], porg[1], porg[2], riding, pm_get_groundent()); } }
+#endif
     if (!riding && e->model > 0) {
         // nowhere near the player: nothing to push or carry (skip rebuilding the player's collision)
         bmodel_t *bm = &world.bmodels[e->model];
@@ -2323,7 +2336,7 @@ static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
         float a = dyaw * M_PI / 180.0f, ca = cosf(a), sa = sinf(a);
         float np[3] = {oldorg[0] + delta[0] + rel[0] * ca - rel[1] * sa,
                        oldorg[1] + delta[1] + rel[0] * sa + rel[1] * ca,
-                       porg[2] + delta[2] + (delta[2] > 0 ? 0.01f : 0)};
+                       porg[2] + delta[2] + 0.03125f};
         if (!pm_position_free(np)) {
             // a sloped train pitched under the player: lift them out
             for (int up = 1; up <= 18; up += 1) {
@@ -2942,7 +2955,7 @@ void ents_think(float dt)
                     bc->radius = ent_float(e, "Radius", 0);
                     bc->strike = ent_float(e, "StrikeTime", 0);
                     const char *tx = ent_value(e, "texture");
-                    bc->plain = tx && strstr(tx, "laserbeam");
+                    bc->plain = (tx && strstr(tx, "laserbeam")) || ent_float(e, "NoiseAmplitude", 1) == 0;   // straight lasers (c1a3's tripwire beams)
                     bc->init = true;
                 }
                 if (bc->ib < 0 && bc->radius > 0) {
@@ -2980,7 +2993,7 @@ void ents_think(float dt)
                 float da = 0, db = 0;
                 for (int k = 0; k < 3; k++) { da += (pa[k] - porg[k]) * (pa[k] - porg[k]); db += (pb[k] - porg[k]) * (pb[k] - porg[k]); }
                 if (da > 2500.0f * 2500.0f && db > 2500.0f * 2500.0f) break;
-                if (bc->laser) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, pb, bc->c[0], bc->c[1], bc->c[2]); }
+                if (bc->laser || bc->plain) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, pb, bc->c[0], bc->c[1], bc->c[2]); }
                 else game_effect_lightning(pa, pb, bc->c[0], bc->c[1], bc->c[2]);
             }
             break;
@@ -3355,6 +3368,7 @@ static uint32_t ent_hash(const entity_t *e)
     h = (h ^ e->state) * 16777619u;
     h = (h ^ (e->visible ? 1 : 0)) * 16777619u;
     h = (h ^ (uint32_t)e->solid) * 16777619u;
+    h = (h ^ (uint32_t)e->texframe) * 16777619u;
     return h;
 }
 void ents_mark_base_state(void)
@@ -3376,7 +3390,7 @@ int ents_snapshot(uint8_t *b, int max, int base)
         entity_t *e = &entities[i];
         if (e->removed || e->model <= 0 || pos + (int)sizeof(esnap_t) > max) continue;
         if (ent_hash(e) == ent_base_hash[i] && e->nextthink <= 0 && e->curspeed == 0) continue;   // as spawned
-        esnap_t r = {.idx = i, .state = e->state, .fl = (e->visible ? 1 : 0) | ((uint8_t)e->solid << 1),
+        esnap_t r = {.idx = i, .state = e->state, .fl = (e->visible ? 1 : 0) | ((uint8_t)(e->solid & 7) << 1) | (e->texframe ? 16 : 0),
                      .curspeed = e->curspeed, .think = e->nextthink > 0 ? e->nextthink - g_time : -1, .path = e->path};
         memcpy(r.o, e->origin, 12); memcpy(r.a, e->angles, 12);
         memcpy(b + pos, &r, sizeof r); pos += sizeof r; n++;
@@ -3390,6 +3404,21 @@ int ents_snapshot(uint8_t *b, int max, int base)
             if (!msrc[k].on || msrc[k].ent >= base) continue;
             int16_t ent = msrc[k].ent;
             memcpy(b + pos, &ent, 2); memcpy(b + pos + 2, &msrc[k].on, 4);
+            pos += 6; c++;
+        }
+        b[cpos] = c & 255; b[cpos + 1] = c >> 8;
+    }
+    // monstermakers that have made monsters: how many they have left (a maker refilled by a load or
+    // a return visit made the same enemies again, endlessly with every visit)
+    if (pos + 2 <= max) {
+        int cpos = pos, c = 0;
+        pos += 2;
+        for (int i = 1; i < base && pos + 6 <= max; i++) {
+            entity_t *e = &entities[i];
+            if (e->type != ENT_MONSTERMAKER || e->removed) continue;
+            if (e->maker_count == (int)ent_float(e, "monstercount", -1)) continue;
+            int16_t idx = i, cnt = e->maker_count, live = e->maker_live;
+            memcpy(b + pos, &idx, 2); memcpy(b + pos + 2, &cnt, 2); memcpy(b + pos + 4, &live, 2);
             pos += 6; c++;
         }
         b[cpos] = c & 255; b[cpos + 1] = c >> 8;
@@ -3411,7 +3440,7 @@ void ents_apply_snapshot(const uint8_t *b, int len, int base)
         if (r.idx >= base) continue;
         entity_t *e = &entities[r.idx];
         memcpy(e->origin, r.o, 12); memcpy(e->angles, r.a, 12);
-        e->state = r.state; e->visible = r.fl & 1; e->solid = r.fl >> 1;   // the exact solid type (triggers stay triggers)
+        e->state = r.state; e->visible = r.fl & 1; e->solid = (r.fl >> 1) & 7; e->texframe = (r.fl >> 4) & 1;   // the exact solid type (triggers stay triggers)
         e->curspeed = r.curspeed; e->path = r.path;
         e->nextthink = r.think >= 0 ? g_time + r.think : 0;
     }
@@ -3423,6 +3452,18 @@ void ents_apply_snapshot(const uint8_t *b, int len, int base)
             memcpy(&ent, b + pos, 2); memcpy(&on, b + pos + 2, 4);
             msrc_t *m = msrc_for(ent);
             if (m) m->on = on;
+        }
+        if (pos + 2 <= len) {
+            int c2 = b[pos] | (b[pos + 1] << 8);
+            pos += 2;
+            for (int k = 0; k < c2 && pos + 6 <= len; k++, pos += 6) {
+                int16_t idx, cnt, live;
+                memcpy(&idx, b + pos, 2); memcpy(&cnt, b + pos + 2, 2); memcpy(&live, b + pos + 4, 2);
+                if (idx <= 0 || idx >= base || entities[idx].type != ENT_MONSTERMAKER) continue;
+                entities[idx].maker_count = cnt;
+                entities[idx].maker_live = 0;   // its monsters are restored as plain map characters
+                if (cnt == 0) entities[idx].active = false;
+            }
         }
     }
 }

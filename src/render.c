@@ -3,6 +3,8 @@
 #include <t3d/t3d.h>
 #include <t3d/t3dmath.h>
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <malloc.h>
 #include <math.h>
 #include "bsp.h"
@@ -63,6 +65,7 @@ void render_init(void)
 
 static void free_texture_blocks(void);
 static void record_texture_blocks(void);
+static void build_tex_anims(void);
 static void build_strips(void);
 static void record_model_blocks(void);
 static int *model_tris;   // triangles per brush model (stats)
@@ -73,6 +76,7 @@ void render_new_map(void)
     free_model_blocks();
     free_texture_blocks();
     record_texture_blocks();
+    build_tex_anims();
     build_strips();
     record_model_blocks();
     free(face_visframe); free(tex_chain); free(face_next); free(visleaf_list);
@@ -188,6 +192,51 @@ static void free_texture_blocks(void)
         if (tex_blocks[t]) rspq_block_free(tex_blocks[t]);
     free(tex_blocks);
     tex_blocks = NULL;
+}
+
+// animated textures (+0name .. +9name cycle at 10 a second, +aname .. +jname the alternate set a
+// pressed button or a switched func_wall shows: R_TextureAnimation)
+#define MAX_TEX_ANIMS 48
+static struct { int16_t main[10], alt[10]; uint8_t nmain, nalt; } tex_anims[MAX_TEX_ANIMS];
+static int num_tex_anims;
+#define MAX_ANIM_TEXTURES 1024
+static int16_t tex_anim_buf[MAX_ANIM_TEXTURES];   // static: nothing allocated between the map's buffers
+static int16_t *tex_anim_of;    // per texture: group, -1 none; +100 for the alternate set
+static void build_tex_anims(void)
+{
+    tex_anim_of = world.numtextures <= MAX_ANIM_TEXTURES ? tex_anim_buf : NULL;
+    num_tex_anims = 0;
+    if (!tex_anim_of) return;
+    for (int t = 0; t < world.numtextures; t++) tex_anim_of[t] = -1;
+    for (int t = 0; t < world.numtextures; t++) {
+        const char *nm = world.textures[t].name;
+        if (nm[0] != '+' || !nm[1] || tex_anim_of[t] >= 0) continue;
+        if (num_tex_anims >= MAX_TEX_ANIMS) break;
+        int g = num_tex_anims++;
+        memset(&tex_anims[g], 0, sizeof(tex_anims[g]));
+        for (int k = 0; k < 10; k++) tex_anims[g].main[k] = tex_anims[g].alt[k] = -1;
+        for (int u = 0; u < world.numtextures; u++) {
+            const char *n2 = world.textures[u].name;
+            if (n2[0] != '+' || strncasecmp(n2 + 2, nm + 2, 14)) continue;
+            int c = tolower((unsigned char)n2[1]);
+            if (c >= '0' && c <= '9') { tex_anims[g].main[c - '0'] = u; if (c - '0' + 1 > tex_anims[g].nmain) tex_anims[g].nmain = c - '0' + 1; tex_anim_of[u] = g; }
+            else if (c >= 'a' && c <= 'j') { tex_anims[g].alt[c - 'a'] = u; if (c - 'a' + 1 > tex_anims[g].nalt) tex_anims[g].nalt = c - 'a' + 1; tex_anim_of[u] = g + 100; }
+        }
+    }
+    debugf("animated textures: %d\n", num_tex_anims);
+}
+static int anim_texture(int t, int frame)
+{
+    if (!tex_anim_of || t < 0 || t >= world.numtextures || tex_anim_of[t] < 0) return t;
+    int g = tex_anim_of[t] % 100;
+    bool alt = tex_anim_of[t] >= 100;
+    if (frame) { if (alt ? tex_anims[g].nmain : tex_anims[g].nalt) alt = !alt; }
+    int n = alt ? tex_anims[g].nalt : tex_anims[g].nmain;
+    if (n <= 0) return t;
+    int idx = (int)(game_time() * 10) % n;
+    int r = alt ? tex_anims[g].alt[idx] : tex_anims[g].main[idx];
+    for (int k = 0; r < 0 && k < n; k++) r = alt ? tex_anims[g].alt[k] : tex_anims[g].main[k];   // a gap in the frames
+    return r >= 0 ? r : t;
 }
 
 static void bind_texture(int t)
@@ -397,10 +446,79 @@ static void draw_world(void)
     for (int t = 0; t < world.numtextures; t++) {
         if (tex_chain[t] < 0) continue;
         flush_cache();
-        bind_texture(t);
+        bind_texture(anim_texture(t, 0));
         for (int fi = tex_chain[t]; fi >= 0; fi = face_next[fi]) draw_face(fi);
     }
     flush_cache();
+}
+
+// ---------------------------------------------------------------- dynamic light on the world
+// GoldSrc lights the lightmaps of every surface near a dlight (R_AddDynamicLights): here the
+// visible world faces near it are drawn again, additively, shaded per vertex by the distance to
+// the light. skip_n / skip_d: the plane the caller lights itself (the flashlight's spot)
+void render_dlight_world(const float *c, float R, float bright, const float *skip_n, float skip_d)
+{
+    if (!tex_chain || !face_box) return;
+    float inv = 1.0f / world.vertscale;
+    bool mode = false;
+    int faces = 0;
+    for (int t = 0; t < world.numtextures && faces < 24; t++) {
+        for (int fi = tex_chain[t]; fi >= 0 && faces < 24; fi = face_next[fi]) {
+            const int16_t *b = face_box[fi];
+            // the sphere against the face's bounds
+            float d2 = 0;
+            for (int k = 0; k < 3; k++) { float v = c[k] < b[k] ? b[k] - c[k] : c[k] > b[k + 3] ? c[k] - b[k + 3] : 0; d2 += v * v; }
+            if (d2 > R * R) continue;
+            bface_t *f = &world.faces[fi];
+            bplane_t *pl = &world.planes[f->planenum];
+            float nx = pl->normal[0], ny = pl->normal[1], nz = pl->normal[2], pd = pl->dist;
+            if (f->side) { nx = -nx; ny = -ny; nz = -nz; pd = -pd; }
+            float above = c[0] * nx + c[1] * ny + c[2] * nz - pd;   // the light must be in front of the face
+            if (above < -4 || above > R) continue;
+            if (skip_n && nx * skip_n[0] + ny * skip_n[1] + nz * skip_n[2] > 0.99f && fabsf(pd - skip_d) < 2) continue;
+            faces++;
+            for (int ci = 0; ci < f->numchunks; ci++) {
+                bchunk_t *ch = &world.chunks[f->firstchunk + ci];
+                float sv[64][7];
+                bool vok[64];
+                bool any = false;
+                for (int v = 0; v < ch->numverts && v < 64; v++) {
+                    int vi = ch->firstvert + v;
+                    const int16_t *pos = (vi & 1) ? world.verts[vi >> 1].posB : world.verts[vi >> 1].posA;
+                    float w[3] = {pos[0] * inv, pos[1] * inv, pos[2] * inv};
+                    float dd = sqrtf((w[0] - c[0]) * (w[0] - c[0]) + (w[1] - c[1]) * (w[1] - c[1]) + (w[2] - c[2]) * (w[2] - c[2]));
+                    float in = 1 - dd / R;
+                    if (in < 0) in = 0;
+                    T3DVec3 p3 = {{w[0], w[1], w[2]}}, o3;
+                    t3d_viewport_calc_viewspace_pos(&viewport, &o3, &p3);
+                    vok[v] = o3.v[2] > 0 && o3.v[2] < 1 && fabsf(o3.v[0]) < 1500 && fabsf(o3.v[1]) < 1500;
+                    // blended toward warm white by the light's strength: an additive blend wraps
+                    // past full brightness on the RDP and turned lit surfaces blue/green
+                    float a = in * in * bright * 0.6f;
+                    if (a > 0.6f) a = 0.6f;
+                    sv[v][0] = o3.v[0]; sv[v][1] = o3.v[1]; sv[v][2] = o3.v[2] - 0.0004f;
+                    sv[v][3] = 1; sv[v][4] = 1; sv[v][5] = 0.92f; sv[v][6] = a;
+                    if (in > 0) any = true;
+                }
+                if (!any) continue;
+                if (!mode) {
+                    rdpq_set_mode_standard();
+                    rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
+                    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+                    rdpq_mode_zbuf(true, false);
+                    mode = true;
+                }
+                const uint8_t *tri = world.tris + ch->firsttri * 3;
+                for (int k = 0; k < ch->numtris; k++, tri += 3) {
+                    int a0 = tri[0], a1 = tri[1], a2 = tri[2];
+                    if (a0 >= 64 || a1 >= 64 || a2 >= 64 || !vok[a0] || !vok[a1] || !vok[a2]) continue;
+                    if (sv[a0][6] + sv[a1][6] + sv[a2][6] <= 0) continue;
+                    rdpq_triangle(&TRIFMT_ZBUF_SHADE, sv[a0], sv[a1], sv[a2]);
+                }
+            }
+        }
+    }
+    if (mode) rdpq_set_mode_standard();
 }
 
 // ---------------------------------------------------------------- brush entities
@@ -533,9 +651,13 @@ static void draw_bmodel_faces(entity_t *e)
 {
     if (model_first && e->model < num_model_blocks) {
         bound_tex = -1;
+        // pev->frame: a button shows its alternate textures while pressed in (CBaseButton), a
+        // func_wall after it is used (CFuncWall::Use)
+        int frame = e->texframe;
+        if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && (e->state == MS_AT_TOP)) frame = 1;
         for (uint32_t k = model_first[e->model]; k < model_first[e->model + 1]; k++) {
             int fi = model_faces[k];
-            bind_texture(world.faces[fi].texture);
+            bind_texture(anim_texture(world.faces[fi].texture, frame));
             draw_face(fi);
         }
         if (model_tris) rstats.tris += model_tris[e->model];
@@ -558,6 +680,7 @@ void render_draw_translucent(void)
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_antialias(AA_NONE);
     rdpq_mode_fog(fog_on ? RDPQ_FOG_STANDARD : 0);
+    rdpq_mode_persp(true);
     rdpq_mode_end();
     t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED | ENT_CULL);
     for (int i = 0; i < num_trans_ents; i++) {
@@ -790,6 +913,12 @@ static void draw_npcs(const float *eye)
         npc_t *c = &npcs[order[i]];
         studio_draw_t d = {.model = c->model, .yaw = c->yaw, .seq = c->seq, .frame = c->frame,
                            .body = c->body, .skin = c->skin, .att_out = c->att, .att_n = 1, .ctl0 = c->ctl0};
+        if (c->ceiling) {   // upside down from the ceiling (turret "orientation" 1): yaw, then a half roll
+            float cy = cosf(c->yaw * (float)M_PI / 180), sy = sinf(c->yaw * (float)M_PI / 180);
+            float m[3][4] = {{cy, sy, 0, c->origin[0]}, {sy, -cy, 0, c->origin[1]}, {0, 0, -1, c->origin[2]}};
+            d.use_xform = true;
+            memcpy(d.xform, m, sizeof(m));
+        }
         {   // bodies lying still keep their pose: bones computed once (studio.c static pool)
             extern bool npc_pose_final(int i);
             bool fin = npc_pose_final(order[i]);
@@ -801,6 +930,10 @@ static void draw_npcs(const float *eye)
             d.cache_slot = &c->bone_cache;
             d.cacheable = fin;
         }
+        d.lod_inst = c;
+#ifndef NOLOD
+        d.lod_half = dist[i] > 550.0f * 550.0f && c->bkind == 0;   // far characters: bones at half rate
+#endif
         if (c->model->numatt > 0) { extern float game_time(void); c->att_time = game_time(); }
         memcpy(d.origin, c->origin, 12);
         memcpy(d.light, c->light, 3);
@@ -904,6 +1037,7 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
     t3d_matrix_pop(1);
 #endif
     uint32_t t5 = TICKS_READ();
+    { extern void snd_poll(void); snd_poll(); }   // keep the mixer fed on long frames
 #ifndef NO_ENTS
     draw_entities(eye, &mats[1]);
 #endif
@@ -935,6 +1069,7 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
     }
 #endif
     uint32_t t6 = TICKS_READ();
+    { extern void snd_poll(void); snd_poll(); }
     rstats.t_sky += TICKS_DISTANCE(t3, t4);
     rstats.t_world += TICKS_DISTANCE(t4, t5);
     rstats.t_ents += TICKS_DISTANCE(t5, t6);

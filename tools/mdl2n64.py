@@ -258,9 +258,10 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
                 if posmask[b]:
                     animblob += struct.pack(E + '3h', *[i16(c * POS_SCALE) for c in fb[b][1]])
         lm = s['linmove']
-        # animation events that matter without NPC AI: 1003 = fire a target (SCRIPT_EVENT_FIREEVENT),
+        # animation events that matter without NPC AI: 1000 = the script kills it (SCRIPT_EVENT_DEAD),
+        # 1003 = fire a target (SCRIPT_EVENT_FIREEVENT),
         # 1004 = play a sound, 1008 = sentence (kept for completeness)
-        evs = [(fr // step, ev, opt) for fr, ev, opt in s['events'] if ev in (1003, 1004, 1005, 1008, 1009)]
+        evs = [(fr // step, ev, opt) for fr, ev, opt in s['events'] if ev in (1000, 1003, 1004, 1005, 1008, 1009)]
         eofs = len(eventblob)
         for fr, ev, opt in evs:
             eventblob += struct.pack(E + 'HH60s', fr, ev, opt.encode('latin1')[:59])
@@ -276,12 +277,8 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
         flags, w, h, index = struct.unpack_from('<4i', tex_m.d, o + 64)
         pix = np.frombuffer(tex_m.d, np.uint8, w * h, index).reshape(h, w)
         pal = np.frombuffer(tex_m.d, np.uint8, 768, index + w * h).reshape(256, 3)
-        if flags & NF_CHROME:
-            # no environment mapping on N64: a flat texture in the chrome's average colour
-            mean = pal[pix].reshape(-1, 3).mean(0)
-            idx = int(((pal.astype(np.float32) - mean) ** 2).sum(1).argmin())
-            pix = np.full((h, w), idx, np.uint8)
-            flags &= ~NF_CHROME
+        # chrome (NF_CHROME): kept as it is, the game maps it as a reflection (tiny3d's spherical
+        # UV vertex effect: the texture follows the surface normals as seen from the camera)
         tw, th, data, p16 = convert_texture(('{' if flags & NF_MASKED else '') + name, w, h, pix, pal, max_texels)
         while len(tex_out) % 16: tex_out.append(0)
         dofs = len(tex_out); tex_out += data

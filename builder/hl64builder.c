@@ -7,44 +7,56 @@
  * numpy and Pillow. No Valve game data is included: the maps, textures, models and sounds are
  * converted from the Half-Life install found on this computer.
  *
- *   HL64Builder.exe                     find Half-Life through Steam, or ask for the folder
- *   HL64Builder.exe "D:\Games\Half-Life"   use that install (drag the folder onto the .exe)
- *   HL64Builder.exe --clean ...         convert everything again instead of reusing the last run
+ * It is a small window: the Half-Life folder (found through Steam when it can be), where the ROM
+ * goes (next to the .exe unless changed) and, optionally, where the temporary files live (the
+ * unpacked tools and the converted game data, %LOCALAPPDATA%\HL64Builder by default). The choices
+ * are remembered for next time. The steps' output is shown in the window as they run.
  *
- * The ROM is written next to the .exe as hl64.z64.
+ *   HL64Builder.exe ["D:\Games\Half-Life"] [--clean] [--build]   (a folder given, or dropped on the
+ *   .exe, is used; --build starts at once)
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <commctrl.h>
 #include <shlobj.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <zlib.h>
+#include <stdarg.h>
 
 #ifndef HL64_VERSION
 #define HL64_VERSION "dev"
 #endif
 
-static char g_root[MAX_PATH];     // %LOCALAPPDATA%\HL64Builder\<version> (version = tag + commit: a rebuilt
+static char g_root[MAX_PATH];     // <temp>\<version> (temp: %LOCALAPPDATA%\HL64Builder or the chosen folder) (version = tag + commit: a rebuilt
                                    // release never reuses an older build's engine or converted data)
-static char g_work[MAX_PATH];     // %LOCALAPPDATA%\HL64Builder\work
+static char g_work[MAX_PATH];     // <temp>\work
 static char g_exedir[MAX_PATH];
 
-static void pause_exit(int code)
+static HWND g_wnd, g_log, g_prog, g_status;
+static volatile LONG g_failed;
+static void log_text(const char *s);
+static void logf_(const char *fmt, ...)
 {
-    printf("\nPress Enter to close this window.");
-    fflush(stdout);
-    getchar();
-    exit(code);
+    char b[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(b, sizeof b, fmt, ap);
+    va_end(ap);
+    log_text(b);
 }
-
+// a failure ends the build thread: the message goes to the log and a box
 static void fail(const char *fmt, const char *arg)
 {
-    printf("\nERROR: ");
-    printf(fmt, arg ? arg : "");
-    printf("\n");
-    pause_exit(1);
+    char b[1024];
+    snprintf(b, sizeof b, fmt, arg ? arg : "");
+    logf_("\r\nERROR: %s\r\n", b);
+    InterlockedExchange(&g_failed, 1);
+    PostMessageA(g_wnd, WM_APP + 2, 0, 0);
+    ExitThread(1);
 }
 
 static int file_exists(const char *p)
@@ -112,7 +124,7 @@ static void extract_payload(void)
     uint32_t count;
     if (!read_exact(h, hdr, 8) || memcmp(hdr, "HL64PAK1", 8) || !read_exact(h, &count, 4)) fail("damaged payload%s", "");
 
-    printf("Unpacking the builder (first run only) to\n  %s\n", g_root);
+    logf_("Unpacking the builder's tools (first run only) to\r\n  %s\r\n", g_root);
     for (uint32_t i = 0; i < count; i++) {
         uint16_t nl;
         char name[512];
@@ -136,10 +148,10 @@ static void extract_payload(void)
         CloseHandle(o);
         free(src);
         free(dst);
-        if ((i & 63) == 0) { printf("  %u / %u files\r", i, count); fflush(stdout); }
+        if ((i & 63) == 0) SendMessageA(g_prog, PBM_SETPOS, (WPARAM)(i * 10 / (count ? count : 1)), 0);
     }
     CloseHandle(h);
-    printf("  %u / %u files\n", count, count);
+    logf_("  %u files\r\n", count);
     FILE *m = fopen(marker, "wb");
     if (m) fclose(m);
 }
@@ -228,22 +240,45 @@ static const char *fwd(const char *p)
 }
 
 // ------------------------------------------------------------------ running the steps
+// a step's output (stdout and stderr) comes back through a pipe into the window's log
 static int run(const char *cmdline)
 {
-    // the child writes to this window (or wherever our output is redirected)
+    SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
+    HANDLE rd, wr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) return -1;
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
     STARTUPINFOA si = {sizeof si};
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdInput = NULL;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
     PROCESS_INFORMATION pi;
     char *cl = _strdup(cmdline);
-    fflush(stdout);
-    if (!CreateProcessA(NULL, cl, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
-        printf("could not start: %s\n", cmdline);
-        free(cl);
+    if (!CreateProcessA(NULL, cl, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        logf_("could not start: %s\r\n", cmdline);
+        free(cl); CloseHandle(rd); CloseHandle(wr);
         return -1;
     }
+    CloseHandle(wr);
+    char buf[1024], line[4096];
+    int ln = 0;
+    DWORD got;
+    while (ReadFile(rd, buf, sizeof buf, &got, NULL) && got) {
+        for (DWORD i = 0; i < got; i++) {
+            char c = buf[i];
+            if (c == '\r') continue;               // progress counters rewrite their line: keep them as lines
+            line[ln++] = c;
+            if (c == '\n' || ln >= (int)sizeof line - 3) {
+                if (line[ln - 1] == '\n') { line[ln - 1] = '\r'; line[ln++] = '\n'; }
+                line[ln] = 0;
+                log_text(line);
+                ln = 0;
+            }
+        }
+    }
+    if (ln) { line[ln] = 0; log_text(line); log_text("\r\n"); }
+    CloseHandle(rd);
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(pi.hProcess, &code);
@@ -268,54 +303,46 @@ static int read_text(const char *path, char *buf, int max)
     return 1;
 }
 
-int main(int argc, char **argv)
-{
-    SetConsoleTitleA("Half-Life 64 ROM builder");
-    printf("Half-Life 64 ROM builder (%s)\n", HL64_VERSION);
-    printf("Builds hl64.z64 from your own copy of Half-Life. No game data is included in this program.\n\n");
+// ------------------------------------------------------------------ the build (a worker thread)
+static char g_valve[MAX_PATH], g_outdir[MAX_PATH], g_tempdir[MAX_PATH], g_rom[MAX_PATH];
+static int g_clean;
 
-    GetModuleFileNameA(NULL, g_exedir, sizeof g_exedir);
-    char *sl = strrchr(g_exedir, '\\');
-    if (sl) *sl = 0;
-    char appdata[MAX_PATH];
-    if (SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appdata) != S_OK) snprintf(appdata, sizeof appdata, "%s", g_exedir);
-    snprintf(g_root, sizeof g_root, "%s\\HL64Builder\\%s", appdata, HL64_VERSION);
-    snprintf(g_work, sizeof g_work, "%s\\HL64Builder\\work", appdata);
+static void set_status(const char *s) { SetWindowTextA(g_status, s); }
+static void set_progress(int pct, int marquee)
+{
+    LONG st = GetWindowLongA(g_prog, GWL_STYLE);
+    if (marquee && !(st & PBS_MARQUEE)) { SetWindowLongA(g_prog, GWL_STYLE, st | PBS_MARQUEE); SendMessageA(g_prog, PBM_SETMARQUEE, TRUE, 40); }
+    if (!marquee && (st & PBS_MARQUEE)) { SendMessageA(g_prog, PBM_SETMARQUEE, FALSE, 0); SetWindowLongA(g_prog, GWL_STYLE, st & ~PBS_MARQUEE); }
+    if (!marquee) SendMessageA(g_prog, PBM_SETPOS, pct, 0);
+}
+
+static DWORD WINAPI build_thread(LPVOID unused)
+{
+    (void)unused;
+    snprintf(g_root, sizeof g_root, "%s\\%s", g_tempdir, HL64_VERSION);
+    snprintf(g_work, sizeof g_work, "%s\\work", g_tempdir);
     make_dirs_for(g_root);
+    CreateDirectoryA(g_tempdir, NULL);
     CreateDirectoryA(g_root, NULL);
     CreateDirectoryA(g_work, NULL);
+    if (!dir_exists(g_work)) fail("cannot create the temporary folder %s", g_work);
+    make_dirs_for(g_outdir);
+    CreateDirectoryA(g_outdir, NULL);
+    if (!dir_exists(g_outdir)) fail("cannot create the output folder %s", g_outdir);
 
-    int clean = 0;
-    const char *given = NULL;
-    for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--clean")) clean = 1;
-        else given = argv[i];
-    }
-
+    set_status("Unpacking the builder's tools...");
+    set_progress(0, 0);
     extract_payload();
+    set_progress(10, 0);
 
-    // 1. Half-Life
-    char valve[MAX_PATH] = "";
-    if (given && !resolve_valve(given, valve)) printf("\"%s\" is not a Half-Life folder (no valve\\maps\\c1a0.bsp).\n", given);
-    if (!valve[0] && find_steam_halflife(valve)) printf("Found Half-Life (Steam): %s\n", valve);
-    while (!valve[0]) {
-        char line[MAX_PATH * 2];
-        printf("\nHalf-Life was not found automatically.\n"
-               "Drag your Half-Life folder (the one that contains \"valve\") into this window, then press Enter:\n> ");
-        fflush(stdout);
-        if (!fgets(line, sizeof line, stdin)) pause_exit(1);
-        if (!resolve_valve(line, valve)) printf("That folder doesn't contain valve\\maps\\c1a0.bsp.\n");
-    }
-    printf("Using: %s\n\n", valve);
-
-    // 2. convert the game data (reused when the last run finished for the same install and version)
+    // convert the game data (reused when the last run finished for the same install and version)
     char fsdir[MAX_PATH], stamp[MAX_PATH], want[MAX_PATH * 2], have[MAX_PATH * 2] = "";
     snprintf(fsdir, sizeof fsdir, "%s\\filesystem", g_work);
     snprintf(stamp, sizeof stamp, "%s\\converted.txt", g_work);
-    snprintf(want, sizeof want, "%s\n%s\n", HL64_VERSION, valve);
-    int reuse = !clean && read_text(stamp, have, sizeof have) && !strcmp(have, want) && dir_exists(fsdir);
+    snprintf(want, sizeof want, "%s\n%s\n", HL64_VERSION, g_valve);
+    int reuse = !g_clean && read_text(stamp, have, sizeof have) && !strcmp(have, want) && dir_exists(fsdir);
     if (reuse) {
-        printf("[1/3] Game data already converted by a previous run (use --clean to redo it).\n");
+        logf_("[1/3] Game data already converted by a previous run (tick \"Convert everything again\" to redo it).\r\n");
     } else {
         DeleteFileA(stamp);
         SYSTEM_INFO si;
@@ -323,8 +350,10 @@ int main(int argc, char **argv)
         int jobs = (int)si.dwNumberOfProcessors;
         if (jobs < 1) jobs = 1;
         if (jobs > 12) jobs = 12;
-        printf("[1/3] Converting maps, textures, models, sprites, sounds and music.\n"
-               "      This takes a while (about 30-90 minutes, most of it compressing the maps).\n\n");
+        set_status("Converting the game data (about 30-90 minutes)...");
+        set_progress(0, 1);
+        logf_("[1/3] Converting maps, textures, models, sprites, sounds and music.\r\n"
+              "      This takes a while (about 30-90 minutes, most of it compressing the maps).\r\n\r\n");
         char path[8192], env[8192];
         GetEnvironmentVariableA("PATH", path, sizeof path);
         snprintf(env, sizeof env, "%s\\tools;%s\\python;%s", g_root, g_root, path);
@@ -335,19 +364,23 @@ int main(int argc, char **argv)
         SetEnvironmentVariableA("PYTHONUNBUFFERED", "1");
         char cmd[MAX_PATH * 6];
         snprintf(cmd, sizeof cmd, "\"%s\\python\\python.exe\" \"%s\\hl64\\tools\\build_assets.py\" \"%s\" \"%s\" -j %d",
-                 g_root, g_root, valve, fsdir, jobs);
+                 g_root, g_root, g_valve, fsdir, jobs);
         if (run(cmd) != 0) fail("converting the game data failed (see the messages above).%s", "");
         write_text(stamp, want);
     }
 
-    // 3. the N64 filesystem and the ROM
-    printf("\n[2/3] Packing the N64 filesystem\n");
-    char cmd[MAX_PATH * 8], dfs[MAX_PATH], tmp[MAX_PATH], rom[MAX_PATH];
+    // the N64 filesystem and the ROM
+    set_status("Packing the N64 filesystem...");
+    set_progress(85, 0);
+    logf_("\r\n[2/3] Packing the N64 filesystem\r\n");
+    char cmd[MAX_PATH * 8], dfs[MAX_PATH], tmp[MAX_PATH];
     snprintf(dfs, sizeof dfs, "%s\\hl64.dfs", g_work);
     snprintf(cmd, sizeof cmd, "\"%s\\tools\\mkdfs.exe\" \"%s\" \"%s\"", g_root, fwd(dfs), fwd(fsdir));
     if (run(cmd) != 0) fail("mkdfs failed%s", "");
 
-    printf("[3/3] Writing the ROM\n");
+    set_status("Writing the ROM...");
+    set_progress(95, 0);
+    logf_("[3/3] Writing the ROM\r\n");
     snprintf(tmp, sizeof tmp, "%s\\hl64.z64.tmp", g_work);
     DeleteFileA(tmp);
     snprintf(cmd, sizeof cmd,
@@ -357,16 +390,281 @@ int main(int argc, char **argv)
     if (run(cmd) != 0) fail("n64tool failed%s", "");
     snprintf(cmd, sizeof cmd, "\"%s\\tools\\ed64romconfig.exe\" --savetype sram256k --expansionpak unspecified --regionfree \"%s\"", g_root, fwd(tmp));
     if (run(cmd) != 0) fail("ed64romconfig failed%s", "");
-    snprintf(rom, sizeof rom, "%s\\hl64.z64", g_exedir);
-    if (!MoveFileExA(tmp, rom, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
-        snprintf(rom, sizeof rom, "%s\\hl64.z64", g_work);
-        MoveFileExA(tmp, rom, MOVEFILE_REPLACE_EXISTING);
+    snprintf(g_rom, sizeof g_rom, "%s\\hl64.z64", g_outdir);
+    if (!MoveFileExA(tmp, g_rom, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED)) {
+        snprintf(g_rom, sizeof g_rom, "%s\\hl64.z64", g_work);
+        MoveFileExA(tmp, g_rom, MOVEFILE_REPLACE_EXISTING);
+        logf_("Couldn't write to the output folder: the ROM was left in the temporary folder.\r\n");
     }
     WIN32_FILE_ATTRIBUTE_DATA fa;
-    double mb = GetFileAttributesExA(rom, GetFileExInfoStandard, &fa) ? (fa.nFileSizeLow + (double)fa.nFileSizeHigh * 4294967296.0) / 1048576.0 : 0;
-    printf("\nDone: %s (%.1f MB)\n", rom, mb);
-    printf("Play it in ares, gopher64 or simple64 with the Expansion Pak on and the save type set to SRAM,\n"
-           "or copy it to a 64 MB-capable flashcart. Keep it to yourself: it contains Half-Life's game data.\n");
-    pause_exit(0);
+    double mb = GetFileAttributesExA(g_rom, GetFileExInfoStandard, &fa) ? (fa.nFileSizeLow + (double)fa.nFileSizeHigh * 4294967296.0) / 1048576.0 : 0;
+    logf_("\r\nDone: %s (%.1f MB)\r\n", g_rom, mb);
+    logf_("Play it in ares, gopher64 or simple64 with the Expansion Pak on and the save type set to SRAM,\r\n"
+          "or copy it to a 64 MB-capable flashcart. Keep it to yourself: it contains Half-Life's game data.\r\n");
+    set_progress(100, 0);
+    PostMessageA(g_wnd, WM_APP + 1, 0, 0);
+    return 0;
+}
+
+// ------------------------------------------------------------------ the window
+enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG };
+static HWND h_valve, h_out, h_temp_on, h_temp, h_temp_br, h_clean, h_build, h_open, h_valve_br, h_out_br;
+static HFONT g_font, g_mono;
+static char g_default_temp[MAX_PATH], g_settings[MAX_PATH];
+static HANDLE g_thread;
+
+// the log: appended from the build thread (SendMessage hands it to the window's thread)
+static void log_text(const char *s)
+{
+    if (!g_log) return;
+    int n = GetWindowTextLengthA(g_log);
+    if (n > 900000) { SendMessageA(g_log, EM_SETSEL, 0, 300000); SendMessageA(g_log, EM_REPLACESEL, FALSE, (LPARAM)""); n = GetWindowTextLengthA(g_log); }
+    SendMessageA(g_log, EM_SETSEL, n, n);
+    SendMessageA(g_log, EM_REPLACESEL, FALSE, (LPARAM)s);
+}
+
+static void get_text(HWND h, char *out, int n)
+{
+    GetWindowTextA(h, out, n);
+    size_t l = strlen(out);   // trim spaces, quotes and trailing slashes
+    while (l && (out[l - 1] == ' ' || out[l - 1] == '"' || out[l - 1] == '\\' || out[l - 1] == '/')) out[--l] = 0;
+    char *p = out;
+    while (*p == ' ' || *p == '"') p++;
+    if (p != out) memmove(out, p, strlen(p) + 1);
+}
+
+static int CALLBACK browse_cb(HWND hwnd, UINT msg, LPARAM lp, LPARAM data)
+{
+    (void)lp;
+    if (msg == BFFM_INITIALIZED && data && ((const char *)data)[0]) SendMessageA(hwnd, BFFM_SETSELECTIONA, TRUE, data);
+    return 0;
+}
+static void browse(HWND edit, const char *title)
+{
+    char cur[MAX_PATH];
+    get_text(edit, cur, sizeof cur);
+    BROWSEINFOA bi = {0};
+    bi.hwndOwner = g_wnd;
+    bi.lpszTitle = title;
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
+    bi.lpfn = browse_cb;
+    bi.lParam = (LPARAM)cur;
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderA(&bi);
+    if (!pidl) return;
+    char path[MAX_PATH];
+    if (SHGetPathFromIDListA(pidl, path)) SetWindowTextA(edit, path);
+    CoTaskMemFree(pidl);
+}
+
+static void save_settings(void)
+{
+    char v[MAX_PATH], o[MAX_PATH], t[MAX_PATH];
+    get_text(h_valve, v, sizeof v); get_text(h_out, o, sizeof o); get_text(h_temp, t, sizeof t);
+    WritePrivateProfileStringA("builder", "halflife", v, g_settings);
+    WritePrivateProfileStringA("builder", "output", o, g_settings);
+    WritePrivateProfileStringA("builder", "temp", t, g_settings);
+    WritePrivateProfileStringA("builder", "custom_temp", SendMessageA(h_temp_on, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_settings);
+}
+
+static void set_busy(int busy)
+{
+    EnableWindow(h_build, !busy);
+    EnableWindow(h_valve, !busy); EnableWindow(h_valve_br, !busy);
+    EnableWindow(h_out, !busy); EnableWindow(h_out_br, !busy);
+    EnableWindow(h_temp_on, !busy); EnableWindow(h_clean, !busy);
+    int custom = SendMessageA(h_temp_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(h_temp, !busy && custom); EnableWindow(h_temp_br, !busy && custom);
+    SetWindowTextA(h_build, busy ? "Building..." : "Build ROM");
+}
+
+static void start_build(void)
+{
+    char v[MAX_PATH];
+    get_text(h_valve, v, sizeof v);
+    if (!resolve_valve(v, g_valve)) {
+        MessageBoxA(g_wnd, "That folder isn't a Half-Life install: it needs valve\\maps\\c1a0.bsp.\n\n"
+                    "Choose the Half-Life folder (the one that contains \"valve\").", "Half-Life 64 ROM builder", MB_ICONWARNING);
+        return;
+    }
+    get_text(h_out, g_outdir, sizeof g_outdir);
+    if (!g_outdir[0]) {
+        GetModuleFileNameA(NULL, g_outdir, sizeof g_outdir);
+        char *sl = strrchr(g_outdir, '\\'); if (sl) *sl = 0;
+    }
+    if (SendMessageA(h_temp_on, BM_GETCHECK, 0, 0) == BST_CHECKED) get_text(h_temp, g_tempdir, sizeof g_tempdir);
+    else g_tempdir[0] = 0;
+    if (!g_tempdir[0]) snprintf(g_tempdir, sizeof g_tempdir, "%s", g_default_temp);
+    g_clean = SendMessageA(h_clean, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    save_settings();
+    SetWindowTextA(g_log, "");
+    logf_("Half-Life 64 ROM builder (%s)\r\nHalf-Life: %s\r\nROM to: %s\r\nTemporary files: %s\r\n\r\n", HL64_VERSION, g_valve, g_outdir, g_tempdir);
+    g_failed = 0;
+    ShowWindow(h_open, SW_HIDE);
+    set_busy(1);
+    g_thread = CreateThread(NULL, 0, build_thread, NULL, 0, NULL);
+}
+
+static HWND mk(const char *cls, const char *text, DWORD style, int x, int y, int w, int h, int id)
+{
+    HWND c = CreateWindowExA(!strcmp(cls, "EDIT") ? WS_EX_CLIENTEDGE : 0, cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, g_wnd, (HMENU)(INT_PTR)id, GetModuleHandleA(NULL), NULL);
+    SendMessageA(c, WM_SETFONT, (WPARAM)g_font, TRUE);
+    return c;
+}
+
+static void layout(int W, int H)
+{
+    int bw = 90, m = 12, ew = W - 2 * m - bw - 8;
+    MoveWindow(h_valve, m, 54, ew, 24, TRUE);   MoveWindow(h_valve_br, W - m - bw, 53, bw, 26, TRUE);
+    MoveWindow(h_out, m, 108, ew, 24, TRUE);    MoveWindow(h_out_br, W - m - bw, 107, bw, 26, TRUE);
+    MoveWindow(h_temp, m, 162, ew, 24, TRUE);   MoveWindow(h_temp_br, W - m - bw, 161, bw, 26, TRUE);
+    MoveWindow(h_clean, m, 194, W - 2 * m - 300, 22, TRUE);
+    MoveWindow(h_open, W - m - 280, 192, 140, 28, TRUE);
+    MoveWindow(h_build, W - m - 130, 192, 130, 28, TRUE);
+    MoveWindow(g_prog, m, 230, W - 2 * m, 18, TRUE);
+    MoveWindow(g_status, m, 252, W - 2 * m, 20, TRUE);
+    MoveWindow(g_log, m, 276, W - 2 * m, H - 276 - m, TRUE);
+}
+
+static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_CREATE: {
+        g_wnd = hwnd;
+        mk("STATIC", "Builds hl64.z64 from your own copy of Half-Life. No game data is included in this program.", SS_LEFT, 12, 10, 600, 18, 0);
+        mk("STATIC", "Half-Life folder (the one that contains \"valve\"):", SS_LEFT, 12, 34, 500, 18, 0);
+        h_valve = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_VALVE);
+        h_valve_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_VALVE_BR);
+        mk("STATIC", "Save the ROM in:", SS_LEFT, 12, 88, 500, 18, 0);
+        h_out = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_OUT);
+        h_out_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_OUT_BR);
+        h_temp_on = mk("BUTTON", "Keep the temporary files somewhere else (optional; they take about 1.5 GB):", BS_AUTOCHECKBOX, 12, 138, 600, 22, ID_TEMP_ON);
+        h_temp = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_TEMP);
+        h_temp_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_TEMP_BR);
+        h_clean = mk("BUTTON", "Convert everything again (don't reuse the last run's game data)", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_CLEAN);
+        h_open = mk("BUTTON", "Show the ROM", BS_PUSHBUTTON, 0, 0, 10, 10, ID_OPEN);
+        ShowWindow(h_open, SW_HIDE);
+        h_build = mk("BUTTON", "Build ROM", BS_DEFPUSHBUTTON, 0, 0, 10, 10, ID_BUILD);
+        g_prog = CreateWindowExA(0, PROGRESS_CLASSA, "", WS_CHILD | WS_VISIBLE | PBS_SMOOTH, 0, 0, 10, 10, hwnd, NULL, GetModuleHandleA(NULL), NULL);
+        SendMessageA(g_prog, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+        g_status = mk("STATIC", "Ready.", SS_LEFT | SS_ENDELLIPSIS, 0, 0, 10, 10, 0);
+        g_log = mk("EDIT", "", ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL, 0, 0, 10, 10, ID_LOG);
+        SendMessageA(g_log, WM_SETFONT, (WPARAM)g_mono, TRUE);
+        SendMessageA(g_log, EM_SETLIMITTEXT, 0, 0);
+        return 0;
+    }
+    case WM_SIZE: layout(LOWORD(lp), HIWORD(lp)); return 0;
+    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 640; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 440; return 0;
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)lp == g_log) { SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW)); return (LRESULT)GetSysColorBrush(COLOR_WINDOW); }
+        break;
+    case WM_COMMAND:
+        switch (LOWORD(wp)) {
+        case ID_VALVE_BR: browse(h_valve, "Choose your Half-Life folder (the one that contains \"valve\")"); return 0;
+        case ID_OUT_BR: browse(h_out, "Choose where to save hl64.z64"); return 0;
+        case ID_TEMP_BR: browse(h_temp, "Choose where to keep the temporary files"); return 0;
+        case ID_TEMP_ON: set_busy(0); return 0;
+        case ID_BUILD: start_build(); return 0;
+        case ID_OPEN: {
+            char args[MAX_PATH + 16];
+            snprintf(args, sizeof args, "/select,\"%s\"", g_rom);
+            ShellExecuteA(hwnd, "open", "explorer.exe", args, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
+        }
+        break;
+    case WM_APP + 1:   // finished
+        set_busy(0);
+        set_status("Done: the ROM is ready.");
+        ShowWindow(h_open, SW_SHOW);
+        FlashWindow(hwnd, TRUE);
+        if (g_thread) { CloseHandle(g_thread); g_thread = NULL; }
+        return 0;
+    case WM_APP + 2:   // failed
+        set_busy(0);
+        set_progress(0, 0);
+        set_status("The build failed: see the messages below.");
+        FlashWindow(hwnd, TRUE);
+        if (g_thread) { CloseHandle(g_thread); g_thread = NULL; }
+        MessageBoxA(hwnd, "The build failed. The messages in the window say where.", "Half-Life 64 ROM builder", MB_ICONERROR);
+        return 0;
+    case WM_CLOSE:
+        if (g_thread && MessageBoxA(hwnd, "A build is still running. Stop it and close?", "Half-Life 64 ROM builder", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+        save_settings();
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
+{
+    (void)prev; (void)cmd;
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
+    InitCommonControlsEx(&icc);
+    SetProcessDPIAware();
+
+    GetModuleFileNameA(NULL, g_exedir, sizeof g_exedir);
+    char *sl = strrchr(g_exedir, '\\');
+    if (sl) *sl = 0;
+    char appdata[MAX_PATH];
+    if (SHGetFolderPathA(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, appdata) != S_OK) snprintf(appdata, sizeof appdata, "%s", g_exedir);
+    snprintf(g_default_temp, sizeof g_default_temp, "%s\\HL64Builder", appdata);
+    CreateDirectoryA(g_default_temp, NULL);
+    snprintf(g_settings, sizeof g_settings, "%s\\settings.ini", g_default_temp);
+
+    NONCLIENTMETRICSA ncm = {sizeof ncm};
+    SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
+    g_font = CreateFontIndirectA(&ncm.lfMessageFont);
+    g_mono = CreateFontA(-13, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, FIXED_PITCH, "Consolas");
+
+    WNDCLASSA wc = {0};
+    wc.lpfnWndProc = wndproc;
+    wc.hInstance = inst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconA(inst, MAKEINTRESOURCEA(1));
+    if (!wc.hIcon) wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+    wc.lpszClassName = "HL64Builder";
+    RegisterClassA(&wc);
+    char title[96];
+    snprintf(title, sizeof title, "Half-Life 64 ROM builder (%s)", HL64_VERSION);
+    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 600, NULL, NULL, inst, NULL);
+
+    // what was chosen last time; a folder on the command line (or dropped on the .exe) wins
+    char v[MAX_PATH] = "", o[MAX_PATH] = "", t[MAX_PATH] = "", on[8] = "0";
+    GetPrivateProfileStringA("builder", "halflife", "", v, sizeof v, g_settings);
+    GetPrivateProfileStringA("builder", "output", "", o, sizeof o, g_settings);
+    GetPrivateProfileStringA("builder", "temp", "", t, sizeof t, g_settings);
+    GetPrivateProfileStringA("builder", "custom_temp", "0", on, sizeof on, g_settings);
+    int argc = 0, autostart = 0;
+    LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    for (int i = 1; wargv && i < argc; i++) {
+        char a[MAX_PATH];
+        WideCharToMultiByte(CP_ACP, 0, wargv[i], -1, a, sizeof a, NULL, NULL);
+        if (!strcmp(a, "--clean")) SendMessageA(h_clean, BM_SETCHECK, BST_CHECKED, 0);
+        else if (!strcmp(a, "--build")) autostart = 1;   // start right away (scripts, tests)
+        else snprintf(v, sizeof v, "%s", a);
+    }
+    if (wargv) LocalFree(wargv);
+    char found[MAX_PATH];
+    if (!v[0] || !resolve_valve(v, found)) { if (find_steam_halflife(found)) snprintf(v, sizeof v, "%s", found); }
+    SetWindowTextA(h_valve, v);
+    SetWindowTextA(h_out, o[0] ? o : g_exedir);
+    SetWindowTextA(h_temp, t[0] ? t : g_default_temp);
+    SendMessageA(h_temp_on, BM_SETCHECK, on[0] == '1' ? BST_CHECKED : BST_UNCHECKED, 0);
+    set_busy(0);
+    logf_("Choose your Half-Life folder and where the ROM goes, then press Build ROM.\r\n");
+    if (v[0]) logf_("Half-Life found: %s\r\n", v);
+    else logf_("Half-Life wasn't found automatically: use Browse... to pick its folder.\r\n");
+
+    ShowWindow(w, show);
+    UpdateWindow(w);
+    if (autostart) PostMessageA(w, WM_COMMAND, ID_BUILD, 0);
+    MSG m;
+    while (GetMessageA(&m, NULL, 0, 0)) {
+        if (!IsDialogMessageA(w, &m)) { TranslateMessage(&m); DispatchMessageA(&m); }
+    }
     return 0;
 }

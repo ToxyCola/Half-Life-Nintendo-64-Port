@@ -122,6 +122,31 @@ void game_effect_tracer(const float *from, const float *to)
     if (rand() % 3) return;   // tracers on some bullets (iTracerFreq)
     add_beam(from, to, 255, 220, 120, 0.06f, 1);
 }
+// a vortigaunt bolt: a wide, long-lived lightning beam with a jagged white core (CISlave::ZapBeam)
+void game_effect_zap(const float *a, const float *b, int r, int g, int bl)
+{
+    if (fx_spr[0]) {
+        beam_tex_next = 1; add_beam(a, b, r, g, bl, 0.35f, 24); add_beam(a, b, 220, 255, 200, 0.2f, 10); beam_tex_next = 0;
+    } else {
+        float prev[3];
+        memcpy(prev, a, 12);
+        for (int s = 1; s <= 6; s++) {
+            float t = s / 6.0f, p[3];
+            for (int k = 0; k < 3; k++) p[k] = a[k] + (b[k] - a[k]) * t + (s < 6 ? ((rand() % 200) - 100) / 100.0f * 12 : 0);
+            add_beam(prev, p, r, g, bl, 0.35f, 4);
+            memcpy(prev, p, 12);
+        }
+    }
+}
+// the charge-up arcs around a vortigaunt's hands before it fires (CISlave::ArmBeam)
+void game_effect_armbeam(const float *hand, int r, int g, int bl)
+{
+    float end[3] = {hand[0] + (rand() % 96 - 48), hand[1] + (rand() % 96 - 48), hand[2] + (rand() % 64 - 40)};
+    gtrace_t tr;
+    game_trace(hand, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+    if (fx_spr[0]) { beam_tex_next = 1; add_beam(hand, tr.endpos, r, g, bl, 0.1f, 8); beam_tex_next = 0; }
+    else add_beam(hand, tr.endpos, r, g, bl, 0.1f, 2);
+}
 void game_effect_beam(const float *from, const float *to, int r, int g, int b) { game_effect_lightning(from, to, r, g, b); game_effect_particles(to, 6, 80, r, g, b, 0.3f, 0); }
 void game_effect_beam_plain(const float *a, const float *b, int r, int g, int bl) { beam_tex_next = 2; add_beam(a, b, r, g, bl, 0.12f, 6); beam_tex_next = 0; }
 void game_effect_debris(const float *origin, int material) { (void)origin; (void)material; }
@@ -273,6 +298,13 @@ void game_effect_explosion(const float *origin, float magnitude)
         float o[3] = {origin[0], origin[1], origin[2] + rad * 0.3f};
         add_bill(0, o, rad, 0.75f, 255, 255, 255);
         game_effect_particles(origin, 12, 260, 255, 200, 90, 0.8f, 500);
+        {   // CGrenade::Explode: a scorch mark on what is under (or nearest below) it
+            extern void game_decal(const float *p, const float *n, int tex, float size, int ent, uint8_t r, uint8_t g, uint8_t b);
+            float a[3] = {origin[0], origin[1], origin[2] + 8}, b[3] = {origin[0], origin[1], origin[2] - 64};
+            gtrace_t tr;
+            game_trace(a, b, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+            if (tr.fraction < 1 && !tr.startsolid) game_decal(tr.endpos, tr.normal, 10 + rand() % 3, rad < 80 ? 64 : 96, tr.ent, 0, 0, 0);
+        }
         return;
     }
     for (int i = 0; i < 8; i++) if (flashes[i].end < wtime) {
@@ -346,6 +378,7 @@ typedef struct {
     int owner;          // 0 player, n+1 npc
     int target;         // for homing
     bool stuck;
+    float bounce_t;     // when the last bounce sound played
     float beam_end[3];
     studio_t *model;
     float frame;
@@ -649,11 +682,19 @@ static void projs_think(float dt)
         default: {
             // grenades and satchels bounce (CGrenade::BounceTouch)
             float dn = p->v[0] * tr.normal[0] + p->v[1] * tr.normal[1] + p->v[2] * tr.normal[2];
+            if (tr.startsolid) {
+                // inside a brush (fired point-blank into a wall, or squeezed by a mover): stop dead
+                // instead of "bouncing" off the inside every frame, which replayed the hit sound forever
+                p->v[0] = p->v[1] = p->v[2] = 0;
+                if (p->kind == P_SATCHEL) p->stuck = true;
+                break;
+            }
             for (int k = 0; k < 3; k++) p->v[k] = (p->v[k] - 2 * dn * tr.normal[k]) * 0.6f;
             if (tr.normal[2] > 0.7f && sp < 60) {
                 p->v[0] = p->v[1] = p->v[2] = 0;
                 if (p->kind == P_SATCHEL) p->stuck = true;
-            } else if (sp > 80) {
+            } else if (sp > 80 && dn < -40 && wtime - p->bounce_t > 0.2f) {
+                p->bounce_t = wtime;
                 char s[32];
                 snprintf(s, sizeof(s), p->kind == P_SATCHEL ? "weapons/g_bounce%d.wav" : "weapons/grenade_hit%d.wav", 1 + rand() % 3);
                 snd_emit(-1, CHAN_VOICE, s, 0.25f, ATTN_NORM, PITCH_NORM, p->o);
@@ -672,8 +713,10 @@ static void satchels_detonate(void)
     satchel_out = 0;
 }
 
+static void decals_clear(void);
 void weapons_clear_world(void)
 {
+    decals_clear();
     memset(projs, 0, sizeof(projs));
     memset(beams, 0, sizeof(beams));
     memset(flashes, 0, sizeof(flashes));
@@ -772,7 +815,7 @@ static float vseq_len(const char *name)
 }
 
 // is there a free block of this size? (volatile: the compiler may not elide the probe)
-static bool mem_available(int bytes)
+static __attribute__((unused)) bool mem_available(int bytes)
 {
     void *volatile p = malloc(bytes);
     if (!p) return false;
@@ -807,8 +850,10 @@ static void deploy(int id)
     release_vmodel();
     // a view model needs up to ~250 KB: on the biggest maps there may not be room, and then
     // the weapon is used without its first-person model rather than running out of memory
-    if (mem_available(320 * 1024)) vmodel = studio_get(vm);
-    else debugf("weapons: no room for %s\n", vm);
+    // (studio_get checks there is room for it; if not, weapons_think keeps trying: the gun in
+    // hand must always be drawn)
+    vmodel = studio_get(vm);
+    if (!vmodel) debugf("weapons: no room for %s yet\n", vm);
     vbody = 0;
     play_vseq(w->s_draw);
     next_attack = next_attack2 = wtime + 0.5f;
@@ -915,6 +960,148 @@ static void autoaim(const float *eye, float *dir)
     if (bi >= 0) memcpy(dir, bv, 12);
 }
 
+// ------------------------------------------------------------------ decals (decals.wad)
+// bullet holes, scorch marks and blood on the walls (UTIL_DecalTrace / R_DecalShoot): a quad on
+// the surface, its texture's coverage blended in the decal's colour; a ring of the most recent
+enum { DC_SHOT = 0, DC_BIGSHOT = 5, DC_SCORCH = 10, DC_BLOOD = 13, DC_YBLOOD = 21, DC_NUM = 27 };
+static sprite_t *dc_spr[DC_NUM];
+static bool dc_loaded;
+#define MAX_DECALS 48
+typedef struct { float c[4][3]; float eorg[3]; int16_t ent; uint8_t tex, r, g, b, a; } decal_t;
+static decal_t decals[MAX_DECALS];
+static int decal_next;
+static void decals_load(void)
+{
+    if (dc_loaded) return;
+    dc_loaded = true;
+    static const struct { const char *n; int first, cnt; } set[5] = {{"shot", DC_SHOT, 5}, {"bigshot", DC_BIGSHOT, 5},
+        {"scorch", DC_SCORCH, 3}, {"blood", DC_BLOOD, 8}, {"yblood", DC_YBLOOD, 6}};
+    char path[48];
+    for (int k = 0; k < 5; k++)
+        for (int i = 0; i < set[k].cnt; i++) {
+            snprintf(path, sizeof(path), "rom:/ui/dc_%s%d.sprite", set[k].n, i);
+            FILE *f = fopen(path, "rb");
+            if (f) { fclose(f); dc_spr[set[k].first + i] = sprite_load(path); }
+        }
+}
+// a decal of world size `size` centred on p, on the surface with normal n (ent: the brush it is on)
+void game_decal(const float *p, const float *n, int tex, float size, int ent, uint8_t r, uint8_t g, uint8_t b)
+{
+    decals_load();
+    if (tex < 0 || tex >= DC_NUM || !dc_spr[tex]) return;
+#ifdef DECALDBG
+    debugf("decal %d at %.0f %.0f %.0f n %.2f %.2f %.2f\n", tex, p[0], p[1], p[2], n[0], n[1], n[2]);
+#endif
+    decal_t *d = &decals[decal_next];
+    decal_next = (decal_next + 1) % MAX_DECALS;
+    // two axes on the surface, turned at random
+    float u[3], v[3];
+    float up[3] = {0, 0, 1};
+    if (fabsf(n[2]) > 0.9f) { up[0] = 1; up[2] = 0; }
+    u[0] = up[1] * n[2] - up[2] * n[1]; u[1] = up[2] * n[0] - up[0] * n[2]; u[2] = up[0] * n[1] - up[1] * n[0];
+    float l = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (l < 0.001f) return;
+    for (int k = 0; k < 3; k++) u[k] /= l;
+    v[0] = n[1] * u[2] - n[2] * u[1]; v[1] = n[2] * u[0] - n[0] * u[2]; v[2] = n[0] * u[1] - n[1] * u[0];
+    float ang = (rand() % 628) / 100.0f, ca = cosf(ang), sa = sinf(ang);
+    float h = size * 0.5f;
+    for (int k = 0; k < 3; k++) {
+        float uu = u[k] * ca + v[k] * sa, vv = v[k] * ca - u[k] * sa;
+        float o = p[k] + n[k] * 0.8f;
+        d->c[0][k] = o - uu * h - vv * h;
+        d->c[1][k] = o + uu * h - vv * h;
+        d->c[2][k] = o - uu * h + vv * h;
+        d->c[3][k] = o + uu * h + vv * h;
+    }
+    d->tex = tex; d->r = r; d->g = g; d->b = b; d->a = 255;
+    d->ent = ent > 0 ? ent : 0;
+    if (d->ent) memcpy(d->eorg, entities[d->ent].origin, 12);
+}
+static void decals_clear(void) { memset(decals, 0, sizeof(decals)); decal_next = 0; }
+static bool project(const float *p, float *sx, float *sy);
+static float proj_z;
+static void decals_draw(void)
+{
+    int bound = -1;
+    bool mode = false;
+    for (int i = 0; i < MAX_DECALS; i++) {
+        decal_t *d = &decals[i];
+        if (!d->a || !dc_spr[d->tex]) continue;
+        float ofs[3] = {0, 0, 0};
+        if (d->ent) {   // on a door or a lift: moves with it; gone with it
+            entity_t *e = &entities[d->ent];
+            if (e->removed || !e->visible) continue;
+            for (int k = 0; k < 3; k++) ofs[k] = e->origin[k] - d->eorg[k];
+        }
+        float v[4][6];
+        bool ok = true;
+        sprite_t *sp = dc_spr[d->tex];
+        for (int q = 0; q < 4 && ok; q++) {
+            float w[3] = {d->c[q][0] + ofs[0], d->c[q][1] + ofs[1], d->c[q][2] + ofs[2]};
+            ok = project(w, &v[q][0], &v[q][1]);
+            v[q][2] = proj_z - 0.0006f;
+            v[q][3] = (q & 1) ? sp->width : 0;
+            v[q][4] = (q & 2) ? sp->height : 0;
+            v[q][5] = 1;
+        }
+        if (!ok) continue;
+        if (!mode) {
+            rdpq_set_mode_standard();
+            rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, PRIM), (TEX0, 0, PRIM, 0)));
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_zbuf(true, false);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            mode = true;
+        }
+        if (d->tex != bound) {
+            rdpq_sync_tile(); rdpq_sync_load();
+            rdpq_sprite_upload(TILE0, sp, &(rdpq_texparms_t){.s.repeats = 1, .t.repeats = 1});
+            bound = d->tex;
+        }
+        rdpq_set_prim_color(RGBA32(d->r, d->g, d->b, d->a));
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v[0], v[1], v[2]);
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v[1], v[3], v[2]);
+    }
+    if (mode) rdpq_set_mode_standard();
+}
+
+// what a shot hitting a surface sounds like (TEXTURETYPE_PlaySound) and, on computers, sparks
+static void impact_surface(const float *start, const gtrace_t *tr, const float *dir)
+{
+    extern char PM_FindTextureType(char *name);
+    extern const char *bsp_trace_texture(int modelindex, const float *offset, const float *start, const float *end);
+    float a[3], b[3], zero[3] = {0, 0, 0};
+    for (int k = 0; k < 3; k++) { a[k] = tr->endpos[k] - dir[k] * 4; b[k] = tr->endpos[k] + dir[k] * 8; }
+    (void)start;
+    const char *tn = NULL;
+    if (tr->ent > 0 && entities[tr->ent].model > 0) tn = bsp_trace_texture(entities[tr->ent].model, entities[tr->ent].origin, a, b);
+    else tn = bsp_trace_texture(0, zero, a, b);
+    char nm[17] = "";
+    if (tn) { strncpy(nm, tn, 16); nm[16] = 0; }
+    // the texture name without the animation / random-tiling prefix (PM_FindTextureType does the same)
+    char *base = nm;
+    if ((base[0] == '-' || base[0] == '+') && base[1]) base += 2;
+    if (base[0] == '{' || base[0] == '!' || base[0] == '~' || base[0] == ' ') base++;
+    char t = tn ? PM_FindTextureType(base) : 'C';
+    const char *s1 = "player/pl_step1.wav", *s2 = "player/pl_step2.wav", *s3 = NULL, *s4 = NULL;
+    float vol = 0.9f;
+    switch (t) {
+    case 'M': s1 = "player/pl_metal1.wav"; s2 = "player/pl_metal2.wav"; break;
+    case 'D': s1 = "player/pl_dirt1.wav"; s2 = "player/pl_dirt2.wav"; s3 = "player/pl_dirt3.wav"; break;
+    case 'V': s1 = s2 = "player/pl_duct1.wav"; vol = 0.5f; break;
+    case 'G': s1 = "player/pl_grate1.wav"; s2 = "player/pl_grate4.wav"; break;
+    case 'T': s1 = "player/pl_tile1.wav"; s2 = "player/pl_tile3.wav"; s3 = "player/pl_tile2.wav"; s4 = "player/pl_tile4.wav"; vol = 0.8f; break;
+    case 'S': s1 = "player/pl_slosh1.wav"; s2 = "player/pl_slosh3.wav"; s3 = "player/pl_slosh2.wav"; s4 = "player/pl_slosh4.wav"; break;
+    case 'W': s1 = "debris/wood1.wav"; s2 = "debris/wood2.wav"; s3 = "debris/wood3.wav"; break;
+    case 'Y': case 'P': s1 = "debris/glass1.wav"; s2 = "debris/glass2.wav"; s3 = "debris/glass3.wav"; vol = 0.8f; break;
+    default: break;
+    }
+    const char *pick[4] = {s1, s2, s3, s4};
+    int cnt = s4 ? 4 : s3 ? 3 : 2;
+    snd_emit(-1, CHAN_STATIC, pick[rand() % cnt], vol * 0.6f, ATTN_NORM, 96 + rand() % 16, tr->endpos);
+    if (t == 'P' && rand() % 2 == 0) game_effect_sparks(tr->endpos);   // shot computers spark
+}
+
 static void fire_bullets(int shots, float spread_x, float spread_y, float dmg, float range, int type)
 {
     float eye[3];
@@ -939,12 +1126,36 @@ static void fire_bullets(int shots, float spread_x, float spread_y, float dmg, f
         gtrace_t tr;
         game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
         if (tr.fraction >= 1) continue;
-        if (tr.npc >= 0) { { extern void npc_set_hitpoint(const float *p); npc_set_hitpoint(tr.endpos); } npc_take_damage(tr.npc, dmg, type, d, 0); }
-        else { if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, type, d); effect_sprite(tr.endpos, 1, 200, 200, 190, 0.5f); game_effect_particles(tr.endpos, 2, 70, 255, 220, 140, 0.3f, 300); }
-        if (tr.npc < 0 && rand() % 4 == 0) {
-            char sn[32];
-            snprintf(sn, sizeof(sn), "weapons/ric%d.wav", 1 + rand() % 5);
-            snd_emit(-1, CHAN_STATIC, sn, 0.5f, ATTN_NORM, PITCH_NORM, tr.endpos);
+        if (tr.npc >= 0) {
+            { extern void npc_set_hitpoint(const float *p); npc_set_hitpoint(tr.endpos); }
+            npc_take_damage(tr.npc, dmg, type, d, 0);
+            // CBaseEntity::TraceBleed: blood on the wall behind it
+            extern bool npc_blood(int i, bool *yellow);
+            bool yellow;
+            if (npc_blood(tr.npc, &yellow) && rand() % 2 == 0) {
+                float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                float e2[3] = {tr.endpos[0] + d[0] / l * 172, tr.endpos[1] + d[1] / l * 172, tr.endpos[2] + d[2] / l * 172 - 24};
+                gtrace_t bt;
+                game_trace(tr.endpos, e2, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &bt);
+                if (bt.fraction < 1)
+                    game_decal(bt.endpos, bt.normal, yellow ? DC_YBLOOD + rand() % 6 : DC_BLOOD + rand() % 8, 32 + rand() % 16, bt.ent,
+                               yellow ? 150 : 110, yellow ? 130 : 8, yellow ? 0 : 8);
+            }
+        } else {
+            if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, type, d);
+            // EV_HLDM_BulletImpact: the hole, a puff of dust, the surface's own sound, a ricochet now and then
+            if (!(tr.ent > 0 && entities[tr.ent].rendermode != 0 && entities[tr.ent].renderamt < 255)) {   // not on glass and the like
+                bool big = dmg >= 30;
+                game_decal(tr.endpos, tr.normal, (big ? DC_BIGSHOT : DC_SHOT) + rand() % 5, 16, tr.ent, 0, 0, 0);
+            }
+            effect_sprite(tr.endpos, 1, 200, 200, 190, 0.5f);
+            game_effect_particles(tr.endpos, 3, 70, 255, 220, 140, 0.3f, 300);
+            if (s == 0 || rand() % 3 == 0) impact_surface(eye, &tr, d);
+            if (rand() % 2 == 0) {
+                char sn[32];
+                snprintf(sn, sizeof(sn), "weapons/ric%d.wav", 1 + rand() % 5);
+                snd_emit(-1, CHAN_STATIC, sn, 0.5f, ATTN_NORM, PITCH_NORM, tr.endpos);
+            }
         }
     }
 }
@@ -1180,7 +1391,7 @@ static void primary(const wdef_t *w)
         proj_spawn(P_SATCHEL, o, d, 0, -1);
         satchel_out++;
         release_vmodel();
-        if (mem_available(200 * 1024)) vmodel = studio_get("v_satchel_radio");
+        vmodel = studio_get("v_satchel_radio");
         play_vseq("draw");
         next_attack = next_attack2 = wtime + 1.0f;
         break;
@@ -1401,6 +1612,15 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
     wtime += dt;
     bob_t += dt;
     if (select_show > 0) select_show -= dt;
+    {   // a view model that couldn't be loaded yet (a full heap right after a map load): try again
+        static float retry;
+        const wdef_t *w = wdef(cur);
+        if (!vmodel && w && w->vmodel && wtime > retry) {
+            retry = wtime + 0.5f;
+            const char *vm = (cur == WEAPON_SATCHEL && satchel_out > 0) ? "v_satchel_radio" : w->vmodel;
+            vmodel = studio_get(vm);
+        }
+    }
     {
         float y = view_angles[1] * (float)M_PI / 180, p = view_angles[0] * (float)M_PI / 180;
         aim_dir[0] = cosf(p) * cosf(y); aim_dir[1] = cosf(p) * sinf(y); aim_dir[2] = -sinf(p);
@@ -2028,6 +2248,10 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
         gib_t *g = &gibs[i];
         if (!g->m || g->end < wtime) continue;
         if (!fx_in_view(g->o, 24)) continue;
+        {   // small pieces far away aren't worth their draw time
+            float dx = g->o[0] - eye[0], dy = g->o[1] - eye[1], dz = g->o[2] - eye[2];
+            if (dx * dx + dy * dy + dz * dz > 1000.0f * 1000.0f) continue;
+        }
         studio_draw_t d = {.model = g->m, .yaw = g->yaw, .seq = 0, .frame = 0, .body = g->body, .cacheable = true};
         memcpy(d.origin, g->o, 12);
         // floor light: once at rest, every few frames while flying
@@ -2060,6 +2284,8 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_antialias(AA_NONE);
     rdpq_mode_zbuf(true, true);
+    rdpq_mode_persp(true);         // perspective-correct texturing (set_mode_standard turns it off):
+    rdpq_mode_filter(FILTER_BILINEAR);   // without it the gun's textures swim and bend up close
     rdpq_mode_end();
 #ifdef NOVIEWMODEL
     return;
@@ -2120,6 +2346,9 @@ void weapons_draw_effects(void)
 #ifdef PROFX
     { static uint32_t acc; static int n; acc += TICKS_DISTANCE(qa, TICKS_READ()); if (++n == 30) { debugf("  syncs %d us\n", (int)TICKS_TO_US(acc / n)); acc = n = 0; } }
 #endif
+    decals_draw();
+#if 0
+#endif
     // flashlight (GoldSrc EF_DIMLIGHT on the local player): a dynamic light placed where the view
     // trace hits, radius ~100 units, full brightness at its centre falling off to nothing at the edge.
     // Surfaces get an additive, smoothly shaded disc; characters inside the radius are lit (render.c).
@@ -2154,7 +2383,11 @@ void weapons_draw_effects(void)
             // light hitting a surface at a glancing angle is spread thinner
             float ndl = -(n[0] * f[0] + n[1] * f[1] + n[2] * f[2]);
             if (ndl < 0.2f) ndl = 0.2f;
-            int lv = (int)(100 * ndl);
+            // the beam is a cone: a small, bright spot on a wall right in front (a duct), a wide dim
+            // one far away (the fixed 100-unit disc reached past the screen and behind the eye up close)
+            float hitd = 2048 * tr.fraction;
+            int lv = (int)(100 * ndl * (hitd < 160 ? 1.6f - hitd / 400 : 1.2f));
+            if (lv > 220) lv = 220;
             float cx, cy;
             if (project(c, &cx, &cy)) {
                 float cz = proj_z;
@@ -2162,14 +2395,14 @@ void weapons_draw_effects(void)
                 rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
                 rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
                 rdpq_mode_zbuf(true, false);
-                const float R = 100;
+                const float R = fminf(fmaxf(hitd * 0.55f, 10), 100);
                 float prev[7]; bool havep = false;
                 // 12 segments: each is a CPU-set-up triangle
-                static float ring[13][2]; static bool ring_ok;
-                if (!ring_ok) { for (int k = 0; k <= 12; k++) { ring[k][0] = cosf(k * (float)M_PI / 6) * R; ring[k][1] = sinf(k * (float)M_PI / 6) * R; } ring_ok = true; }
-                for (int k = 0; k <= 12; k++) {
+                static float ring[17][2]; static bool ring_ok;
+                if (!ring_ok) { for (int k = 0; k <= 16; k++) { ring[k][0] = cosf(k * (float)M_PI / 8); ring[k][1] = sinf(k * (float)M_PI / 8); } ring_ok = true; }
+                for (int k = 0; k <= 16; k++) {
                     float w[3], sx, sy;
-                    for (int q = 0; q < 3; q++) w[q] = c[q] + u[q] * ring[k][0] + v[q] * ring[k][1];
+                    for (int q = 0; q < 3; q++) w[q] = c[q] + (u[q] * ring[k][0] + v[q] * ring[k][1]) * R;
                     if (!project(w, &sx, &sy)) { havep = false; continue; }
                     float cur[7] = {sx, sy, proj_z, 1, 1, 0.9f, 0};
                     float cc[7] = {cx, cy, cz, 1, 1, 0.9f, lv / 255.0f};
@@ -2177,6 +2410,12 @@ void weapons_draw_effects(void)
                     memcpy(prev, cur, sizeof cur); havep = true;
                 }
                 rdpq_set_mode_standard();
+                // and the light spilling onto the surfaces around the spot (floors, the walls of a
+                // corridor or a duct), as GoldSrc's dlight lights every lightmap in its radius
+                extern void render_dlight_world(const float *c, float R, float bright, const float *skip_n, float skip_d);
+                float lc[3];
+                for (int k = 0; k < 3; k++) lc[k] = tr.endpos[k] + n[k] * fminf(R * 0.35f, 24);
+                render_dlight_world(lc, R * 1.5f, lv / 255.0f * 0.9f, n, n[0] * tr.endpos[0] + n[1] * tr.endpos[1] + n[2] * tr.endpos[2]);
             }
         }
     }
@@ -2193,10 +2432,25 @@ void weapons_draw_effects(void)
                 for (int i = 0; i < MAX_BEAMS; i++) {
                     beam_t *b = &beams[i];
                     if (b->end < wtime || b->tex != tex + 1) continue;
+#ifdef TESTZAP
+                    { static int c; if ((c++ & 31) == 0) { float x1, y1; bool pa = project(b->a, &x1, &y1); float x2, y2; bool pb = project(b->b, &x2, &y2); debugf("BEAM tex %d a %d (%.0f %.0f) b %d (%.0f %.0f) w %.0f end %.2f wtime %.2f\n", tex, pa, x1, y1, pb, x2, y2, b->width, b->end, wtime); } }
+#endif
                     float ax, ay, bx, by;
-                    if (!project(b->a, &ax, &ay)) continue;
+                    // a beam that ends at (or behind) the camera, like a vortigaunt's bolt hitting the
+                    // player, is cut where it passes 24 units in front of the eye instead of not drawn
+                    float pa3[3], pb3[3];
+                    memcpy(pa3, b->a, 12); memcpy(pb3, b->b, 12);
+                    {
+                        float da = (pa3[0] - fx_eye[0]) * fx_fwd[0] + (pa3[1] - fx_eye[1]) * fx_fwd[1] + (pa3[2] - fx_eye[2]) * fx_fwd[2];
+                        float db = (pb3[0] - fx_eye[0]) * fx_fwd[0] + (pb3[1] - fx_eye[1]) * fx_fwd[1] + (pb3[2] - fx_eye[2]) * fx_fwd[2];
+                        const float nearz = 24;
+                        if (da < nearz && db < nearz) continue;
+                        if (da < nearz) { float t = (nearz - da) / (db - da); for (int k = 0; k < 3; k++) pa3[k] += (pb3[k] - pa3[k]) * t; }
+                        else if (db < nearz) { float t = (nearz - db) / (da - db); for (int k = 0; k < 3; k++) pb3[k] += (pa3[k] - pb3[k]) * t; }
+                    }
+                    if (!project(pa3, &ax, &ay)) continue;
                     float za = proj_z;
-                    if (!project(b->b, &bx, &by)) continue;
+                    if (!project(pb3, &bx, &by)) continue;
                     float zb = proj_z;
                     float dx = bx - ax, dy = by - ay, l = sqrtf(dx * dx + dy * dy);
                     if (l < 0.5f) continue;
@@ -2214,8 +2468,8 @@ void weapons_draw_effects(void)
                     float wa = b->width * 0.5f, wb = wa;
                     if (b->world_w) {
                         float ux, uy;
-                        float pa[3] = {b->a[0] + fx_up[0] * b->width * 0.5f, b->a[1] + fx_up[1] * b->width * 0.5f, b->a[2] + fx_up[2] * b->width * 0.5f};
-                        float pb[3] = {b->b[0] + fx_up[0] * b->width * 0.5f, b->b[1] + fx_up[1] * b->width * 0.5f, b->b[2] + fx_up[2] * b->width * 0.5f};
+                        float pa[3] = {pa3[0] + fx_up[0] * b->width * 0.5f, pa3[1] + fx_up[1] * b->width * 0.5f, pa3[2] + fx_up[2] * b->width * 0.5f};
+                        float pb[3] = {pb3[0] + fx_up[0] * b->width * 0.5f, pb3[1] + fx_up[1] * b->width * 0.5f, pb3[2] + fx_up[2] * b->width * 0.5f};
                         wa = project(pa, &ux, &uy) ? fminf(sqrtf((ux - ax) * (ux - ax) + (uy - ay) * (uy - ay)), 60) : 1;
                         wb = project(pb, &ux, &uy) ? fminf(sqrtf((ux - bx) * (ux - bx) + (uy - by) * (uy - by)), 60) : 1;
                         if (wa < 0.75f) wa = 0.75f;
@@ -2362,9 +2616,18 @@ void weapons_draw_effects(void)
         beam_t *b = &beams[i];
         if (b->end < wtime || (b->tex && fx_spr[b->tex - 1])) continue;
         float ax, ay, bx, by;
-        if (!project(b->a, &ax, &ay)) continue;
+        float pa3[3], pb3[3];   // cut at 24 units in front of the eye (see the textured beams)
+        memcpy(pa3, b->a, 12); memcpy(pb3, b->b, 12);
+        {
+            float da = (pa3[0] - fx_eye[0]) * fx_fwd[0] + (pa3[1] - fx_eye[1]) * fx_fwd[1] + (pa3[2] - fx_eye[2]) * fx_fwd[2];
+            float db = (pb3[0] - fx_eye[0]) * fx_fwd[0] + (pb3[1] - fx_eye[1]) * fx_fwd[1] + (pb3[2] - fx_eye[2]) * fx_fwd[2];
+            if (da < 24 && db < 24) continue;
+            if (da < 24) { float t = (24 - da) / (db - da); for (int k = 0; k < 3; k++) pa3[k] += (pb3[k] - pa3[k]) * t; }
+            else if (db < 24) { float t = (24 - db) / (da - db); for (int k = 0; k < 3; k++) pb3[k] += (pa3[k] - pb3[k]) * t; }
+        }
+        if (!project(pa3, &ax, &ay)) continue;
         float za = proj_z;
-        if (!project(b->b, &bx, &by)) continue;
+        if (!project(pb3, &bx, &by)) continue;
         float zb = proj_z;
         float a = (b->end - wtime) / b->life;
         rdpq_set_prim_color(RGBA32(b->r, b->g, b->bl, (int)(255 * a)));
@@ -2421,6 +2684,7 @@ void weapons_hud_init(void)
     const char *nm[4] = {"rom:/ui/fx_lgtning.sprite", "rom:/ui/fx_laserbeam.sprite", "rom:/ui/fx_wallpuff.sprite", "rom:/ui/fx_blood.sprite"};
     for (int k = 0; k < 4; k++) fx_spr[k] = sprite_load(nm[k]);
     fx_spr[4] = sprite_load("rom:/ui/fx_xbeam.sprite");
+    decals_load();   // now, at start-up: not in the middle of a map's memory
     char path[48];
     for (int k = 0; k < 8; k++) { snprintf(path, sizeof(path), "rom:/ui/fx_expl%d.sprite", k); fx_expl[k] = sprite_load(path); }
     for (int k = 0; k < 3; k++) { snprintf(path, sizeof(path), "rom:/ui/fx_muzzle%d.sprite", k + 1); fx_muzzle[k] = sprite_load(path); }

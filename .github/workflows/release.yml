@@ -1,8 +1,9 @@
-# Builds HL64Builder.exe (the Windows ROM builder, see builder/) and publishes it as a release.
+# Builds the ROM builder for Windows (HL64Builder.exe), Linux (HL64Builder-linux-x86_64.tar.gz) and
+# macOS (HL64Builder-macos-arm64.zip, HL64Builder-macos-x86_64.zip) -- see builder/ -- and publishes them as a release.
 # A release is made when builder/VERSION changes on main (tag v<VERSION>, made here) or when a
 # tag like v1.0 is pushed; "Run workflow" on the Actions tab builds it (download it from the run), and
 # with "publish" ticked also replaces the exe in the release for the current builder/VERSION.
-name: Release HL64Builder.exe
+name: Release HL64Builder
 
 on:
   push:
@@ -73,27 +74,87 @@ jobs:
           HL64_VERSION=${{ steps.ver.outputs.tag }}-${GITHUB_SHA::7} T3D_INST=$RUNNER_TEMP/tiny3d LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_windows.sh
           ls -la builder/out/HL64Builder.exe
 
+      - name: Linux builder
+        run: |
+          HL64_VERSION=${{ steps.ver.outputs.tag }}-${GITHUB_SHA::7} ENGINE_DIR=builder/out/work/stage/engine LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_unix.sh linux-x86_64
+
       - uses: actions/upload-artifact@v4
         with:
-          name: HL64Builder
+          name: HL64Builder-windows
           path: builder/out/HL64Builder.exe
-
-      - name: Release
-        if: github.event_name == 'push' || inputs.publish
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: Half-Life 64 ${{ steps.ver.outputs.tag }}
+          name: HL64Builder-linux-x86_64
+          path: builder/out/HL64Builder-linux-x86_64.tar.gz
+      - uses: actions/upload-artifact@v4   # the N64 engine, for the Mac packages (no N64 toolchain on a Mac)
+        with:
+          name: engine
+          path: builder/out/work/stage/engine
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+
+  macos:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14       # Apple silicon
+            target: macos-arm64
+          - runner: macos-15-intel # Intel
+            target: macos-x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine
+          path: ${{ runner.temp }}/engine
+      - name: libdragon (for its host tools)
+        run: |
+          git clone -q https://github.com/DragonMinded/libdragon.git $RUNNER_TEMP/libdragon
+          cd $RUNNER_TEMP/libdragon && git checkout -q $LIBDRAGON_COMMIT
+      - name: Mac builder
+        run: |
+          HL64_VERSION=${{ needs.build.outputs.tag }}-${GITHUB_SHA::7} ENGINE_DIR=$RUNNER_TEMP/engine LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_unix.sh ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HL64Builder-${{ matrix.target }}
+          path: builder/out/HL64Builder-${{ matrix.target }}.zip
+
+  release:
+    needs: [build, macos]
+    if: always() && needs.build.result == 'success' && (github.event_name == 'push' || inputs.publish)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: HL64Builder-*
+          merge-multiple: true
+          path: dist
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: Half-Life 64 ${{ needs.build.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          files: builder/out/HL64Builder.exe
+          files: dist/*
           body: |
-            **HL64Builder.exe** builds the Half-Life 64 ROM (`hl64.z64`) from your own copy of Half-Life.
+            What's new and fixed in this release: see [What's new](https://github.com/${{ github.repository }}#whats-new-in-12) in the README.
+
+            The ROM builder makes the Half-Life 64 ROM (`hl64.z64`) from your own copy of Half-Life. Pick the one for your computer:
+
+            - **Windows:** `HL64Builder.exe`
+            - **Linux (x86-64):** `HL64Builder-linux-x86_64.tar.gz` -- extract it and run `HL64Builder`
+            - **macOS:** `HL64Builder-macos-arm64.zip` (Apple silicon) or `HL64Builder-macos-x86_64.zip` (Intel) -- unzip it and open `HL64Builder.app`
 
             1. Install Half-Life on Steam (or have a copy of its `valve` folder).
-            2. Download and run **HL64Builder.exe**. It finds Half-Life through Steam; if it can't, drag your Half-Life folder onto the window and press Enter.
-            3. Wait for it to convert the game (30-90 minutes the first time). `hl64.z64` appears next to the .exe.
+            2. Run the builder. It finds Half-Life through Steam; if it can't, use **Browse...** to pick your Half-Life folder. Choose where the ROM goes (and, if you like, where the temporary files are kept), then press **Build ROM**.
+            3. Wait for it to convert the game (30-90 minutes the first time).
 
             Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.
 
-            The program contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.
-            Windows may warn that the program is unrecognised (it isn't code-signed): choose "More info", then "Run anyway".
+            The builder contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.
+            None of the builders is code-signed. Windows: choose "More info", then "Run anyway". macOS: right-click the app and choose Open (or run `xattr -dr com.apple.quarantine HL64Builder.app` in Terminal).

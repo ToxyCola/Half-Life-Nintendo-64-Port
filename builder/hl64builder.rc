@@ -1,0 +1,3 @@
+// visual styles (comctl32 v6) and the DPI awareness for the builder's window
+#include <winuser.h>
+1 RT_MANIFEST "hl64builder.manifest"
