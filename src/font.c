@@ -96,23 +96,40 @@ void font_color(color_t c)
     rdpq_set_prim_color(c);
 }
 
-static int draw16(int f, int x16, int y, const char *s)
+static int draw16_scaled(int f, int x16, int y, const char *s, float scale)
 {
     hlfont_t *fn = &fonts[f];
+    if (scale <= 0.0f) scale = 1.0f;
     for (; *s && *s != '\n'; s++) {
         glyph_t *g = glyph(fn, (unsigned char)*s);
-        if (*s != ' ' && g->w >= 1)
-            rdpq_tex_blit(&fn->img.surf, ((x16 + 8) >> 4) - fn->pad, y - fn->pad,
-                          &(rdpq_blitparms_t){.s0 = g->x, .t0 = g->y, .width = g->w, .height = g->h});
-        x16 += g->adv16;
+        if (*s != ' ' && g->w >= 1) {
+            rdpq_blitparms_t parms = {
+                .s0 = g->x, .t0 = g->y, .width = g->w, .height = g->h,
+                .scale_x = scale, .scale_y = scale
+            };
+            rdpq_tex_blit(&fn->img.surf, ((x16 + 8) >> 4) - (int)(fn->pad * scale), y - (int)(fn->pad * scale), &parms);
+        }
+        x16 += (int)(g->adv16 * scale);
     }
     return x16;
+}
+
+static int draw16(int f, int x16, int y, const char *s)
+{
+    return draw16_scaled(f, x16, y, s, 1.0f);
 }
 
 int font_draw(int f, int x, int y, const char *s)
 {
     if (!fonts[f].ok) { rdpq_text_printf(NULL, FONT_BUILTIN_DEBUG_MONO, x, y + 8, "%s", s); return x + strlen(s) * 8; }
     return (draw16(f, x << 4, y, s) + 8) >> 4;
+}
+
+int font_draw_scaled(int f, int x, int y, const char *s, float scale)
+{
+    if (!fonts[f].ok) { rdpq_text_printf(NULL, FONT_BUILTIN_DEBUG_MONO, x, y + 8, "%s", s); return x + strlen(s) * 8; }
+    if (scale <= 0.0f || scale == 1.0f) return font_draw(f, x, y, s);
+    return (draw16_scaled(f, x << 4, y, s, scale) + 8) >> 4;
 }
 
 int font_draw_char(int f, int x, int y, int ch)

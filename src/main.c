@@ -500,6 +500,26 @@ void game_save_manual(void)
     write_slot(best, o, view_angles);
     hud_message("Game saved");
 }
+
+void game_save_to_slot(int slot)
+{
+    if (!in_game) return;
+    if (slot < 1 || slot >= NUM_SAVE_SLOTS) slot = 1;
+    float o[3];
+    pm_get_origin(o);
+    write_slot(slot, o, view_angles);
+    hud_message("Game saved");
+}
+
+bool game_save_slot_info(int slot, char *map_out, int map_len)
+{
+    if (slot < 0 || slot >= NUM_SAVE_SLOTS || !save_dir[slot].valid) return false;
+    if (map_out && map_len > 0) {
+        strncpy(map_out, save_dir[slot].map, map_len - 1);
+        map_out[map_len - 1] = 0;
+    }
+    return true;
+}
 static bool load_save(int slot)
 {
     if (slot < 0) {   // newest
@@ -568,6 +588,7 @@ static void leave_game(void)
     hud_reset();
     ents_player_teleported();
     menu_open(false);
+    snd_menu_music_start();
 }
 
 // autosaves start with Office Complex (c1a1): none in Hazard Course, the tram ride or Anomalous Materials
@@ -954,6 +975,7 @@ int main(void)
     rdpq_debug_start();
 #endif
     menu_open(false);
+    snd_menu_music_start();
 
 #ifdef AUTOSTART_MAP
     menu_close();

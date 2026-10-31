@@ -130,7 +130,7 @@ def build_nav(a, maps):
     """monster node graphs (tools/navgen.c, built here with the host compiler)"""
     here = os.path.dirname(os.path.abspath(__file__))
     # a prebuilt navgen (the Windows builder ships navgen.exe), else compile it with the host compiler
-    exe = os.environ.get('HL64_NAVGEN') or shutil.which('navgen')
+    exe = os.environ.get('HL64_NAVGEN') or shutil.which('navgen') or (os.path.join(here, 'navgen.exe') if os.path.exists(os.path.join(here, 'navgen.exe')) else None)
     if not exe:
         exe = os.path.join(tempfile.gettempdir(), 'hl64_navgen')
         subprocess.run(['cc', '-O2', '-o', exe, os.path.join(here, 'navgen.c'), '-lm'], check=True)
@@ -398,6 +398,15 @@ def build_sounds(a):
                 loop = loop * 22050 // rate
             opts += ['--wav-loop', 'true', '--wav-loop-offset', str(loop)]
         jobs.append((conv, f, os.path.join(outdir, os.path.dirname(rel).lower()), opts))
+    assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets')
+    for snd in ('select', 'confirm', 'cancel'):
+        src = os.path.join(assets_dir, snd + '.mp3')
+        if os.path.exists(src):
+            jobs.append((conv, src, os.path.join(outdir, 'ui'), ['--wav-mono', '--wav-compress', 'ulc,quality=%d' % Q_SFX]))
+    # the title screen's music (this port's own, assets/FELOOP.mp3 -> music/feloop.wav64)
+    fe = os.path.join(assets_dir, 'FELOOP.mp3')
+    if os.path.exists(fe):
+        jobs.append((conv, fe, os.path.join(a.out, 'music'), ['--wav-mono', '--wav-resample', '22050', '--wav-compress', 'ulc,quality=%d' % Q_MUSIC]))
     media = os.path.join(a.valve, 'media')
     for f in sorted(glob.glob(os.path.join(media, '*.mp3'))):
         jobs.append((conv, f, os.path.join(a.out, 'music'),

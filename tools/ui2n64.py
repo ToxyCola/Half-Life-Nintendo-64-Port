@@ -255,12 +255,62 @@ def build_title(valve, ui, tmp):
     """title.sprite (320x240 title-screen background) and lambda.sprite (the icon beside
     "LOADING"): this port's own artwork, kept in the repository's assets/ folder"""
     here = os.path.dirname(os.path.abspath(__file__))
-    for name in ('title', 'lambda'):
+    for name in ('title', 'lambda', 'glowcircle', 'menuglow', 'buttons_a', 'buttons_b',
+                 'color2', 'colorstrip2', 'slider', 'slider_end_cap', 'slider_piece', 'box'):
         src = os.path.join(here, '..', 'assets', name + '.png')
+        if not os.path.exists(src):
+            continue
         im = Image.open(src).convert('RGBA')
         png = os.path.join(tmp, name + '.png')
         im.save(png)
-        mksprite(png, ui, 'RGBA16')
+        fmt = 'RGBA16' if name in ('title', 'lambda') else 'RGBA32'
+        mksprite(png, ui, fmt)
+
+    ctrl_src = os.path.join(here, '..', 'assets', 'ctrl.png')
+    if os.path.exists(ctrl_src):
+        ctrl_im = Image.open(ctrl_src).convert('RGBA')
+        ctrl_small = ctrl_im.resize((188, 145), Image.LANCZOS)
+        ctrl_sharp = ctrl_small.filter(ImageFilter.UnsharpMask(radius=0.8, percent=150, threshold=2))
+        ctrl_png = os.path.join(tmp, 'ctrl.png')
+        ctrl_sharp.save(ctrl_png)
+        mksprite(ctrl_png, ui, 'RGBA32')
+
+    hl_src = os.path.join(here, '..', 'assets', 'hl.png')
+    if os.path.exists(hl_src):
+        hl_im = Image.open(hl_src).convert('RGB')
+        top = hl_im.crop((0, 0, 512, 64))
+        bot = hl_im.crop((0, 64, 512, 128))
+
+        p_top = Image.new('RGBA', top.size)
+        for y in range(top.height):
+            for x in range(top.width):
+                r, g, b = top.getpixel((x, y))
+                br = max(r, g, b)
+                if br <= 4:
+                    p_top.putpixel((x, y), (0, 0, 0, 0))
+                else:
+                    a = int(min(110, max(0, (br - 4) / (80.0 - 4.0) * 110)))
+                    scale = 255.0 / max(1, min(255, int((br / 94.0) * 255)))
+                    p_top.putpixel((x, y), (min(255, int(r * scale)), min(255, int(g * scale)), min(255, int(b * scale)), a))
+
+        p_bot = Image.new('RGBA', bot.size)
+        for y in range(bot.height):
+            for x in range(bot.width):
+                r, g, b = bot.getpixel((x, y))
+                br = max(r, g, b)
+                if br <= 4:
+                    p_bot.putpixel((x, y), (0, 0, 0, 0))
+                else:
+                    a = int(min(255, max(0, (br - 4) / (85.0 - 4.0) * 255)))
+                    scale = 255.0 / max(1, a)
+                    p_bot.putpixel((x, y), (min(255, int(r * scale)), min(255, int(g * scale)), min(255, int(b * scale)), a))
+
+        top_png = os.path.join(tmp, 'hl_top.png')
+        bot_png = os.path.join(tmp, 'hl_bot.png')
+        p_top.save(top_png)
+        p_bot.save(bot_png)
+        mksprite(top_png, ui, 'RGBA32')
+        mksprite(bot_png, ui, 'RGBA32')
     print('title background and loading icon: assets/')
 
 

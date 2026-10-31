@@ -530,6 +530,21 @@ void snd_music_play(int track)
     wav64_play(&music_wave.wav, MUSIC_CH);
 }
 
+void snd_menu_music_start(void)
+{
+    if (!audio_ok) return;
+    if (music_open && music_track == -1) return;
+    snd_music_stop();
+    const char *path = file_exists("rom:/music/feloop.wav64") ? "rom:/music/feloop.wav64" :
+                       file_exists("rom:/music/FELOOP.wav64") ? "rom:/music/FELOOP.wav64" : NULL;
+    if (!path) return;
+    wav64_open(&music_wave.wav, path);
+    wav64_set_loop(&music_wave.wav, true);
+    music_open = true;
+    music_track = -1;
+    wav64_play(&music_wave.wav, MUSIC_CH);
+}
+
 int snd_music_track(void) { return music_track; }
 
 // ------------------------------------------------------------------ per frame
@@ -575,7 +590,7 @@ void snd_update(const float *listener, const float *right)
     }
     float mv = master_volume * 0.7f;
     mixer_ch_set_vol(MUSIC_CH, mv, mv);
-    if (music_open && !mixer_ch_playing(MUSIC_CH)) snd_music_stop();   // CD tracks play once
+    if (music_open && !mixer_ch_playing(MUSIC_CH)) { if (music_track == -1) wav64_play(&music_wave.wav, MUSIC_CH); else snd_music_stop(); }   // CD tracks play once
     mixer_try_play();
 }
 
