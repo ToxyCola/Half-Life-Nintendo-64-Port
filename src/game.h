@@ -276,5 +276,6 @@ void snd_poll(void);
 void snd_set_volume(float v);
 void snd_music_play(int track);
 void snd_music_stop(void);
+void snd_menu_music_start(void);
 int  snd_music_track(void);
 bool ents_sound_origin(int ent, float *out);                // entities.c: where an entity's sounds come from

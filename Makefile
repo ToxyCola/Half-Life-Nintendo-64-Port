@@ -38,7 +38,7 @@ $(BUILD_DIR)/pmove.o: src/pmove.c
 	$(CC) -c $(CFLAGS) -std=gnu11 -Wno-error -Wno-incompatible-pointer-types $(VALVE_INC) $(VALVE_DEFS) -Isrc -o $@ $<
 
 N64_MKDFS_ROOT ?= filesystem
-FS_FILES = $(shell find $(N64_MKDFS_ROOT) -type f 2>/dev/null)
+FS_FILES =
 $(BUILD_DIR)/hl64.dfs: $(FS_FILES)
 $(BUILD_DIR)/hl64.elf: $(OBJS)
 
