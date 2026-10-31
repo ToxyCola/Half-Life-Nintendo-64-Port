@@ -1,5 +1,7 @@
 # Half-Life 64
 
+**The bulk of this project was done with Claude Opus 5.5, with the exception of menus and assets build by UnhealthyGrapejuice.**
+
 A Nintendo 64 port of Half-Life's single-player campaign: the original maps, textures and
 lighting, played with Valve's own player-movement code, running on stock N64 hardware with an
 Expansion Pak.
