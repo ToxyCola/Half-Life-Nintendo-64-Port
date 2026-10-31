@@ -30,7 +30,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0        # git describe names the version
 
@@ -78,15 +78,15 @@ jobs:
         run: |
           HL64_VERSION=${{ steps.ver.outputs.tag }}-${GITHUB_SHA::7} ENGINE_DIR=builder/out/work/stage/engine LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_unix.sh linux-x86_64
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: HL64Builder-windows
           path: builder/out/HL64Builder.exe
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: HL64Builder-linux-x86_64
           path: builder/out/HL64Builder-linux-x86_64.tar.gz
-      - uses: actions/upload-artifact@v4   # the N64 engine, for the Mac packages (no N64 toolchain on a Mac)
+      - uses: actions/upload-artifact@v5   # the N64 engine, for the Mac packages (no N64 toolchain on a Mac)
         with:
           name: engine
           path: builder/out/work/stage/engine
@@ -99,16 +99,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14       # Apple silicon
+          - runner: macos-15       # Apple silicon
             target: macos-arm64
           - runner: macos-15-intel # Intel
             target: macos-x86_64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: engine
           path: ${{ runner.temp }}/engine
@@ -119,7 +119,7 @@ jobs:
       - name: Mac builder
         run: |
           HL64_VERSION=${{ needs.build.outputs.tag }}-${GITHUB_SHA::7} ENGINE_DIR=$RUNNER_TEMP/engine LIBDRAGON_SRC=$RUNNER_TEMP/libdragon builder/build_unix.sh ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: HL64Builder-${{ matrix.target }}
           path: builder/out/HL64Builder-${{ matrix.target }}.zip
@@ -129,7 +129,7 @@ jobs:
     if: always() && needs.build.result == 'success' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           pattern: HL64Builder-*
           merge-multiple: true
