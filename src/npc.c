@@ -3080,6 +3080,13 @@ void npcs_save_transition(const char *landmark, const float *lm)
         c->following = n->following;
         c->said = n->said;
     }
+    // the ones going along are no longer in this map (its remembered state must not keep them)
+    for (int i = 0; i < num_npcs; i++) {
+        npc_t *n = &npcs[i];
+        float mid[3] = {n->origin[0], n->origin[1], n->origin[2] + 16};
+        if (!entities[n->ent].removed && n->model && !is_dead(n) && !(n->flags & NF_ITEM) && in_transition(mid, landmark, lm))
+            entities[n->ent].removed = true;
+    }
     debugf("transition: %d characters follow the player\n", num_carried);
 }
 

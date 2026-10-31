@@ -203,6 +203,55 @@ static bool find_arrive(const char *map, arrive_t *a)
     return ok;
 }
 
+// ---- maps remember what was done in them (the PC keeps every visited level's state in the save):
+// leaving through a level change stores the map's doors, lifts, breakables, triggers and characters;
+// coming back (or restarting it after a death) puts them back
+int ents_snapshot(uint8_t *b, int max, int base);
+void ents_apply_snapshot(const uint8_t *b, int len, int base);
+void ents_mark_base_state(void);
+int npcs_base_ents(void);
+int npcs_snapshot(uint8_t *b, int max);
+void npcs_apply_snapshot(const uint8_t *b, int len);
+#define MAPMEM_N 10
+static struct { char map[16]; uint8_t *blob; int ne, nn; uint32_t age; } mapmem[MAPMEM_N];
+static uint32_t mapmem_clock;
+static void mapmem_clear(void)
+{
+    for (int i = 0; i < MAPMEM_N; i++) { free(mapmem[i].blob); mapmem[i].blob = NULL; mapmem[i].map[0] = 0; }
+}
+static void mapmem_store(const char *map)
+{
+    enum { MAX = 12288 };
+    uint8_t *tmp = malloc(MAX);
+    if (!tmp) return;
+    int ne = ents_snapshot(tmp, MAX - 2048, npcs_base_ents());
+    int nn = npcs_snapshot(tmp + ne, MAX - ne);
+    int slot = -1;
+    for (int i = 0; i < MAPMEM_N; i++) if (!strcasecmp(mapmem[i].map, map)) slot = i;
+    if (slot < 0) for (int i = 0; i < MAPMEM_N; i++) if (!mapmem[i].map[0]) { slot = i; break; }
+    if (slot < 0) { slot = 0; for (int i = 1; i < MAPMEM_N; i++) if (mapmem[i].age < mapmem[slot].age) slot = i; }
+    free(mapmem[slot].blob);
+    mapmem[slot].blob = malloc(ne + nn);
+    if (mapmem[slot].blob) {
+        memcpy(mapmem[slot].blob, tmp, ne + nn);
+        strncpy(mapmem[slot].map, map, 15); mapmem[slot].map[15] = 0;
+        mapmem[slot].ne = ne; mapmem[slot].nn = nn; mapmem[slot].age = ++mapmem_clock;
+        debugf("mapmem: %s stored (%d + %d bytes)\n", map, ne, nn);
+    } else mapmem[slot].map[0] = 0;
+    free(tmp);
+}
+static void mapmem_apply(const char *map)
+{
+    for (int i = 0; i < MAPMEM_N; i++) {
+        if (!mapmem[i].blob || strcasecmp(mapmem[i].map, map)) continue;
+        ents_apply_snapshot(mapmem[i].blob, mapmem[i].ne, npcs_base_ents());
+        npcs_apply_snapshot(mapmem[i].blob + mapmem[i].ne, mapmem[i].nn);
+        mapmem[i].age = ++mapmem_clock;
+        debugf("mapmem: %s restored\n", map);
+        return;
+    }
+}
+
 static bool load_map(const char *name, const char *landmark, const float *old_landmark)
 {
     restart_at = 0;
@@ -252,6 +301,8 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     ents_spawn_all();
     npcs_spawn_all();
     npcs_mark_base();
+    ents_mark_base_state();
+    mapmem_apply(name);
     { extern void lights_map_start(void); lights_map_start(); }
     float origin[3] = {0, 0, 0};
     bool placed = false;
@@ -529,6 +580,7 @@ static bool load_save(int slot)
     if (slot < 0 || slot >= NUM_SAVE_SLOTS || !save_dir[slot].valid) return false;
     sram_read(save_buf.raw, slot * SAVE_SLOT_BYTES, SAVE_SLOT_BYTES);
     save_t sv = save_buf.s;
+    mapmem_clear();
     num_visited = 0; noclip = false; end_requested = false;
     player_new_game();
     snd_music_stop();
@@ -556,6 +608,14 @@ static bool load_save(int slot)
         }
     }
     pm_reset_player(sv.o);
+    // load_map took the "restart after death" snapshot and deployed the weapon while the player
+    // was still the fresh one from player_new_game: take them again from the loaded player
+    // (dying after a load used to restart without the suit and weapons, and the autosave of the
+    // next level then kept that: no HUD, no weapons, chargers refused)
+    { extern bool weapons_hidden; weapons_hidden = false; }
+    game_set_camera(-1, 0, false);
+    player_map_start();
+    weapons_map_start();
     memcpy(view_angles, sv.a, 12);
     memcpy(arrive_origin, sv.o, 12);
     memcpy(arrive_angles, sv.a, 12);
@@ -567,6 +627,7 @@ static bool debug_load;   // the Debug menu's map loader
 static bool start_game(const char *map)
 {
     if (!strncmp(map, "*save", 5)) return load_save(map[5] ? atoi(map + 5) : -1);
+    mapmem_clear();
     num_visited = 0;
     noclip = false;
     player_new_game();
@@ -623,6 +684,7 @@ static void do_pending_change(void)
         }
     }
     if (have) { ents_save_globals(oldlm); npcs_save_transition(pending_landmark, oldlm); }
+    mapmem_store(cur_map);   // after the characters going along were taken out of it
     char map[32], lm[48];
     strcpy(map, pending_map);
     strcpy(lm, pending_landmark);
@@ -1304,6 +1366,9 @@ int main(void)
 #define TESTLANDMARK NULL
 #endif
         { static bool done; if (!done && in_game && game_clock > 4) { done = true; game_request_changelevel(TESTCHANGE, TESTLANDMARK); } }
+#ifdef TESTCHANGEBACK
+        { static bool d2; if (!d2 && in_game && game_clock > 9 && !strcmp(cur_map, TESTCHANGE)) { d2 = true; game_request_changelevel(TESTCHANGEBACK, TESTLANDMARK); } }
+#endif
 #endif
         TR("V"); snd_set_volume(settings.volume / 10.0f);
         {

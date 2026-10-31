@@ -3344,6 +3344,23 @@ void ents_restore_globals(const float *landmark)
 // ------------------------------------------------------------------ save-game snapshot of the live level
 // removed / active / triggered bits for every map entity, plus position and motion of brush entities
 typedef struct { uint16_t idx; uint8_t state, fl; float o[3], a[3], curspeed, think; int16_t path, pad; } esnap_t;
+// what each brush entity looked like when the map was spawned: the snapshot keeps only those that
+// changed since (all of them overflowed the save slot on big maps, losing doors and lifts)
+static uint32_t ent_base_hash[MAX_ENTITIES];
+static uint32_t ent_hash(const entity_t *e)
+{
+    uint32_t h = 2166136261u;
+    const uint8_t *p[3] = {(const uint8_t *)e->origin, (const uint8_t *)e->angles, NULL};
+    for (int k = 0; k < 2; k++) for (int j = 0; j < 12; j++) h = (h ^ p[k][j]) * 16777619u;
+    h = (h ^ e->state) * 16777619u;
+    h = (h ^ (e->visible ? 1 : 0)) * 16777619u;
+    h = (h ^ (uint32_t)e->solid) * 16777619u;
+    return h;
+}
+void ents_mark_base_state(void)
+{
+    for (int i = 1; i < num_entities && i < MAX_ENTITIES; i++) ent_base_hash[i] = ent_hash(&entities[i]);
+}
 int ents_snapshot(uint8_t *b, int max, int base)
 {
     if (max < 384 + 2) return 0;
@@ -3358,7 +3375,8 @@ int ents_snapshot(uint8_t *b, int max, int base)
     for (int i = 1; i < base; i++) {
         entity_t *e = &entities[i];
         if (e->removed || e->model <= 0 || pos + (int)sizeof(esnap_t) > max) continue;
-        esnap_t r = {.idx = i, .state = e->state, .fl = (e->visible ? 1 : 0) | (e->solid != SOLID_NOT ? 2 : 0),
+        if (ent_hash(e) == ent_base_hash[i] && e->nextthink <= 0 && e->curspeed == 0) continue;   // as spawned
+        esnap_t r = {.idx = i, .state = e->state, .fl = (e->visible ? 1 : 0) | ((uint8_t)e->solid << 1),
                      .curspeed = e->curspeed, .think = e->nextthink > 0 ? e->nextthink - g_time : -1, .path = e->path};
         memcpy(r.o, e->origin, 12); memcpy(r.a, e->angles, 12);
         memcpy(b + pos, &r, sizeof r); pos += sizeof r; n++;
@@ -3393,7 +3411,7 @@ void ents_apply_snapshot(const uint8_t *b, int len, int base)
         if (r.idx >= base) continue;
         entity_t *e = &entities[r.idx];
         memcpy(e->origin, r.o, 12); memcpy(e->angles, r.a, 12);
-        e->state = r.state; e->visible = r.fl & 1; e->solid = (r.fl & 2) ? SOLID_BSP : SOLID_NOT;
+        e->state = r.state; e->visible = r.fl & 1; e->solid = r.fl >> 1;   // the exact solid type (triggers stay triggers)
         e->curspeed = r.curspeed; e->path = r.path;
         e->nextthink = r.think >= 0 ? g_time + r.think : 0;
     }
