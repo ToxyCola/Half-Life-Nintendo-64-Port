@@ -6,7 +6,7 @@ A Nintendo 64 port of Half-Life's single-player campaign: the original maps, tex
 lighting, played with Valve's own player-movement code, running on stock N64 hardware with an
 Expansion Pak.
 
-**Current release: 1.2** ([what's new](#whats-new-in-12)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
+**Current release: 1.2.1** ([patch notes](#whats-new-in-121), [what's new in 1.2](#whats-new-in-12)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
 [Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)).
 
@@ -22,6 +22,13 @@ It is built from:
 * **A new N64 engine** written for this port, because the GoldSrc engine (`hw.dll`) has never
   been released as source. It uses [libdragon](https://github.com/DragonMinded/libdragon) and
   [tiny3d](https://github.com/HailToDodongo/tiny3d).
+
+## What's new in 1.2.1
+
+* Pushing crates works again (1.2 had broken it), and crates that can also be broken can be pushed.
+* Pulling: hold Use while looking at a crate and walk backwards.
+* The elevator in We've Got Hostiles no longer vanishes at its loading screen and drops you back a map.
+* Lifts, trains, doors and breakables that carry over between maps arrive where they were.
 
 ## What's new in 1.2
 

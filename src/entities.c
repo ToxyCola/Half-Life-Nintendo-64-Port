@@ -1878,6 +1878,17 @@ void ents_spawn_all(void)
 }
 
 // ------------------------------------------------------------------ per-frame
+// bounding boxes only (a pushable's box against a trigger)
+static bool box_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs)
+{
+    bmodel_t *bm = &world.bmodels[e->model];
+    for (int i = 0; i < 3; i++) {
+        if (porg[i] + pmins[i] > e->origin[i] + bm->maxs[i]) return false;
+        if (porg[i] + pmaxs[i] < e->origin[i] + bm->mins[i]) return false;
+    }
+    return true;
+}
+
 static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs)
 {
     bmodel_t *bm = &world.bmodels[e->model];
@@ -1888,7 +1899,9 @@ static bool player_touches(entity_t *e, const float *porg, const float *pmins, c
     // SV_TouchLinks: a brush trigger is touched only where its brushes are (its clip hull for the
     // player's size), not anywhere in its bounding box -- a sloped or L-shaped trigger (the
     // frictionless strip beside the Unforeseen Consequences incline lift) has a box far bigger
-    // than itself
+    // than itself. Solid things (pushables, doors) are tested with a box grown around the player,
+    // who is never inside them: for those the box test is the test.
+    if (e->solid != SOLID_NOT) return true;
     extern bool pm_player_in_entity(int ent, const float *pos);
     return pm_player_in_entity((int)(e - entities), porg);
 }
@@ -2936,7 +2949,7 @@ void ents_think(float dt)
             break;
         }
         case ENT_PUSHABLE:
-            if (e->model > 0 && !(e->spawnflags & 0x80)) push_pushable(e, porg, pmins, pmaxs, dt);
+            if (e->model > 0) push_pushable(e, porg, pmins, pmaxs, dt);   // (SF_PUSH_BREAKABLE 128 only makes it breakable too)
             break;
         case ENT_GLOBAL_BEAM:
             // env_beam / env_laser (effects.cpp): drawn while on (StartOn = 1, or toggled by use)
@@ -3108,7 +3121,7 @@ void ents_think(float dt)
                 for (int pi = 0; pi < num_pushables && pi < MAX_PUSHABLES; pi++) {
                     entity_t *p = &entities[pushable_list[pi]];
                     if (p->type != ENT_PUSHABLE || p->removed || p->model <= 0) continue;
-                    if (!player_touches(e, p->origin, world.bmodels[p->model].mins, world.bmodels[p->model].maxs)) continue;
+                    if (!box_touches(e, p->origin, world.bmodels[p->model].mins, world.bmodels[p->model].maxs)) continue;
                     fire_entity_target(e);
                     if (e->type == ENT_TRIGGER_ONCE) e->removed = true;
                     else e->nextthink = g_time + e->wait;
@@ -3229,7 +3242,8 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
                       e->type == ENT_TANKCONTROLS ||
                       e->type == ENT_HEALTHCHARGER ||
                       ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !e->targetname[0]) ||
-                      (e->type == ENT_PLAT && !e->targetname[0]);
+                      (e->type == ENT_PLAT && !e->targetname[0]) ||
+                      e->type == ENT_PUSHABLE;
         if (!usable) continue;
         bmodel_t *bm = &world.bmodels[e->model];
         float c[3], d2 = 0;
@@ -3255,6 +3269,18 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
         entity_t *e = &entities[best];
         if (e->type == ENT_RECHARGE || e->type == ENT_HEALTHCHARGER) { charger_use(e, best); return true; }
         if (e->type == ENT_TANKCONTROLS) { if (pressed) tank_controls_use(e); return true; }
+        if (e->type == ENT_PUSHABLE) {
+            // CPushable::Use (FCAP_CONTINUOUS_USE): held +use drags it along with the player, whichever
+            // way they move -- backing away pulls it (Move with push = 0)
+            float v[3];
+            pm_get_velocity(v);
+            int ge = pm_get_groundent();
+            if (ge >= 0 && pm_entity_for_physent(ge) != best && (v[0] != 0 || v[1] != 0)) {
+                float d[3] = {v[0] * frame_dt_for_use, v[1] * frame_dt_for_use, 0};
+                pushable_move(e, d);
+            }
+            return true;
+        }
         if (e->type == ENT_MOMENTARY_BUTTON) {
             // held: keep turning; a new press turns it the other way (always forward with the door hack)
             bool first = pressed && e->mpos <= 0.001f;
@@ -3297,7 +3323,8 @@ bool ents_sound_origin(int ent, float *out)
 
 // ------------------------------------------------------------------ globalname transfer across level changes
 // The engine carries entities with a "globalname" (e.g. the intro tram) into the next map.
-typedef struct { char name[48]; float rel[3]; float angles[3]; float curspeed, speed; char path[48]; int state; bool used; } gstate_t;
+typedef struct { char name[48]; float rel[3]; float angles[3]; float curspeed, speed; char path[48]; int state; bool used;
+                 float mins[3]; bool active, triggered; char target[48]; } gstate_t;
 static gstate_t gstates[16];
 static int num_gstates;
 
@@ -3319,6 +3346,12 @@ void ents_save_globals(const float *landmark)
         gs->path[0] = 0;
         if (e->path >= 0) str_copy(gs->path, entities[e->path].targetname, sizeof(gs->path));
         gs->used = false;
+        // where its brushes are in this map (the next map has its own copy, compiled elsewhere)
+        if (e->model > 0) memcpy(gs->mins, world.bmodels[e->model].mins, 12);
+        else memset(gs->mins, 0, 12);
+        gs->active = e->active;
+        gs->triggered = e->triggered;
+        str_copy(gs->target, e->target, sizeof(gs->target));
     }
 }
 
@@ -3335,13 +3368,30 @@ void ents_restore_globals(const float *landmark)
             gstate_t *gs = &gstates[k];
             if (gs->used || strcasecmp(gs->name, g)) continue;
             gs->used = true;
-            for (int j = 0; j < 3; j++) e->origin[j] = gs->rel[j] + landmark[j];
+            // DispatchRestore for a global entity: the landmark offset, corrected by where the two
+            // maps' copies of its brushes were compiled (vecLandmarkOffset - newmins + oldmins)
+            const float *nm = e->model > 0 ? world.bmodels[e->model].mins : (const float[3]){0, 0, 0};
+            for (int j = 0; j < 3; j++) e->origin[j] = gs->rel[j] + landmark[j] + (e->model > 0 ? gs->mins[j] - nm[j] : 0);
             memcpy(e->angles, gs->angles, 12);
             e->curspeed = gs->curspeed;
             e->speed = gs->speed;
             if (e->type == ENT_TRAIN) {
+                // a func_train carries on where it was going (the lift that changes levels on the way up)
                 e->path = gs->path[0] ? ents_find_targetname(gs->path, 1) : -1;
                 e->nextthink = 0;
+                e->state = gs->state;
+                e->triggered = gs->triggered;
+                str_copy(e->target, gs->target, sizeof(e->target));
+                if (gs->active && e->path >= 0) {
+                    float c[3];
+                    model_center(e, c);
+                    for (int j = 0; j < 3; j++) e->dest[j] = entities[e->path].origin[j] - c[j];
+                    e->angular = false;
+                    e->active = true;
+                    mover_sound_start(e);
+                } else if (e->path < 0) {
+                    e->state = MS_IDLE;
+                }
             }
             if (e->type == ENT_TRACKTRAIN) {
                 e->path = PATH_NEAREST;       // CFuncTrackTrain::OverrideReset -> NearestPath

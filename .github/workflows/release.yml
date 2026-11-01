@@ -135,26 +135,36 @@ jobs:
           merge-multiple: true
           path: dist
       - run: ls -la dist
+      - uses: actions/checkout@v5
+        with:
+          path: src
+          sparse-checkout: builder/RELEASE_NOTES.md
+      - name: Release text (the patch notes, then how to use the builder)
+        run: |
+          { cat src/builder/RELEASE_NOTES.md 2>/dev/null; echo; cat <<'EOF'
+          ## Getting the ROM
+
+          The ROM builder makes the Half-Life 64 ROM (`hl64.z64`) from your own copy of Half-Life. Pick the one for your computer:
+
+          - **Windows:** `HL64Builder.exe`
+          - **Linux (x86-64):** `HL64Builder-linux-x86_64.tar.gz` -- extract it and run `HL64Builder`
+          - **macOS:** `HL64Builder-macos-arm64.zip` (Apple silicon) or `HL64Builder-macos-x86_64.zip` (Intel) -- unzip it and open `HL64Builder.app`
+
+          1. Install Half-Life on Steam (or have a copy of its `valve` folder).
+          2. Run the builder. It finds Half-Life through Steam; if it can't, use **Browse...** to pick your Half-Life folder. Choose where the ROM goes (and, if you like, where the temporary files are kept), then press **Build ROM**.
+          3. Wait for it to convert the game (30-90 minutes the first time).
+
+          Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.
+
+          The builder contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.
+          None of the builders is code-signed. Windows: choose "More info", then "Run anyway". macOS: right-click the app and choose Open (or run `xattr -dr com.apple.quarantine HL64Builder.app` in Terminal).
+          EOF
+          } > release_body.md
+          cat release_body.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.build.outputs.tag }}
           name: Half-Life 64 ${{ needs.build.outputs.tag }}
           target_commitish: ${{ github.sha }}
           files: dist/*
-          body: |
-            What's new and fixed in this release: see [What's new](https://github.com/${{ github.repository }}#whats-new-in-12) in the README.
-
-            The ROM builder makes the Half-Life 64 ROM (`hl64.z64`) from your own copy of Half-Life. Pick the one for your computer:
-
-            - **Windows:** `HL64Builder.exe`
-            - **Linux (x86-64):** `HL64Builder-linux-x86_64.tar.gz` -- extract it and run `HL64Builder`
-            - **macOS:** `HL64Builder-macos-arm64.zip` (Apple silicon) or `HL64Builder-macos-x86_64.zip` (Intel) -- unzip it and open `HL64Builder.app`
-
-            1. Install Half-Life on Steam (or have a copy of its `valve` folder).
-            2. Run the builder. It finds Half-Life through Steam; if it can't, use **Browse...** to pick your Half-Life folder. Choose where the ROM goes (and, if you like, where the temporary files are kept), then press **Build ROM**.
-            3. Wait for it to convert the game (30-90 minutes the first time).
-
-            Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.
-
-            The builder contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.
-            None of the builders is code-signed. Windows: choose "More info", then "Run anyway". macOS: right-click the app and choose Open (or run `xattr -dr com.apple.quarantine HL64Builder.app` in Terminal).
+          body_path: release_body.md
