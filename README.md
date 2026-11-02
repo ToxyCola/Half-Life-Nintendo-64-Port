@@ -42,7 +42,6 @@ It is built from:
 * **Head-To-Head menus:** a character select screen for both players, then a match screen with
   the map (with a preview of each), the frag limit (5–50) and the time limit (none, or up to 30
   minutes).
-* **A new lambda** on the loading screen.
 * **The builder** has an optional field for the PS2 files, and now checks the Half-Life folder
   before starting, naming any files that are missing.
 
@@ -67,8 +66,6 @@ It is built from:
   player, as on PC.
 * Going back from some maps to the one before (Questionable Ethics' c2a1b to c2a1a) no longer runs
   out of memory.
-* The builder no longer stops with an error when the Half-Life folder has no
-  `resource/logo.tga`.
 
 ## What works
 
