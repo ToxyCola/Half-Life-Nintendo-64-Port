@@ -33,8 +33,19 @@ void skill_init(void)
     fclose(f);
 }
 
+// CHalfLifeMultiplay::RefreshSkillData: the deathmatch values of the player's weapons and chargers
+static const struct { const char *name; float v; } mp_skill[] = {
+    {"sk_suitcharger", 30}, {"sk_plr_crowbar", 25}, {"sk_plr_9mm_bullet", 12}, {"sk_plr_357_bullet", 50},
+    {"sk_plr_9mmAR_bullet", 12}, {"sk_plr_9mmAR_grenade", 100}, {"sk_plr_buckshot", 20},
+    {"sk_plr_xbow_bolt_client", 20}, {"sk_plr_xbow_bolt_monster", 20}, {"sk_plr_rpg", 120}, {"sk_plr_egon_wide", 20}, {"sk_plr_egon_narrow", 10},
+    {"sk_plr_hand_grenade", 100}, {"sk_plr_satchel", 120}, {"sk_plr_tripmine", 150}, {"sk_plr_hornet", 10},
+};
+
 float skill_get(const char *name)
 {
+    if (h2h_active)
+        for (int i = 0; i < (int)(sizeof(mp_skill) / sizeof(mp_skill[0])); i++)
+            if (!strcasecmp(mp_skill[i].name, name)) return mp_skill[i].v;
     int sk = settings.skill < 1 ? 1 : (settings.skill > 3 ? 3 : settings.skill);
     char n[40];
     snprintf(n, sizeof(n), "%s%d", name, sk);

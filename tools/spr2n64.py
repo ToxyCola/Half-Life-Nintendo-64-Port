@@ -56,7 +56,7 @@ def referenced(valve, maps):
     import bsp2n64
     names = set()
     for m in maps:
-        b = bsp2n64.BSP(open(os.path.join(valve, 'maps', m + '.bsp'), 'rb').read())
+        b = bsp2n64.BSP(open(bsp2n64.map_path(valve, m), 'rb').read())
         for e in bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1')):
             if e.get('classname', '').lower() in CLASSES:
                 mdl = e.get('model', '').lower().replace('\\', '/')

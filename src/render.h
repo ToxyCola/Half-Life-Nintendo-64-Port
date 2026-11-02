@@ -8,5 +8,9 @@ extern color_t sky_color;
 void render_init(void);
 void render_new_map(void);
 void render_frame(const float *eye, const float *angles, void (*hud)(void));
+// split screen: render_begin(), then render_view() for each player's part of the screen, render_end()
+void render_begin(void);
+void render_view(const float *eye, const float *angles, void (*hud)(void), int vx, int vy, int vw, int vh);
+void render_end(void);
 void render_load_sky(const char *name);
 void render_free_map(void);

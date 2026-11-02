@@ -67,7 +67,7 @@ def build_models(a, maps):
     # activities the monster AI plays (src/npc.c): flinches, attacks, deaths, combat idles, fear
     names |= {'@%d' % a for a in (8, 25, 26, 28, 29, 30, 31, 36, 37, 62, 64, 5)}
     for m in maps:
-        b = bsp2n64.BSP(open(os.path.join(a.valve, 'maps', m + '.bsp'), 'rb').read())
+        b = bsp2n64.BSP(open(bsp2n64.map_path(a.valve, m), 'rb').read())
         ents = bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1'))
         for e in ents:
             cls = e.get('classname', '').lower()
@@ -133,6 +133,27 @@ def build_models(a, maps):
     print('models: %d, %.1f MB' % (len(outs), sum(os.path.getsize(o) for o in outs) / 1048576))
 
 
+def build_players(a, players):
+    """Head-To-Head characters: the PS2 player models (.dol), every sequence (the weapon aims and
+    shots, gaits, deaths), the level of detail of about a thousand triangles"""
+    if not players:
+        return
+    import ps2h2h
+    os.makedirs(os.path.join(a.out, 'models'), exist_ok=True)
+    outs = []
+    for name, path in sorted(players.items()):
+        out = os.path.join(a.out, 'models', name + '.hlm')
+        try:
+            mdl2n64.convert(path, out, ['*'], verbose=False, lod=ps2h2h.PLAYER_LOD_TRIS, hand_root=name.startswith('p_'))
+            outs.append(out)
+        except Exception as e:  # noqa
+            print('player model %s failed: %r' % (name, e))
+    mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
+    if outs and not a.no_compress:
+        subprocess.run([mk, '-c', '3', '-w', '256', '-o', slashes(os.path.join(a.out, 'models'))] + [slashes(o) for o in outs], capture_output=True)
+    print('Head-To-Head characters: %d, %.1f MB' % (len(outs), sum(os.path.getsize(o) for o in outs) / 1048576))
+
+
 def build_nav(a, maps):
     """monster node graphs (tools/navgen.c, built here with the host compiler)"""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -143,7 +164,7 @@ def build_nav(a, maps):
         subprocess.run(['cc', '-O2', '-o', exe, os.path.join(here, 'navgen.c'), '-lm'], check=True)
     n = 0
     for m in maps:
-        r = subprocess.run([exe, os.path.join(a.valve, 'maps', m + '.bsp'), os.path.join(a.out, 'maps', m + '.nav')],
+        r = subprocess.run([exe, bsp2n64.map_path(a.valve, m), os.path.join(a.out, 'maps', m + '.nav')],
                            capture_output=True, text=True)
         n += r.returncode == 0
     print('node graphs: %d maps' % n)
@@ -181,7 +202,7 @@ def build_arrivals(a, maps):
     middle of the previous map's trigger_changelevel, feet on its floor) relative to the landmark"""
     info = {}
     for m in maps:
-        b = bsp2n64.BSP(open(os.path.join(a.valve, 'maps', m + '.bsp'), 'rb').read())
+        b = bsp2n64.BSP(open(bsp2n64.map_path(a.valve, m), 'rb').read())
         ents = bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1'))
         info[m] = (ents, b.arr('MODELS', '<9f4i3i'), b)
     out = []
@@ -230,7 +251,7 @@ def build_chapters(a, maps):
     titles = ui2n64.parse_titles(os.path.join(a.valve, 'titles.txt'))
     out = []
     for m in maps:
-        b = bsp2n64.BSP(open(os.path.join(a.valve, 'maps', m + '.bsp'), 'rb').read())
+        b = bsp2n64.BSP(open(bsp2n64.map_path(a.valve, m), 'rb').read())
         ents = bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1'))
         key = ents[0].get('chaptertitle') or ('C0A0TITLE' if m == 'c0a0' else None)
         text = titles.get(key.upper(), '').strip() if key else ''
@@ -238,6 +259,22 @@ def build_chapters(a, maps):
             out.append('%s %s' % (m, text.replace('\n', ' ')))
     open(os.path.join(a.out, 'maps', 'chapters.txt'), 'w', encoding='latin1', newline='\n').write('\n'.join(out) + '\n')
     print('chapters: %d' % len(out))
+
+
+# files the build can't do without: checked first, so a folder that lacks one stops the build
+# straight away (and says what's missing) instead of an hour in, after the maps
+REQUIRED = [('maps', 'c1a0.bsp'), ('halflife.wad',), ('gfx.wad',), ('titles.txt',), ('skill.cfg',),
+            ('sprites', '320hud1.spr'), ('sprites', '320hud2.spr'), ('sprites', '320hud3.spr'),
+            ('sprites', '320_pain.spr'), ('sprites', 'crosshairs.spr'), ('sound',), ('models',)]
+
+
+def preflight(valve):
+    import ui2n64
+    missing = ['/'.join(r) for r in REQUIRED if not ui2n64.find_ci(valve, *r)]
+    if missing:
+        sys.exit('This Half-Life folder is missing files the build needs:\n  %s\n(%s)\n'
+                 'Choose the "valve" folder of a full Half-Life install (Steam: steamapps/common/Half-Life/valve).'
+                 % ('\n  '.join(missing), valve))
 
 
 def main():
@@ -253,24 +290,35 @@ def main():
     ap.add_argument('--maps-only', action='store_true', help='only rebuild maps + texture pack')
     ap.add_argument('--sounds-only', action='store_true', help='only rebuild sounds and music')
     ap.add_argument('--compress-level', type=int, default=3, choices=(1, 2, 3))
+    ap.add_argument('--ps2', help='a copy of the PS2 disc\'s files: adds the Head-To-Head maps and characters')
     a = ap.parse_args()
-    maps = a.maps or [m for m in CAMPAIGN if os.path.exists(os.path.join(a.valve, 'maps', m + '.bsp'))]
+    preflight(a.valve)
+    maps = a.maps or [m for m in CAMPAIGN if os.path.exists(bsp2n64.map_path(a.valve, m))]
+    # the PS2 version's Head-To-Head maps (converted to .bsp in a temporary folder) go through
+    # the same conversion as the campaign's, sharing its texture pack
+    h2h_maps, h2h_players = {}, {}
+    if a.ps2:
+        import ps2h2h
+        h2h_maps, h2h_players = ps2h2h.prepare(a.ps2, a.valve, os.path.join(tempfile.gettempdir(), 'hl64_ps2'))
+        bsp2n64.EXTRA_MAPS.update(h2h_maps)
+    allmaps = maps + [m for m in h2h_maps if m not in maps]
     wads = [os.path.join(a.valve, w) for w in ('halflife.wad', 'liquids.wad', 'xeno.wad', 'decals.wad')]
     os.makedirs(os.path.join(a.out, 'maps'), exist_ok=True)
     if a.models_only:
-        build_models(a, maps)
+        build_models(a, allmaps)
+        build_players(a, h2h_players)
         return
     if a.sounds_only:
         build_sounds(a)
         return
     if a.ui_only:
-        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'))
-        spr2n64.build(a.valve, a.out, maps)
+        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2))
+        spr2n64.build(a.valve, a.out, allmaps)
         build_chapters(a, maps)
         build_arrivals(a, maps)
         return
     pack = bsp2n64.TexturePack()
-    jobs = [(os.path.join(a.valve, 'maps', m + '.bsp'), wads, a.grid, a.tol) for m in maps]
+    jobs = [(bsp2n64.map_path(a.valve, m), wads, a.grid, a.tol) for m in allmaps]
     total = 0
     with Pool(a.j) as pool:
         for res in pool.imap(work, jobs):
@@ -283,7 +331,7 @@ def main():
     mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
     if not a.no_compress:
         mapdir = os.path.join(a.out, 'maps')
-        files = [os.path.join(mapdir, m + '.hlb') for m in maps]
+        files = [os.path.join(mapdir, m + '.hlb') for m in allmaps]
         def comp(fl):
             return subprocess.run([mk, '-c', str(a.compress_level), '-w', '256', '-o', slashes(mapdir)] + [slashes(f) for f in fl], capture_output=True)
         chunks = [files[i::a.j] for i in range(a.j)]
@@ -295,15 +343,15 @@ def main():
     open(os.path.join(a.out, 'maps', 'maplist.txt'), 'w', newline='\n').write('\n'.join(maps) + '\n')
     build_nav(a, maps)
     shutil.copy(os.path.join(a.valve, 'skill.cfg'), os.path.join(a.out, 'skill.cfg'))
-    print('maps: %d, %.1f MB; texture pack: %d textures, %.1f MB' % (
-        len(maps), total / 1048576, len(pack.index), len(pack.data) / 1048576))
+    print('maps: %d (%d Head-To-Head), %.1f MB; texture pack: %d textures, %.1f MB' % (
+        len(allmaps), len(allmaps) - len(maps), total / 1048576, len(pack.index), len(pack.data) / 1048576))
     if a.maps_only:
         return
 
     # skyboxes used by the converted maps
     skies = set()
-    for m in maps:
-        b = bsp2n64.BSP(open(os.path.join(a.valve, 'maps', m + '.bsp'), 'rb').read())
+    for m in allmaps:
+        b = bsp2n64.BSP(open(bsp2n64.map_path(a.valve, m), 'rb').read())
         ents = bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1'))
         skies.add((ents[0].get('skyname') or 'desert').lower())
     envdir = os.path.join(a.valve, 'gfx', 'env')
@@ -317,9 +365,10 @@ def main():
             print('sky %s not found, maps using it fall back to a flat colour' % sk)
     print('skies: %d' % nsky)
 
-    build_models(a, maps)
-    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'))
-    spr2n64.build(a.valve, a.out, maps)
+    build_models(a, allmaps)
+    build_players(a, h2h_players)
+    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2))
+    spr2n64.build(a.valve, a.out, allmaps)
     build_chapters(a, maps)
     build_arrivals(a, maps)
 

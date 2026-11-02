@@ -4,11 +4,13 @@
 
 A Nintendo 64 port of Half-Life's single-player campaign: the original maps, textures and
 lighting, played with Valve's own player-movement code, running on stock N64 hardware with an
-Expansion Pak.
+Expansion Pak. It also has the PlayStation 2 version's two-player split-screen **Head-To-Head**
+mode, built from your own copy of the PS2 game.
 
-**Current release: 1.2.1** ([patch notes](#whats-new-in-121), [what's new in 1.2](#whats-new-in-12)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
+**Current release: 1.3** ([what's new](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
-[Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)).
+[Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)). Notes for
+earlier versions are on their release pages.
 
 It is built from:
 
@@ -23,60 +25,50 @@ It is built from:
   been released as source. It uses [libdragon](https://github.com/DragonMinded/libdragon) and
   [tiny3d](https://github.com/HailToDodongo/tiny3d).
 
-## What's new in 1.2.1
-
-* Pushing crates works again (1.2 had broken it), and crates that can also be broken can be pushed.
-* Pulling: hold Use while looking at a crate and walk backwards.
-* The elevator in We've Got Hostiles no longer vanishes at its loading screen and drops you back a map.
-* Lifts, trains, doors and breakables that carry over between maps arrive where they were.
-
-## What's new in 1.2
+## What's new in 1.3
 
 **New**
 
-* **Builders for Windows, Linux and macOS with a window** instead of a console: pick your
-  Half-Life folder (found through Steam when possible), where the ROM is saved and, optionally,
-  where the temporary files go, then press Build ROM and follow the progress bar and log.
-* **Controller Pak saves:** with a Controller Pak in controller 1, the Save and Load menus get a
-  Controller Pak column with three more slots. Controller settings and button remaps are saved
-  to the cartridge SRAM, and to the Controller Pak when one is inserted.
-* **GameCube controllers** (through a JoyBus adapter or on hardware that supports them): X
-  reloads, Y uses, and the C-stick looks.
-* **Two D-pad control schemes:** "D-pad moves, stick looks" and "D-pad moves, C looks". The
-  input a scheme leaves free is mapped to the weapon, reload and flashlight buttons and shows
-  in the button remap screen.
-* **Decals:** bullet holes, blood splats and explosion scorch marks, with material impact sounds
-  and sparks off computers and metal, as on PC.
-* **Animated textures:** buttons light up when pressed, screens, scanners and other animated
-  (`+0…`/`+a…`) textures play.
-* **Chrome (reflective) textures** on the weapons, Barney's helmet and other shiny surfaces.
-* **Tentacles behave like the PC version:** they track the sound of your footsteps (not when
-  you crouch), shots and grenade landings, strike at what they hear, kill the player and other
-  characters, and play their real rise, lower, tap and strike animations. The tentacle arm in
-  the scientist scene is back.
-* **Barnacles** catch you as soon as you walk under them, pull you (or a character) straight
-  up, and eat what they catch.
-* **Autosaves** now happen only where the PC autosaves (the maps' autosave points), not on
-  every level load.
-* **The flashlight** is closer to the PC's: a round spot that lights the surfaces around it.
-* **Menus:** every options screen uses the new title-screen style, with the menu move sound and
-  evenly spaced items along the cursor's arc.
-* **Cheats** (noclip, god mode, give everything, map select) only work when "Enable cheats" is
-  ticked in the advanced controller settings.
+* **Head-To-Head:** the PlayStation 2 version's two-player split-screen deathmatch. Player 1 is
+  on the top half with controller 1, player 2 on the bottom half with controller 2. It has the
+  PS2 version's ten maps (Basement, Debris, Water Canal, Skirmish, Waypoint, Signal, Office,
+  Snark Pit, Datacore and Stalkyard) plus **Crimson**, a new map by UnhealthyGrapejuice, and its
+  six characters (Gordon Freeman, Security Guard, Gina, Colette, Scientist and Soldier). The rules
+  are the PC's deathmatch rules: frag and time limits, respawning with a crowbar and a pistol,
+  weapons and items coming back after a while, and a dead player's gun dropped where they fell.
+  Each player sees the other holding their gun, and players fall over when killed. It needs the
+  PS2 game's files when you build the ROM (see
+  [Adding Head-To-Head](#adding-head-to-head-from-the-playstation-2-version)).
+* **Head-To-Head menus:** a character select screen for both players, then a match screen with
+  the map (with a preview of each), the frag limit (5–50) and the time limit (none, or up to 30
+  minutes).
+* **A new lambda** on the loading screen.
+* **The builder** has an optional field for the PS2 files, and now checks the Half-Life folder
+  before starting, naming any files that are missing.
 
 **Fixed**
 
-* Fall damage is measured from where the fall really starts, so ladders and lifts catch you.
-* The Office Complex lift (and others like it) no longer blocks you or slides you off.
-* Scientists dragged off in a scripted scene (the tentacle grab) no longer reappear where they
-  started.
-* The tentacles had become invisible.
-* Weapon textures were mapped wrongly.
-* The weapon and its view model could disappear.
-* The flashlight turned bright surfaces (lit signs, lamps) blue or green.
-* A grenade stuck in a wall replayed its hit sound forever.
-* "No clipping" was spaced so tightly it read as "No dipping".
-* Running out of memory when entering some maps.
+* Characters no longer disappear in large maps, or after loading a save of one.
+* A band from the shotgun (and other weapons) no longer covers the lower part of the screen while
+  you walk.
+* Lasers, electricity, beams and particles no longer show through walls, objects and see-through
+  textures. They are hidden by what's in front of them, and seen through glass and grates as they
+  should be.
+* Electric beams look like lightning again instead of plain blue lines, and the tripmine laser is
+  its textured beam again instead of a thin red line.
+* Crates can be pushed straight forward, not only from the side.
+* The muzzle flash sits just in front of the barrel and the gun hides the part of it behind the
+  barrel, like the beams.
+* The elevator in Anomalous Materials (c1a0b and c1a0c) only moves when you press its button.
+* The scientist at the console in Anomalous Materials no longer stays hunched over the console
+  while he talks to you.
+* The scientists who fall down the elevator shaft at the start of Unforeseen Consequences now die
+  at the bottom and burst into gibs. Damage areas (`trigger_hurt`) hurt characters as well as the
+  player, as on PC.
+* Going back from some maps to the one before (Questionable Ethics' c2a1b to c2a1a) no longer runs
+  out of memory.
+* The builder no longer stops with an error when the Half-Life folder has no
+  `resource/logo.tga`.
 
 ## What works
 
@@ -88,7 +80,7 @@ It is built from:
 | Characters | Scientists, Barney, the G-Man and every monster are placed with their original models, skins, heads and animations (studio models converted by `tools/mdl2n64.py`, skinned on the RSP). They are solid, lit by the floor beneath them, and follow the player through level transitions |
 | Navigation | Characters walk on the map's own node graph (`info_node`), like `dlls/nodes.cpp`: `tools/navgen.c` links the nodes offline with the same 18-unit step test the PC does at load time, and the N64 finds routes with A*. Movement is collision-checked against the world, doors, other characters and the player, with step-up, gravity and riding lifts |
 | Scripted sequences | `dlls/scripted.cpp`: a scene waits (retrying every second) until its character is free, the character walks or runs to its mark along the node graph, turns, plays its animation and fires its events; the scene's target fires when the animation ends |
-| Talking characters | `talkmonster.cpp`: +use makes a scientist or Barney follow you (or wait), pre-disaster staff decline, greetings, idle chatter, questions and answers between characters, remarks about your health, scientists heal you, getting shot makes them angry |
+| Talking characters | `talkmonster.cpp`: +use makes a scientist or Barney follow you (or wait), pre-disaster staff decline, greetings, idle chatter, questions and answers between characters, remarks about your health, scientists heal you when you're below half health, getting shot makes them angry |
 | Speech and music | All of `sentences.txt` (the engine's VOX system: word lists, per-word pitch/volume/start/end, groups), scripted_sentence, speaker announcements, ambient_generic, env_message sounds, the HEV suit voice, and the CD-audio music (trigger_cdaudio / target_cdaudio) from the game's MP3s. 3D panning and distance falloff follow the engine's `S_Spatialize`. Audio is compressed with libdragon's ULC codec |
 | HEV suit | Picking up the suit starts the HEV logon (with its music in Anomalous Materials), turns on the HUD, and unlocks the map logic that waits for it. Health, armour, batteries, medkits, wall health and HEV chargers, fall damage, drowning, trigger_hurt, the suit's damage reports, death and restart |
 | Weapons | All 14 weapons with their first-person models and animations, ammo, reloads and alternate fire: crowbar, glock, .357, MP5 + grenades, shotgun, crossbow, RPG (laser-guided), gauss (charged shot), egon, hivehand, hand grenades, satchels, trip mines, snarks. Placed where the maps put them, in crates (`func_breakable` spawn objects) and dropped by soldiers. Autoaim as in single player. HUD ammo counters, weapon selection, crosshairs, damage indicators |
@@ -99,10 +91,11 @@ It is built from:
 | Trains | `func_tracktrain` ported from `plats.cpp`/`pathcorner.cpp`: path_track switching (alternate paths, disabled tracks), track-change lifts, dead ends, and **player-driven trains** (On A Rail) with the HUD speed gauge |
 | Map logic | trigger_once/multiple/auto/relay/push/teleport/hurt (including the monster-only ones: the vortigaunts that flash into the test chamber during the resonance cascade are sent on as on PC), multi_manager, multisource masters (sources are everything that targets them plus the multi_managers that list them, as in `CMultiSource::Register`; their state is saved), trigger_changetarget, trigger_camera, env_fade, env_message, env_shake, env_explosion, env_spark, game_text, env_render, env_sprite/env_glow, env_shooter, env_funnel, env_blood, env_beverage, env_global (global states carried between maps and saves), trigger_gravity (Xen's 0.6 gravity), trigger_autosave, player_loadsaved, func_friction, func_pendulum, func_mortar_field, momentary_rot_button + momentary_door, func_tank family, killtarget, `globalname` carry-over |
 | Text | Half-Life's own font (`gfx.wad` CREDITSFONT) for menus and HUD messages. `titles.txt` is parsed at run time: intro credits, chapter titles, Hazard Course instructions and end credits use their original positions, colours and fade/type-on effects (`cl_dll/message.cpp`) |
-| Menus | Animated title screen with music and menu sounds: Continue / New game / Load game / Options; Resume / Save game / Load game / Options / Leave game in the pause menu; New Game, Load and Save (SRAM and Controller Pak), Options (controls, button remapping, audio/video, cheats, credits) and a "Loading..." box |
+| Menus | Animated title screen with music and menu sounds: Continue / New game / Head-To-Head (when built with it) / Load game / Options; Resume / Save game / Load game / Options / Leave game in the pause menu; New Game, Load and Save (SRAM and Controller Pak), Options (controls, button remapping, audio/video, cheats, credits) and a "Loading..." box |
 | Level transitions | trigger_changelevel with landmarks, as on PC, carrying over characters that follow you, `changetarget` events (Office Complex's elevator) and global states. The intro tram plays through c0a0–c0a0e. Your health, suit, weapons and ducking carry over. Options → Cheat Codes can also jump straight to any map, placing you where the level is normally entered (or at the map's own start point when that spot is over a drop or outside the new map) |
 | Player physics | Valve's pm_shared.c, unmodified (including the long jump module) |
 | Performance | About 30–60 fps at 320×240 in ares (cycle-accurate emulator), averaging ~47 fps over an automated tour of the campaign's maps; the busiest scenes dip to the high 20s. PVS + frustum culling of world faces and brush entities, characters drawn as triangle strips, fixed poses (gibs, mines, items, bodies) computed once and shared, view-culled gibs and projectiles, billboards drawn as texture rectangles, monster sight checks that test the nearest targets first and skip those outside the PVS, throttled route searches, idle monsters out of sight think at 4 Hz, and a deeper RSP command queue so the CPU and RSP work in parallel |
+| Head-To-Head | Two-player split screen (`src/h2h.c`) on the PS2 version's ten maps plus Crimson, with its six characters and their guns in hand. Deathmatch rules from `multiplay_gamerules.cpp`: frags, frag and time limits, respawns at the maps' deathmatch spawn points, item and weapon respawns, the deathmatch weapon values and shotgun spreads. Both players share the world (doors, items, projectiles, mounted guns) |
 | HUD | HEV HUD and title credit inset for CRT overscan; the crosshair (on once you have the suit) slides onto the enemy the auto-aim locks on to |
 
 ## Known issues
@@ -112,13 +105,13 @@ It is built from:
 * The heaviest scenes (the tram ride and busy parts of Unforeseen Consequences, Office Complex and
   "We've Got Hostiles", with many characters on screen) run in the high 20s fps.
 * A few of the largest maps use nearly all of the Expansion Pak's memory.
-* A report of the shotgun's view model briefly covering the lower half of the screen while
-  moving hasn't been reproduced yet.
 * The Debug map loader's arrival spot is worked out from the previous map's level change; on a
   few maps it falls back to the map's own start point, which can be a little off the usual path.
 * With the flashlight on and the view held still, a character walking into the beam can take a
   few frames to be lit.
-* The Controller Pak and GameCube controller support have been tested in the emulator only.
+* The Controller Pak, GameCube controller and Head-To-Head support have been tested in the
+  emulator only.
+* In Head-To-Head, sounds are heard from player 1's position.
 * The macOS builders are built by GitHub Actions and haven't been tried on a Mac yet.
 
 ## What is not there (yet)
@@ -145,7 +138,7 @@ It is built from:
 | D-pad down | Reload |
 | D-pad up | Flashlight |
 | Stick up/down while driving a train | Faster / slower (four steps each way, as on PC) |
-| Start | Pause menu |
+| Start | Pause menu (in Head-To-Head, either player can pause) |
 | Cheats (tick "Enable cheats" in Options → Controls → Advanced first): L + D-pad up | Noclip |
 | Cheats: L + D-pad down | Every weapon and full ammo (impulse 101) |
 | Cheats: Options → Cheat Codes | God mode, noclip, give everything, and go to any map |
@@ -187,6 +180,25 @@ private copy of Python are inside it, and no Valve game data is.
 3. Build again later and it reuses the converted data, so only the ROM is rebuilt; tick
    "Convert everything again" to redo it.
 
+### Adding Head-To-Head from the PlayStation 2 version
+
+Head-To-Head's maps, characters and menu art come from the PS2 version of Half-Life, so you need
+your own copy of that game. It's optional: without it the ROM has the full campaign but no
+Head-To-Head.
+
+1. **Extract the PS2 disc image.** The game comes as a `.bin` disc image; the builder can't read
+   that directly. Extract its contents into a folder with a disc-image tool (for example 7-Zip:
+   right-click the `.bin` → 7-Zip → Extract to...). If your tool won't open the `.bin`, convert it
+   to an `.iso` first (for example with `bchunk` on Linux or AnyBurn on Windows) and extract that.
+   The folder you end up with should contain `SLUS_200.66`, `SYSTEM.CNF` and a `VALVE` folder with
+   `PAK0.PAK` in it.
+2. In the builder, tick **Add Head-To-Head from the PlayStation 2 version** and choose that
+   extracted folder (the one with `SLUS_200.66` and `VALVE` in it, not the `VALVE` folder itself).
+3. Press **Build ROM**. Head-To-Head then appears on the title screen's main menu.
+
+Adding (or removing) the PS2 folder after a ROM was already built makes the next build convert
+everything again (30–90 minutes). Like the ROM itself, the PS2 game's files are yours: don't share them.
+
 The temporary files (the unpacked tools and the converted data, about 300 MB) go to
 `%LOCALAPPDATA%\HL64Builder` on Windows, `~/.cache/HL64Builder` on Linux and
 `~/Library/Caches/HL64Builder` on macOS unless another folder is chosen. The builders aren't
@@ -219,6 +231,7 @@ git clone https://github.com/HailToDodongo/tiny3d && (cd tiny3d && ./build.sh)
 
 # 2. Convert your game data (maps, node graphs, textures, skies, models, fonts, sounds, music) into filesystem/
 python3 tools/build_assets.py "/path/to/Half-Life/valve" filesystem
+#    Head-To-Head: add --ps2 "/path/to/extracted PS2 disc" (the folder with SLUS_200.66 and VALVE/)
 #    --models-only / --ui-only rebuild just the characters or the fonts, HUD/effect sprites and titles
 #    options: --maps c1a0 c1a1 ...   (subset)   --grid 64 --tol 12 (lighting detail vs triangles)
 
@@ -268,7 +281,8 @@ Building needs a host C compiler (`cc`) for `tools/navgen.c`.
 ## Source layout
 
 ```
-src/main.c        main loop, input, view, trigger_camera, level changes, saves
+src/main.c        main loop, input, view, trigger_camera, level changes, saves, the Head-To-Head frame
+src/h2h.c         Head-To-Head: the two players' contexts, deathmatch rules, respawns, the split screen
 src/render.c      tiny3d renderer: PVS, batching, CI8 textures, skybox, characters
 src/bsp.c         map loader, PVS, hull traces, texture-under-point, light sampling
 src/pmove.c       engine callbacks for Valve's pm_shared.c (incl. monster box hulls)
@@ -284,7 +298,9 @@ src/player.c      health, HEV suit, damage, items, health/armour HUD
 src/weapons.c     weapons, projectiles, view model, ammo HUD, effects and env_sprites
 src/skill.c       skill.cfg
 valve_sdk/        files from Valve's Half-Life SDK (see valve_sdk/LICENSE)
-tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, spr2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py
+tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, spr2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py,
+                  ps2h2h.py + bs2bsp.py (the PS2 version's Head-To-Head maps and characters)
+assets/           title screen and menu art, menu sounds and music, Head-To-Head menu art, Crimson (crimson.bsp)
 builder/          the ROM builders: Windows (hl64builder.c, packer, build_windows.sh), Linux/macOS (build_unix.sh + tools/builder_gui.py)
 test/             PC test harness: runs the same game code on a converted map
 ```
@@ -296,6 +312,7 @@ N64 build can use 128 entries instead of 600 (only nearby brush entities are pas
 
 This project contains code from Valve's Half-Life 1 SDK, distributed under Valve's SDK licence
 (`valve_sdk/LICENSE`): non-commercial use only, with the licence included. A ROM built with
-`tools/build_assets.py` contains converted Half-Life game data from *your* copy of the game.
+`tools/build_assets.py` contains converted Half-Life game data from *your* copy of the game (and,
+with Head-To-Head, from your copy of the PS2 version).
 Keep it for personal use and do not distribute it. Half-Life is a trademark of Valve
 Corporation. This is an unofficial fan project, not affiliated with Valve or Nintendo.

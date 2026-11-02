@@ -16,7 +16,7 @@ VALVE_DEFS = -Dstricmp=strcasecmp -Dstrnicmp=strncasecmp -DMAX_PHYSENTS=128 -DND
 
 N64_CFLAGS += -std=gnu2x -O2 -ffast-math -fno-strict-aliasing -Wno-stringop-truncation -Wno-unused-but-set-variable -Wno-unused-variable -Wno-format-truncation $(EXTRA_CFLAGS)
 
-SRC = src/main.c src/bsp.c src/render.c src/entities.c src/sound.c src/studio.c src/npc.c src/nav.c src/player.c src/weapons.c src/skill.c src/font.c src/hud.c src/menu.c src/heapdbg.c src/lights.c
+SRC = src/h2h.c src/main.c src/bsp.c src/render.c src/entities.c src/sound.c src/studio.c src/npc.c src/nav.c src/player.c src/weapons.c src/skill.c src/font.c src/hud.c src/menu.c src/heapdbg.c src/lights.c
 VALVE_SRC = $(VALVE)/pm_shared/pm_shared.c $(VALVE)/pm_shared/pm_math.c
 
 OBJS = $(SRC:src/%.c=$(BUILD_DIR)/%.o) $(BUILD_DIR)/pmove.o \

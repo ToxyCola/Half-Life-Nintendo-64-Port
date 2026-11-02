@@ -4,6 +4,14 @@
 #include <stdbool.h>
 
 #define MAX_ENTITIES 1024
+
+// Per-player state for Head-To-Head (split screen): variables marked PCTX live in one linker
+// section, and h2h.c swaps the whole section between the two players' copies, so the single-player
+// code (movement, weapons, HUD, suit) runs unchanged for each player in turn.
+#define PCTX __attribute__((section("pctx")))
+extern bool h2h_active;    // a Head-To-Head match is on
+extern int  h2h_cur;       // whose context is loaded (0 or 1)
+extern int  h2h_inflictor; // who is doing the damage being dealt now (-1 the world)
 #define SOLID_NOT_ 0
 #ifndef SOLID_BSP
 #define SOLID_BSP 4
@@ -241,6 +249,10 @@ void game_trace(const float *start, const float *end, const float *mins, const f
 bool game_visible(const float *a, const float *b);
 void game_trace_begin_frame(void);   // gather solid brush entities (call each frame after they move)   // line of sight (world + brushes)
 int  game_point_contents(const float *p);
+
+// hud.c: the screen area the HUD draws in (the whole screen, or one player's half in Head-To-Head)
+extern int hud_y0, hud_h;
+#define HUD_CY (hud_y0 + hud_h / 2)
 
 // sound.c  (GoldSrc channels / attenuations, as in common/const.h)
 #ifndef CHAN_AUTO

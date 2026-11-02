@@ -16,7 +16,9 @@
 #include <stdlib.h>
 #include <math.h>
 #include "font.h"
+#include "game.h"
 #include "menu.h"
+#include "h2h.h"
 void snd_play(const char *sample, float volume, int channel);
 void snd_set_volume(float v);
 
@@ -29,7 +31,7 @@ const char *bind_names[NUM_BINDS] = {"Fire", "Alternate fire", "Jump", "Duck", "
 const char *pad_names[NUM_PADS] = {"A", "B", "Z", "L", "R", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "C-up", "C-down", "C-left", "C-right",
                                    "Stick up", "Stick down", "Stick left", "Stick right", "X (GameCube)", "Y (GameCube)"};
 // the stick as four buttons, for the schemes where it doesn't move or look (pushed past half way)
-static uint8_t stick_held, stick_pressed;
+static PCTX uint8_t stick_held, stick_pressed;
 void pad_stick_update(const joypad_inputs_t *in)
 {
     uint8_t h = (in->stick_y > 45 ? 1 : 0) | (in->stick_y < -45 ? 2 : 0) | (in->stick_x < -45 ? 4 : 0) | (in->stick_x > 45 ? 8 : 0);
@@ -140,7 +142,7 @@ void settings_load(void)
 #define C_SEL_BG      RGBA32(149, 136, 49, 255)
 #define C_CTRL_BRIGHT RGBA32(196, 181, 80, 255)
 
-typedef enum { SCR_MAIN, SCR_NEWGAME, SCR_LOAD, SCR_SAVE, SCR_OPTIONS, SCR_OPTIONS_LEGACY, SCR_OPTIONS_CTRL, SCR_OPTIONS_CTRL_ADV, SCR_OPTIONS_BINDS, SCR_OPTIONS_AV, SCR_OPTIONS_CREDITS, SCR_OPTIONS_CHEATS, SCR_LEAVE } screen_t;
+typedef enum { SCR_MAIN, SCR_NEWGAME, SCR_LOAD, SCR_SAVE, SCR_OPTIONS, SCR_OPTIONS_LEGACY, SCR_OPTIONS_CTRL, SCR_OPTIONS_CTRL_ADV, SCR_OPTIONS_BINDS, SCR_OPTIONS_AV, SCR_OPTIONS_CREDITS, SCR_OPTIONS_CHEATS, SCR_LEAVE, SCR_H2H_CHARS, SCR_H2H_MAP } screen_t;
 
 static bool open, in_game;
 static screen_t screen;
@@ -294,16 +296,59 @@ static sprite_t *colorstrip2_spr;
 static bool colorstrip2_tried;
 static int num_saves, save_slots[6];
 static char save_labels[6][48];
-typedef enum { MI_CONTINUE, MI_RESUME, MI_SAVE, MI_NEWGAME, MI_LOAD, MI_OPTIONS, MI_LEAVE } mitem_t;
-static const char *mi_label[] = {"Continue", "Resume game", "Save game", "New game", "Load game", "Options", "Leave game"};
+typedef enum { MI_CONTINUE, MI_RESUME, MI_SAVE, MI_NEWGAME, MI_LOAD, MI_OPTIONS, MI_LEAVE, MI_H2H } mitem_t;
+static const char *mi_label[] = {"Continue", "Resume game", "Save game", "New game", "Load game", "Options", "Leave game", "Head-To-Head"};
 static const char *mi_hint[] = {"Continue from your most recent save.", "", "Save your progress here.", "Start a new single player game.", "Load an autosave or a saved game.",
-                                "Change game settings, configure controls.", ""};
+                                "Change game settings, configure controls.", "", "Head-to-head multiplayer match."};
+
+// ------------------------------------------------------------------ Head-To-Head (PS2 front end:
+// HeadToHeadPlayerSelection, then HeadToHeadMapSelection with the frag and time limits)
+// (the screens' look and layout are the community build's Head-To-Head menu)
+static int h2h_p1_sel = 0, h2h_p2_sel = 1;          // the character grid, in its order (h2h_names)
+static bool h2h_p1_ready = false, h2h_p2_ready = false;
+static int h2h_match_sel = 0;                       // 0 map, 1 frag limit, 2 time limit
+static int h2h_map_sel = 0;                         // h2h_maps[]
+static int h2h_fraglimit = 50, h2h_timelimit = 0;   // 0 = no time limit
+// the grid's characters -> the game's (h2h.c char_models: Gordon, Gina, Colette, Barney, soldier, scientist)
+static const int h2h_char_of[6] = {0, 3, 1, 2, 5, 4};
+static int h2h_map_ok = -1;   // the PS2 maps are in this ROM (built from a PS2 disc)
+static bool h2h_available(void)
+{
+    if (h2h_map_ok < 0) {
+        h2h_map_ok = 0;
+        for (int i = 0; i < H2H_NUM_MAPS; i++) {
+            char path[64]; snprintf(path, sizeof(path), "rom:/maps/%s.hlb", h2h_maps[i]);
+            FILE *f = fopen(path, "rb");
+            if (f) { fclose(f); h2h_map_ok |= 1 << i; }
+        }
+    }
+    return h2h_map_ok != 0;
+}
+void menu_h2h_settings(int *c1, int *c2, int *frags, int *minutes)
+{
+    *c1 = h2h_char_of[h2h_p1_sel]; *c2 = h2h_char_of[h2h_p2_sel]; *frags = h2h_fraglimit; *minutes = h2h_timelimit;
+}
+void menu_open_h2h(void)
+{
+    open = true;
+    in_game = false;
+    screen = SCR_H2H_MAP;
+    anim_t = 0;
+    h2h_match_sel = 0;
+#ifdef H2HMENUMAP
+    h2h_available(); h2h_map_sel = H2HMENUMAP;
+#endif
+#ifdef H2HMENUCHARS
+    screen = SCR_H2H_CHARS; h2h_p1_sel = 0; h2h_p2_sel = 1; h2h_p1_ready = false; h2h_p2_ready = false;
+#endif
+}
 
 static int main_items(mitem_t *out)
 {
     int n = 0;
+    if (in_game && h2h_active) { out[n++] = MI_RESUME; out[n++] = MI_OPTIONS; out[n++] = MI_LEAVE; return n; }
     if (in_game) { out[n++] = MI_RESUME; out[n++] = MI_SAVE; }
-    else { if (game_save_exists()) out[n++] = MI_CONTINUE; out[n++] = MI_NEWGAME; }      // GameMenu.res: New game is hidden while playing
+    else { if (game_save_exists()) out[n++] = MI_CONTINUE; out[n++] = MI_NEWGAME; if (h2h_available()) out[n++] = MI_H2H; }      // GameMenu.res: New game is hidden while playing
     out[n++] = MI_LOAD;
     out[n++] = MI_OPTIONS;
     if (in_game) out[n++] = MI_LEAVE;
@@ -390,7 +435,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
     anim_t += dt;
     menu_time += dt;
     if (!open) return MENU_ACT_NONE;
-    mitem_t items[6];
+    mitem_t items[8];
     int n = main_items(items);
     switch (screen) {
     case SCR_MAIN: {
@@ -411,6 +456,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
             case MI_SAVE: screen = SCR_SAVE; pak_sel = 0; num_saves = game_saves_list(save_slots, save_labels); load_sel = load_scroll = 0; break;
             case MI_OPTIONS: screen = SCR_OPTIONS; opt_menu_sel = 0; anim_t = 0.0f; break;
             case MI_LEAVE: screen = SCR_LEAVE; leave_sel = 1; break;
+            case MI_H2H: screen = SCR_H2H_CHARS; h2h_p1_sel = 0; h2h_p2_sel = 1; h2h_p1_ready = false; h2h_p2_ready = false; break;
             }
         }
         break;
@@ -721,6 +767,142 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         }
         break;
     }
+    case SCR_H2H_CHARS: {
+        // Player 1 navigation
+        if (!h2h_p1_ready) {
+            int p1_dx = (pressed.d_right || in.stick_x > 30) - (pressed.d_left || in.stick_x < -30);
+            int p1_dy = (pressed.d_down || in.stick_y < -30) - (pressed.d_up || in.stick_y > 30);
+            int p1_row = h2h_p1_sel / 2;
+            int p1_col = h2h_p1_sel % 2;
+            if (p1_dx != 0) p1_col ^= 1;
+            if (p1_dy > 0) p1_row = (p1_row + 1) % 3;
+            else if (p1_dy < 0) p1_row = (p1_row + 2) % 3;
+            int new_p1 = p1_row * 2 + p1_col;
+            if (new_p1 != h2h_p1_sel) {
+                h2h_p1_sel = new_p1;
+                snd_play("ui/select.wav", 1.0f, 3);
+            }
+        }
+
+        // Player 2 navigation (Port 2 controller OR C-buttons on Port 1)
+        joypad_inputs_t in2 = joypad_get_inputs(JOYPAD_PORT_2);
+        joypad_buttons_t pressed2 = joypad_get_buttons_pressed(JOYPAD_PORT_2);
+        if (!h2h_p2_ready) {
+            int p2_dx = (pressed2.d_right || in2.stick_x > 30 || pressed.c_right) -
+                        (pressed2.d_left || in2.stick_x < -30 || pressed.c_left);
+            int p2_dy = (pressed2.d_down || in2.stick_y < -30 || pressed.c_down) -
+                        (pressed2.d_up || in2.stick_y > 30 || pressed.c_up);
+            int p2_row = h2h_p2_sel / 2;
+            int p2_col = h2h_p2_sel % 2;
+            if (p2_dx != 0) p2_col ^= 1;
+            if (p2_dy > 0) p2_row = (p2_row + 1) % 3;
+            else if (p2_dy < 0) p2_row = (p2_row + 2) % 3;
+            int new_p2 = p2_row * 2 + p2_col;
+            if (new_p2 != h2h_p2_sel) {
+                h2h_p2_sel = new_p2;
+                snd_play("ui/select.wav", 1.0f, 3);
+            }
+        }
+
+        // Ready toggles
+        if (pressed.start || pressed.a) {
+            h2h_p1_ready = !h2h_p1_ready;
+            snd_play(h2h_p1_ready ? "ui/confirm.wav" : "ui/select.wav", 1.0f, 3);
+        }
+        if (pressed2.start || pressed2.a || pressed.z) {
+            h2h_p2_ready = !h2h_p2_ready;
+            snd_play(h2h_p2_ready ? "ui/confirm.wav" : "ui/select.wav", 1.0f, 3);
+        }
+
+        // Back
+        if (pressed.b || pressed2.b) {
+            snd_play("ui/cancel.wav", 1.0f, 3);
+            if (h2h_p1_ready || h2h_p2_ready) {
+                h2h_p1_ready = false;
+                h2h_p2_ready = false;
+            } else {
+                screen = SCR_MAIN;
+            }
+            break;
+        }
+
+        // Both ready -> advance to Match Setup
+        if (h2h_p1_ready && h2h_p2_ready) {
+            screen = SCR_H2H_MAP; anim_t = 0;
+            h2h_match_sel = 0;
+            snd_play("ui/confirm.wav", 1.0f, 3);
+        }
+        break;
+    }
+    case SCR_H2H_MAP: {
+        joypad_inputs_t in2 = joypad_get_inputs(JOYPAD_PORT_2);
+        joypad_buttons_t pressed2 = joypad_get_buttons_pressed(JOYPAD_PORT_2);
+
+        // Merge inputs from Port 1 and Port 2
+        joypad_inputs_t in_m = in;
+        if (abs(in2.stick_x) > abs(in.stick_x)) in_m.stick_x = in2.stick_x;
+        if (abs(in2.stick_y) > abs(in.stick_y)) in_m.stick_y = in2.stick_y;
+
+        joypad_buttons_t pr_m = pressed;
+        pr_m.d_up |= pressed2.d_up;
+        pr_m.d_down |= pressed2.d_down;
+        pr_m.d_left |= pressed2.d_left;
+        pr_m.d_right |= pressed2.d_right;
+        pr_m.c_up |= pressed2.c_up;
+        pr_m.c_down |= pressed2.c_down;
+        pr_m.c_left |= pressed2.c_left;
+        pr_m.c_right |= pressed2.c_right;
+        pr_m.a |= pressed2.a;
+        pr_m.b |= pressed2.b;
+        pr_m.start |= pressed2.start;
+
+        // Navigation Up/Down between: 0=Map, 1=Frag limit, 2=Time limit
+        // Using nav_dir gives immediate response on D-pad + debounce on thumbstick!
+        int dy = nav_dir(dt, in_m, pr_m, false);
+        if (dy != 0) {
+            h2h_match_sel = (h2h_match_sel + dy + 3) % 3;
+            snd_play("ui/select.wav", 1.0f, 3);
+        }
+
+        // Adjust value Left/Right
+        int dx = nav_dir(dt, in_m, pr_m, true);
+        if (dx != 0) {
+            if (h2h_match_sel == 0) {
+                for (int k = 0; k < H2H_NUM_MAPS; k++) {   // (the maps built into this ROM)
+                    h2h_map_sel = (h2h_map_sel + dx + H2H_NUM_MAPS) % H2H_NUM_MAPS;
+                    if (h2h_map_ok & (1 << h2h_map_sel)) break;
+                }
+                snd_play("ui/select.wav", 1.0f, 3);
+            } else if (h2h_match_sel == 1) {
+                h2h_fraglimit += dx * 5;
+                if (h2h_fraglimit < 5) h2h_fraglimit = 5;
+                if (h2h_fraglimit > 50) h2h_fraglimit = 50;
+                snd_play("ui/select.wav", 1.0f, 3);
+            } else if (h2h_match_sel == 2) {
+                h2h_timelimit += dx * 5;
+                if (h2h_timelimit < 0) h2h_timelimit = 0;
+                if (h2h_timelimit > 30) h2h_timelimit = 30;
+                snd_play("ui/select.wav", 1.0f, 3);
+            }
+        }
+
+        if (pr_m.b) {
+            snd_play("ui/cancel.wav", 1.0f, 3);
+            screen = SCR_H2H_CHARS;
+            h2h_p1_ready = false;
+            h2h_p2_ready = false;
+            break;
+        }
+
+        if (pr_m.a || pr_m.start) {
+            if (!(h2h_map_ok & (1 << h2h_map_sel))) { snd_play("ui/cancel.wav", 1.0f, 3); break; }
+            snd_play("ui/confirm.wav", 1.0f, 3);
+            open = false;
+            strncpy(map_out, h2h_maps[h2h_map_sel], map_out_len);
+            return MENU_ACT_START_H2H;
+        }
+        break;
+    }
     case SCR_OPTIONS_CHEATS: {
         int nc = cheat_count();
         int d = nav_dir(dt, in, pressed, false);
@@ -853,26 +1035,57 @@ static float bounce_pos(float time, float min_x, float max_x, float speed)
     return (p <= span) ? (min_x + p) : (max_x - (p - span));
 }
 
+static sprite_t *h2h_top_spr, *h2h_bot_spr;
+static bool h2h_top_tried, h2h_bot_tried;
+
 static void draw_title_hl(void)
 {
     if (in_game) return;
-    if (!hl_top_tried) {
-        hl_top_tried = true;
-        FILE *f = fopen("rom:/ui/hl_top.sprite", "rb");
-        if (f) {
-            fclose(f);
-            hl_top_spr = sprite_load("rom:/ui/hl_top.sprite");
+    bool is_h2h = (screen == SCR_H2H_CHARS || screen == SCR_H2H_MAP);
+    sprite_t *top_spr = NULL;
+    sprite_t *bot_spr = NULL;
+
+    if (is_h2h) {
+        if (!h2h_top_tried) {
+            h2h_top_tried = true;
+            FILE *f = fopen("rom:/ui/h2h_top.sprite", "rb");
+            if (f) {
+                fclose(f);
+                h2h_top_spr = sprite_load("rom:/ui/h2h_top.sprite");
+            }
         }
-    }
-    if (!hl_bot_tried) {
-        hl_bot_tried = true;
-        FILE *f = fopen("rom:/ui/hl_bot.sprite", "rb");
-        if (f) {
-            fclose(f);
-            hl_bot_spr = sprite_load("rom:/ui/hl_bot.sprite");
+        if (!h2h_bot_tried) {
+            h2h_bot_tried = true;
+            FILE *f = fopen("rom:/ui/h2h_bot.sprite", "rb");
+            if (f) {
+                fclose(f);
+                h2h_bot_spr = sprite_load("rom:/ui/h2h_bot.sprite");
+            }
         }
+        top_spr = h2h_top_spr;
+        bot_spr = h2h_bot_spr;
+    } else {
+        if (!hl_top_tried) {
+            hl_top_tried = true;
+            FILE *f = fopen("rom:/ui/hl_top.sprite", "rb");
+            if (f) {
+                fclose(f);
+                hl_top_spr = sprite_load("rom:/ui/hl_top.sprite");
+            }
+        }
+        if (!hl_bot_tried) {
+            hl_bot_tried = true;
+            FILE *f = fopen("rom:/ui/hl_bot.sprite", "rb");
+            if (f) {
+                fclose(f);
+                hl_bot_spr = sprite_load("rom:/ui/hl_bot.sprite");
+            }
+        }
+        top_spr = hl_top_spr;
+        bot_spr = hl_bot_spr;
     }
-    if (!hl_top_spr && !hl_bot_spr) {
+
+    if (!top_spr && !bot_spr) {
         if (logo.spr) {
             font_begin(BLEND_ALPHA);
             font_color(RGBA32(255, 255, 255, 255));
@@ -885,10 +1098,11 @@ static void draw_title_hl(void)
     float offset_5pct = SW * 0.05f;
 
     // 1. Top part of asset: rendered under / behind bottom part, 50% opacity, slightly slower bounce speed
-    if (hl_top_spr) {
-        float cx_top = (SW - hl_top_spr->width * scale_top) * 0.5f;
+    if (top_spr) {
+        float cx_top = (SW - top_spr->width * scale_top) * 0.5f;
         float x_top = bounce_pos(menu_time, cx_top - offset_5pct, cx_top + offset_5pct, 6.0f);
-        int y_top = (int)(SH * 0.10f) + 6; // slightly lower under the bottom part
+        int y_bot = (screen == SCR_H2H_MAP) ? 10 : (int)(SH * 0.10f);
+        int y_top = y_bot + 6; // slightly lower under the bottom part
 
         rdpq_set_mode_standard();
         rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
@@ -896,23 +1110,23 @@ static void draw_title_hl(void)
         rdpq_set_prim_color(RGBA32(255, 255, 255, 128)); // 50% opacity
         rdpq_mode_filter(FILTER_BILINEAR);
 
-        rdpq_sprite_blit(hl_top_spr, x_top, y_top, &(rdpq_blitparms_t){
+        rdpq_sprite_blit(top_spr, x_top, y_top, &(rdpq_blitparms_t){
             .scale_x = scale_top,
             .scale_y = scale_top,
         });
     }
 
     // 2. Bottom part of asset: foreground title, offset from top of screen by 10%, constant trajectory bounce
-    if (hl_bot_spr) {
-        float cx_bot = (SW - hl_bot_spr->width * scale_bot) * 0.5f;
+    if (bot_spr) {
+        float cx_bot = (SW - bot_spr->width * scale_bot) * 0.5f;
         float x_bot = bounce_pos(menu_time, cx_bot - offset_5pct, cx_bot + offset_5pct, 8.0f);
-        int y_bot = (int)(SH * 0.10f); // offset by the top of the screen by 10%
+        int y_bot = (screen == SCR_H2H_MAP) ? 10 : (int)(SH * 0.10f); // pushed up during map selection
 
         rdpq_set_mode_standard();
         rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
         rdpq_mode_filter(FILTER_BILINEAR);
 
-        rdpq_sprite_blit(hl_bot_spr, x_bot, y_bot, &(rdpq_blitparms_t){
+        rdpq_sprite_blit(bot_spr, x_bot, y_bot, &(rdpq_blitparms_t){
             .scale_x = scale_bot,
             .scale_y = scale_bot,
         });
@@ -953,7 +1167,7 @@ static void draw_main(void)
         if (f) { fclose(f); colorstrip2_spr = sprite_load("rom:/ui/colorstrip2.sprite"); }
     }
 
-    mitem_t items[6];
+    mitem_t items[8];
     int n = main_items(items);
     bool in_newgame = (screen == SCR_NEWGAME);
     int x = 36;
@@ -2260,8 +2474,10 @@ static bool title_tried;
 static sprite_t *menuglow_spr;
 static bool menuglow_tried;
 
+static void h2h_menu_release(void);
 void menu_release_title(void)
 {
+    h2h_menu_release();   // (the Head-To-Head menu's art: about half a megabyte)
     if (title_bg) { rspq_wait(); sprite_free(title_bg); title_bg = NULL; }
     if (glowcircle_spr) { rspq_wait(); sprite_free(glowcircle_spr); glowcircle_spr = NULL; }
     if (menuglow_spr) { rspq_wait(); sprite_free(menuglow_spr); menuglow_spr = NULL; }
@@ -2291,6 +2507,696 @@ void menu_release_title(void)
     slider_piece_tried = false;
     box_tried = false;
 }
+
+// ------------------------------------------------------------------ Head-to-Head
+static sprite_t *h2h_faces_spr[6];
+static bool h2h_faces_tried;
+static sprite_t *h2h_p1_spr, *h2h_p2_spr;
+static bool h2h_boxes_tried;
+static sprite_t *h2h_chars_spr[6];
+static bool h2h_chars_tried;
+
+static sprite_t *h2h_map_spr[11];
+static bool h2h_maps_tried;
+static sprite_t *h2h_thumb_spr[11];
+static sprite_t *h2h_thumb_hi_spr;
+static bool h2h_thumbs_tried;
+
+static const char *h2h_names[6] = {
+    "Gordon Freeman",
+    "Security Guard",
+    "Gina Cross",
+    "Colette Green",
+    "Scientist",
+    "Soldier"
+};
+
+static const char *h2h_face_files[6] = {
+    "rom:/ui/h2h_face0.sprite",
+    "rom:/ui/h2h_face3.sprite",
+    "rom:/ui/h2h_face1.sprite",
+    "rom:/ui/h2h_face2.sprite",
+    "rom:/ui/h2h_face5.sprite",
+    "rom:/ui/h2h_face4.sprite"
+};
+
+static const char *h2h_char_files[6] = {
+    "rom:/ui/gordon.sprite",
+    "rom:/ui/barney.sprite",
+    "rom:/ui/gina.sprite",
+    "rom:/ui/colette.sprite",
+    "rom:/ui/decay_scientist.sprite",
+    "rom:/ui/decay_soldier.sprite"
+};
+
+static void h2h_menu_release(void)
+{
+    sprite_t **all[] = {&h2h_top_spr, &h2h_bot_spr, &h2h_p1_spr, &h2h_p2_spr, &h2h_thumb_hi_spr};
+    bool any = false;
+    for (int i = 0; i < 5; i++) if (*all[i]) { if (!any) { rspq_wait(); any = true; } sprite_free(*all[i]); *all[i] = NULL; }
+    for (int i = 0; i < 6; i++) {
+        if (h2h_faces_spr[i]) { if (!any) { rspq_wait(); any = true; } sprite_free(h2h_faces_spr[i]); h2h_faces_spr[i] = NULL; }
+        if (h2h_chars_spr[i]) { if (!any) { rspq_wait(); any = true; } sprite_free(h2h_chars_spr[i]); h2h_chars_spr[i] = NULL; }
+    }
+    for (int i = 0; i < 11; i++) {
+        if (h2h_map_spr[i]) { if (!any) { rspq_wait(); any = true; } sprite_free(h2h_map_spr[i]); h2h_map_spr[i] = NULL; }
+        if (h2h_thumb_spr[i]) { if (!any) { rspq_wait(); any = true; } sprite_free(h2h_thumb_spr[i]); h2h_thumb_spr[i] = NULL; }
+    }
+    h2h_top_tried = h2h_bot_tried = h2h_faces_tried = h2h_boxes_tried = h2h_chars_tried = h2h_maps_tried = h2h_thumbs_tried = false;
+}
+
+static void draw_h2h_chars(void)
+{
+    draw_title_hl();
+
+    if (!buttons_a_tried) {
+        buttons_a_tried = true;
+        FILE *f = fopen("rom:/ui/buttons_a.sprite", "rb");
+        if (f) { fclose(f); buttons_a_spr = sprite_load("rom:/ui/buttons_a.sprite"); }
+    }
+    if (!buttons_b_tried) {
+        buttons_b_tried = true;
+        FILE *f = fopen("rom:/ui/buttons_b.sprite", "rb");
+        if (f) { fclose(f); buttons_b_spr = sprite_load("rom:/ui/buttons_b.sprite"); }
+    }
+    if (!colorstrip2_tried) {
+        colorstrip2_tried = true;
+        FILE *f = fopen("rom:/ui/colorstrip2.sprite", "rb");
+        if (f) { fclose(f); colorstrip2_spr = sprite_load("rom:/ui/colorstrip2.sprite"); }
+    }
+    if (!h2h_faces_tried) {
+        h2h_faces_tried = true;
+        for (int i = 0; i < 6; i++) {
+            FILE *f = fopen(h2h_face_files[i], "rb");
+            if (f) { fclose(f); h2h_faces_spr[i] = sprite_load(h2h_face_files[i]); }
+        }
+    }
+    if (!h2h_boxes_tried) {
+        h2h_boxes_tried = true;
+        FILE *f1 = fopen("rom:/ui/h2h_p1.sprite", "rb");
+        if (f1) { fclose(f1); h2h_p1_spr = sprite_load("rom:/ui/h2h_p1.sprite"); }
+        FILE *f2 = fopen("rom:/ui/h2h_p2.sprite", "rb");
+        if (f2) { fclose(f2); h2h_p2_spr = sprite_load("rom:/ui/h2h_p2.sprite"); }
+    }
+    if (!h2h_chars_tried) {
+        h2h_chars_tried = true;
+        for (int i = 0; i < 6; i++) {
+            FILE *f = fopen(h2h_char_files[i], "rb");
+            if (f) { fclose(f); h2h_chars_spr[i] = sprite_load(h2h_char_files[i]); }
+        }
+    }
+
+    // Header: "Choose Your Character" centered above grid
+    const char *hdr = "Choose Your Character";
+    int hw = font_width(FONT_MEDIUM, hdr);
+    int hx = (SW - hw) / 2;
+    int hy = 56;
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_MEDIUM, hx + 1, hy + 1, hdr);
+    font_color(RGBA32(235, 195, 65, 255));
+    font_draw(FONT_MEDIUM, hx, hy, hdr);
+
+    // Grid coordinates
+    static const int fx[2] = {128, 164};
+    static const int fy[3] = {76, 114, 152};
+    float s_face = 0.60f;
+
+    // Draw the 6 faces
+    for (int i = 0; i < 6; i++) {
+        if (!h2h_faces_spr[i]) continue;
+        int col = i % 2;
+        int row = i / 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(h2h_faces_spr[i], fx[col], fy[row], &(rdpq_blitparms_t){
+            .scale_x = s_face,
+            .scale_y = s_face,
+        });
+    }
+
+    // Draw P1 hover frame
+    if (h2h_p1_spr && h2h_p1_sel >= 0 && h2h_p1_sel < 6) {
+        int col = h2h_p1_sel % 2;
+        int row = h2h_p1_sel / 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(h2h_p1_spr, fx[col] - 2, fy[row] - 3, &(rdpq_blitparms_t){
+            .scale_x = s_face,
+            .scale_y = s_face,
+        });
+    }
+
+    // Draw P2 hover frame
+    if (h2h_p2_spr && h2h_p2_sel >= 0 && h2h_p2_sel < 6) {
+        int col = h2h_p2_sel % 2;
+        int row = h2h_p2_sel / 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(h2h_p2_spr, fx[col] - 1, fy[row] - 3, &(rdpq_blitparms_t){
+            .scale_x = s_face,
+            .scale_y = s_face,
+        });
+    }
+
+    // Left Preview (P1 character)
+    if (h2h_p1_sel >= 0 && h2h_p1_sel < 6) {
+        sprite_t *spr = h2h_chars_spr[h2h_p1_sel];
+        if (spr) {
+            rdpq_set_mode_standard();
+            if (h2h_p1_ready) {
+                rdpq_mode_combiner(RDPQ_COMBINER_TEX_FLAT);
+                rdpq_set_prim_color(RGBA32(165, 165, 165, 255)); // 35% darkened
+            }
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(spr, 26, 66, &(rdpq_blitparms_t){
+                .scale_x = 0.50f,
+                .scale_y = 0.50f,
+            });
+        }
+        if (h2h_p1_ready) {
+            const char *r_txt = "READY";
+            int rx = 26 + 32;
+            int ry = 115;
+            font_begin(BLEND_ALPHA);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            font_color(RGBA32(0, 0, 0, 220));
+            font_draw_centered(FONT_MEDIUM, rx + 1, ry + 1, r_txt);
+            font_color(RGBA32(255, 255, 255, 255));
+            font_draw_centered(FONT_MEDIUM, rx, ry, r_txt);
+        }
+        // Left Name Banner (colorstrip2 flipped horizontally)
+        int nx = 12, ny = 196, nw = 114, nh = 16;
+        if (colorstrip2_spr) {
+            rdpq_set_mode_standard();
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(colorstrip2_spr, nx, ny, &(rdpq_blitparms_t){
+                .scale_x = (float)nw / colorstrip2_spr->width,
+                .scale_y = (float)nh / colorstrip2_spr->height,
+                .flip_x = true,
+            });
+        }
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_centered(FONT_MEDIUM, nx + nw / 2 + 1, ny + 2 + 1, h2h_names[h2h_p1_sel]);
+        font_color(RGBA32(255, 255, 255, 255));
+        font_draw_centered(FONT_MEDIUM, nx + nw / 2, ny + 2, h2h_names[h2h_p1_sel]);
+    }
+
+    // Right Preview (P2 character)
+    if (h2h_p2_sel >= 0 && h2h_p2_sel < 6) {
+        sprite_t *spr = h2h_chars_spr[h2h_p2_sel];
+        if (spr) {
+            rdpq_set_mode_standard();
+            if (h2h_p2_ready) {
+                rdpq_mode_combiner(RDPQ_COMBINER_TEX_FLAT);
+                rdpq_set_prim_color(RGBA32(165, 165, 165, 255)); // 35% darkened
+            }
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(spr, 230, 66, &(rdpq_blitparms_t){
+                .scale_x = 0.50f,
+                .scale_y = 0.50f,
+            });
+        }
+        if (h2h_p2_ready) {
+            const char *r_txt = "READY";
+            int rx = 230 + 32;
+            int ry = 115;
+            font_begin(BLEND_ALPHA);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            font_color(RGBA32(0, 0, 0, 220));
+            font_draw_centered(FONT_MEDIUM, rx + 1, ry + 1, r_txt);
+            font_color(RGBA32(255, 255, 255, 255));
+            font_draw_centered(FONT_MEDIUM, rx, ry, r_txt);
+        }
+        // Right Name Banner
+        int nx = 194, ny = 196, nw = 114, nh = 16;
+        if (colorstrip2_spr) {
+            rdpq_set_mode_standard();
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(colorstrip2_spr, nx, ny, &(rdpq_blitparms_t){
+                .scale_x = (float)nw / colorstrip2_spr->width,
+                .scale_y = (float)nh / colorstrip2_spr->height,
+            });
+        }
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_centered(FONT_MEDIUM, nx + nw / 2 + 1, ny + 2 + 1, h2h_names[h2h_p2_sel]);
+        font_color(RGBA32(255, 255, 255, 255));
+        font_draw_centered(FONT_MEDIUM, nx + nw / 2, ny + 2, h2h_names[h2h_p2_sel]);
+    }
+
+    // Bottom hints: (A) Select character   (B) Back
+    int by_btn = SH - 22;
+    float btn_scale = 0.459f;
+    int fh = font_height(FONT_SMALL);
+    int btn_x = 36;
+    if (buttons_a_spr) {
+        int by = by_btn + (fh - (int)(buttons_a_spr->height * btn_scale)) / 2 - 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(buttons_a_spr, btn_x, by, &(rdpq_blitparms_t){ .scale_x = btn_scale, .scale_y = btn_scale });
+        btn_x += (int)(buttons_a_spr->width * btn_scale) + 4;
+    }
+    font_begin(BLEND_ALPHA);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, "Select character");
+    font_color(C_MENU);
+    font_draw(FONT_SMALL, btn_x, by_btn, "Select character");
+    btn_x += font_width(FONT_SMALL, "Select character") + 24;
+
+    if (buttons_b_spr) {
+        int by = by_btn + (fh - (int)(buttons_b_spr->height * btn_scale)) / 2 - 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(buttons_b_spr, btn_x, by, &(rdpq_blitparms_t){ .scale_x = btn_scale, .scale_y = btn_scale });
+        btn_x += (int)(buttons_b_spr->width * btn_scale) + 4;
+    }
+    font_begin(BLEND_ALPHA);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, "Back");
+    font_color(C_MENU);
+    font_draw(FONT_SMALL, btn_x, by_btn, "Back");
+}
+
+static void draw_h2h_map(void)
+{
+    draw_title_hl();
+
+    if (!color2_tried) {
+        color2_tried = true;
+        FILE *f = fopen("rom:/ui/color2.sprite", "rb");
+        if (f) { fclose(f); color2_spr = sprite_load("rom:/ui/color2.sprite"); }
+    }
+    if (!buttons_a_tried) {
+        buttons_a_tried = true;
+        FILE *f = fopen("rom:/ui/buttons_a.sprite", "rb");
+        if (f) { fclose(f); buttons_a_spr = sprite_load("rom:/ui/buttons_a.sprite"); }
+    }
+    if (!buttons_b_tried) {
+        buttons_b_tried = true;
+        FILE *f = fopen("rom:/ui/buttons_b.sprite", "rb");
+        if (f) { fclose(f); buttons_b_spr = sprite_load("rom:/ui/buttons_b.sprite"); }
+    }
+    if (!h2h_maps_tried) {
+        h2h_maps_tried = true;
+        for (int i = 0; i < 11; i++) {
+            char path[32];
+            snprintf(path, sizeof(path), "rom:/ui/h2h_map%d.sprite", i);
+            FILE *f = fopen(path, "rb");
+            if (f) { fclose(f); h2h_map_spr[i] = sprite_load(path); }
+        }
+    }
+    if (!h2h_thumbs_tried) {
+        h2h_thumbs_tried = true;
+        for (int i = 0; i < 11; i++) {
+            char path[32];
+            snprintf(path, sizeof(path), "rom:/ui/h2h_thumb%d.sprite", i);
+            FILE *f = fopen(path, "rb");
+            if (f) { fclose(f); h2h_thumb_spr[i] = sprite_load(path); }
+        }
+        FILE *fh = fopen("rom:/ui/h2h_thumb_hi.sprite", "rb");
+        if (fh) { fclose(fh); h2h_thumb_hi_spr = sprite_load("rom:/ui/h2h_thumb_hi.sprite"); }
+    }
+    if (!h2h_faces_tried) {
+        h2h_faces_tried = true;
+        for (int i = 0; i < 6; i++) {
+            FILE *f = fopen(h2h_face_files[i], "rb");
+            if (f) { fclose(f); h2h_faces_spr[i] = sprite_load(h2h_face_files[i]); }
+        }
+    }
+
+    // --- TOP SECTION: MAP Title (Controller-style Selector) & Big Preview ---
+    // Label "MAP:" hugs observable framebuffer on the left at x = 12
+    int cs_x = 12, cs_y = 54;
+    bool map_armed = (h2h_match_sel == 0);
+
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, cs_x + 1, cs_y + 1, "MAP:", 1.05f);
+    font_color(RGBA32(235, 175, 45, 255));
+    font_draw_scaled(FONT_MEDIUM, cs_x, cs_y, "MAP:", 1.05f);
+
+    // Map Name Selector Box (identical styling to Controller Options)
+    const char *cur_map = h2h_map_titles[h2h_map_sel];
+    int label_w = (int)(font_width(FONT_MEDIUM, "MAP:") * 1.05f);
+    int bx = cs_x + label_w + 14;
+    int bw = (int)(font_width(FONT_MEDIUM, cur_map) * 1.05f) + 16;
+    int by = cs_y - 2;
+    int bh = 18;
+
+    if (map_armed) {
+        // Outline box: drawn when selected
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_set_prim_color(RGBA32(255, 178, 67, 255));
+        rdpq_fill_rectangle(bx + 1, by, bx + bw - 1, by + 1);
+        rdpq_fill_rectangle(bx + 1, by + bh - 1, bx + bw - 1, by + bh);
+        rdpq_fill_rectangle(bx, by + 1, bx + 1, by + bh - 1);
+        rdpq_fill_rectangle(bx + bw - 1, by + 1, bx + bw, by + bh - 1);
+
+        // Drop shadow for map name
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_scaled(FONT_MEDIUM, bx + 8 + 1, cs_y + 1, cur_map, 1.05f);
+
+        // Glowing text when selected
+        float pulse = 0.75f + 0.25f * sinf(anim_t * 4.0f);
+        font_begin(BLEND_ADD);
+        font_color(RGBA32(255 * pulse * 0.55f, 178 * pulse * 0.55f, 67 * pulse * 0.55f, 255));
+        font_draw_scaled(FONT_GLOW, bx + 8, cs_y, cur_map, 1.05f);
+
+        font_begin(BLEND_ALPHA);
+        font_color(C_MENU_ARMED);
+        font_draw_scaled(FONT_MEDIUM, bx + 8, cs_y, cur_map, 1.05f);
+
+        // Arrow indicators: Left < and Right >
+        rdpq_set_mode_standard();
+        rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_set_prim_color(RGBA32(255, 178, 67, 255));
+
+        int ay = cs_y + 2;
+        int lx = bx - 6;
+        for (int r = 0; r < 5; r++) {
+            rdpq_fill_rectangle(lx - r, ay + r, lx - r + 1, ay + 10 - r);
+        }
+        int ax = bx + bw + 4;
+        for (int r = 0; r < 5; r++) {
+            rdpq_fill_rectangle(ax + r, ay + r, ax + r + 1, ay + 10 - r);
+        }
+    } else {
+        // Deselected: NO outline, NO arrows, standard text
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw_scaled(FONT_MEDIUM, bx + 8 + 1, cs_y + 1, cur_map, 1.05f);
+        font_color(RGBA32(235, 235, 235, 255));
+        font_draw_scaled(FONT_MEDIUM, bx + 8, cs_y, cur_map, 1.05f);
+    }
+
+    if (h2h_map_credits[h2h_map_sel]) {   // a community map: its maker, small, under the name
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw(FONT_SMALL, bx + 8 + 1, cs_y + 19 + 1, h2h_map_credits[h2h_map_sel]);
+        font_color(RGBA32(196, 181, 80, 230));
+        font_draw(FONT_SMALL, bx + 8, cs_y + 19, h2h_map_credits[h2h_map_sel]);
+    }
+    if (!(h2h_map_ok & (1 << h2h_map_sel))) {   // (a map this ROM wasn't built with)
+        font_begin(BLEND_ALPHA);
+        font_color(RGBA32(220, 90, 60, 255));
+        font_draw(FONT_SMALL, bx + 8, cs_y + 19, "Not built into this ROM");
+    }
+
+    // Big Map Preview on the right: hugs observable framebuffer at x + w = 320
+    int map_w = 98;
+    int map_h = 49;
+    int map_px = SW - map_w; // 222 (literally touches the right side of the screen)
+    int map_py = 40;
+
+    if (h2h_map_spr[h2h_map_sel]) {
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(h2h_map_spr[h2h_map_sel], map_px, map_py, &(rdpq_blitparms_t){
+            .scale_x = (float)map_w / h2h_map_spr[h2h_map_sel]->width,
+            .scale_y = (float)map_h / h2h_map_spr[h2h_map_sel]->height,
+        });
+    }
+
+    // --- MIDDLE BOXES (Y: 100 to 160) ---
+    // Left Box hugs left side of the screen (x = 0)
+    // Right Box hugs right side of the screen (x + w = 320)
+    int box_w = 148;
+    int box_h = 60;
+    int b1_x = 0;
+    int b2_x = SW - box_w; // 172
+    int b_y = 100;
+
+    // "RULES" & "MATCHUP" titles: OUTSIDE the Color2 boxes (above them)
+    // 3% bigger and pushed closer to both boxes below them (title_y = 90)
+    int title_y = 90;
+    float title_scale = 1.03f;
+    int rw = (int)(font_width(FONT_SMALL, "RULES") * title_scale);
+    int mw = (int)(font_width(FONT_SMALL, "MATCHUP") * title_scale);
+
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_SMALL, b1_x + box_w / 2 - rw / 2 + 1, title_y + 1, "RULES", title_scale);
+    font_color(RGBA32(235, 175, 45, 255));
+    font_draw_scaled(FONT_SMALL, b1_x + box_w / 2 - rw / 2, title_y, "RULES", title_scale);
+
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_SMALL, b2_x + box_w / 2 - mw / 2 + 1, title_y + 1, "MATCHUP", title_scale);
+    font_color(RGBA32(235, 175, 45, 255));
+    font_draw_scaled(FONT_SMALL, b2_x + box_w / 2 - mw / 2, title_y, "MATCHUP", title_scale);
+
+    // Left Box (RULES) background & border
+    if (color2_spr) {
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(color2_spr, b1_x, b_y, &(rdpq_blitparms_t){
+            .scale_x = (float)box_w / color2_spr->width,
+            .scale_y = (float)box_h / color2_spr->height,
+        });
+    }
+
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_set_prim_color(RGBA32(180, 130, 40, 180));
+    rdpq_fill_rectangle(b1_x, b_y, b1_x + box_w, b_y + 1);
+    rdpq_fill_rectangle(b1_x, b_y + box_h - 1, b1_x + box_w, b_y + box_h);
+    rdpq_fill_rectangle(b1_x, b_y, b1_x + 1, b_y + box_h);
+    rdpq_fill_rectangle(b1_x + box_w - 1, b_y, b1_x + box_w, b_y + box_h);
+
+    // Frag limit row - closer to each other, bigger in size, top-aligned with small offset from top
+    int r1_y = b_y + 8;
+    int r2_y = b_y + 24;
+    float rules_scale = 0.92f;
+    int rx_label = b1_x + 12;
+    int rx_val = b1_x + 94;
+
+    bool frag_sel = (h2h_match_sel == 1);
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, rx_label + 1, r1_y + 1, "Frag limit:", rules_scale);
+    font_color(frag_sel ? RGBA32(255, 220, 100, 255) : RGBA32(235, 175, 45, 255));
+    font_draw_scaled(FONT_MEDIUM, rx_label, r1_y, "Frag limit:", rules_scale);
+
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d", h2h_fraglimit);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, rx_val + 1, r1_y + 1, buf, rules_scale);
+    font_color(RGBA32(255, 255, 255, 255));
+    font_draw_scaled(FONT_MEDIUM, rx_val, r1_y, buf, rules_scale);
+
+    // Time limit row
+    bool time_sel = (h2h_match_sel == 2);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, rx_label + 1, r2_y + 1, "Time limit:", rules_scale);
+    font_color(time_sel ? RGBA32(255, 220, 100, 255) : RGBA32(235, 175, 45, 255));
+    font_draw_scaled(FONT_MEDIUM, rx_label, r2_y, "Time limit:", rules_scale);
+
+    if (h2h_timelimit == 0) snprintf(buf, sizeof(buf), "None");
+    else snprintf(buf, sizeof(buf), "%d Min", h2h_timelimit);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, rx_val + 1, r2_y + 1, buf, rules_scale);
+    font_color(RGBA32(255, 255, 255, 255));
+    font_draw_scaled(FONT_MEDIUM, rx_val, r2_y, buf, rules_scale);
+
+    // Right Box (MATCHUP) background & border
+    if (color2_spr) {
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(color2_spr, b2_x, b_y, &(rdpq_blitparms_t){
+            .scale_x = (float)box_w / color2_spr->width,
+            .scale_y = (float)box_h / color2_spr->height,
+        });
+    }
+
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_set_prim_color(RGBA32(180, 130, 40, 180));
+    rdpq_fill_rectangle(b2_x, b_y, b2_x + box_w, b_y + 1);
+    rdpq_fill_rectangle(b2_x, b_y + box_h - 1, b2_x + box_w, b_y + box_h);
+    rdpq_fill_rectangle(b2_x, b_y, b2_x + 1, b_y + box_h);
+    rdpq_fill_rectangle(b2_x + box_w - 1, b_y, b2_x + box_w, b_y + box_h);
+
+    // Player 1 (Face on Left, Name on Right) - pushed up a bit
+    int f1_x = b2_x + 10;
+    int f1_y = b_y + 4;
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_set_prim_color(RGBA32(0, 0, 0, 255));
+    rdpq_fill_rectangle(f1_x - 1, f1_y - 1, f1_x + 21, f1_y + 21);
+
+    if (h2h_faces_spr[h2h_p1_sel]) {
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(h2h_faces_spr[h2h_p1_sel], f1_x, f1_y, &(rdpq_blitparms_t){
+            .scale_x = 20.0f / h2h_faces_spr[h2h_p1_sel]->width,
+            .scale_y = 20.0f / h2h_faces_spr[h2h_p1_sel]->height,
+        });
+    }
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_SMALL, f1_x + 28 + 1, f1_y + 3 + 1, h2h_names[h2h_p1_sel]);
+    font_color(RGBA32(255, 255, 255, 255));
+    font_draw(FONT_SMALL, f1_x + 28, f1_y + 3, h2h_names[h2h_p1_sel]);
+
+    // Center VS. - slightly bigger
+    int vs_w = (int)(font_width(FONT_MEDIUM, "VS.") * 0.95f);
+    int vs_x = b2_x + box_w / 2 - vs_w / 2;
+    int vs_y = b_y + 23;
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw_scaled(FONT_MEDIUM, vs_x + 1, vs_y + 1, "VS.", 0.95f);
+    font_color(RGBA32(235, 195, 65, 255));
+    font_draw_scaled(FONT_MEDIUM, vs_x, vs_y, "VS.", 0.95f);
+
+    // Player 2 (Name on Left, Face on Right)
+    int f2_x = b2_x + box_w - 30;
+    int f2_y = b_y + 35;
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER_FLAT);
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_set_prim_color(RGBA32(0, 0, 0, 255));
+    rdpq_fill_rectangle(f2_x - 1, f2_y - 1, f2_x + 21, f2_y + 21);
+
+    if (h2h_faces_spr[h2h_p2_sel]) {
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(h2h_faces_spr[h2h_p2_sel], f2_x, f2_y, &(rdpq_blitparms_t){
+            .scale_x = 20.0f / h2h_faces_spr[h2h_p2_sel]->width,
+            .scale_y = 20.0f / h2h_faces_spr[h2h_p2_sel]->height,
+        });
+    }
+    int p2_w = font_width(FONT_SMALL, h2h_names[h2h_p2_sel]);
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_SMALL, f2_x - 6 - p2_w + 1, f2_y + 3 + 1, h2h_names[h2h_p2_sel]);
+    font_color(RGBA32(255, 255, 255, 255));
+    font_draw(FONT_SMALL, f2_x - 6 - p2_w, f2_y + 3, h2h_names[h2h_p2_sel]);
+
+    // --- BOTTOM CAROUSEL OF MAP THUMBNAILS (Y ~ 175 to 204) ---
+    // Position shifts based on selection position:
+    // 1. First selection (maps 0-2): overscan on the right
+    // 2. Middle (maps 3-7, 3+ movements to right): left & right overscanned, 3rd thumbnail centered
+    // 3. Last / 3rd to last (maps 8-10): overscan on the left instead
+    int slot_w = 60;
+    int slot_h = 27;
+    int car_y = 175;
+    int start_idx;
+    int start_x;
+    int spacing;
+
+    if (h2h_map_sel < 3) {
+        // First selection: right overscan only
+        start_idx = 0;
+        start_x = 16;
+        spacing = 68;
+    } else if (h2h_map_sel >= 8) {
+        // Last or 3rd to last selection: left overscan only
+        start_idx = 6;
+        start_x = -28;
+        spacing = 68;
+    } else {
+        // Middle / 3+ movements right: left AND right overscanned, 3rd thumbnail in middle of screen
+        start_idx = h2h_map_sel - 2;
+        spacing = 76;
+        start_x = (SW - slot_w) / 2 - 2 * spacing; // -22
+    }
+
+    for (int slot = 0; slot < 5; slot++) {
+        int m = start_idx + slot;
+        int sx = start_x + slot * spacing;
+        if (m >= 0 && m < 11 && h2h_thumb_spr[m]) {
+            rdpq_set_mode_standard();
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(h2h_thumb_spr[m], sx, car_y, &(rdpq_blitparms_t){
+                .scale_x = (float)slot_w / h2h_thumb_spr[m]->width,
+                .scale_y = (float)slot_h / h2h_thumb_spr[m]->height,
+            });
+        }
+        // Highlight border for currently selected map
+        if (m == h2h_map_sel && h2h_thumb_hi_spr) {
+            rdpq_set_mode_standard();
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            rdpq_sprite_blit(h2h_thumb_hi_spr, sx - 2, car_y - 2, &(rdpq_blitparms_t){
+                .scale_x = (float)(slot_w + 4) / h2h_thumb_hi_spr->width,
+                .scale_y = (float)(slot_h + 4) / h2h_thumb_hi_spr->height,
+            });
+        }
+    }
+
+    // --- BOTTOM HINT BAR: (A) Start match   (B) Back (No "Change map") ---
+    int by_btn = SH - 22;
+    float btn_scale = 0.459f;
+    int fh = font_height(FONT_SMALL);
+    int btn_x = 24;
+
+    // Button A icon + "Start match"
+    if (buttons_a_spr) {
+        int by = by_btn + (fh - (int)(buttons_a_spr->height * btn_scale)) / 2 - 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(buttons_a_spr, btn_x, by, &(rdpq_blitparms_t){ .scale_x = btn_scale, .scale_y = btn_scale });
+        btn_x += (int)(buttons_a_spr->width * btn_scale) + 4;
+    }
+    font_begin(BLEND_ALPHA);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, "Start match");
+    font_color(C_MENU);
+    font_draw(FONT_SMALL, btn_x, by_btn, "Start match");
+    btn_x += font_width(FONT_SMALL, "Start match") + 28;
+
+    // Button B icon + "Back"
+    if (buttons_b_spr) {
+        int by = by_btn + (fh - (int)(buttons_b_spr->height * btn_scale)) / 2 - 2;
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(buttons_b_spr, btn_x, by, &(rdpq_blitparms_t){ .scale_x = btn_scale, .scale_y = btn_scale });
+        btn_x += (int)(buttons_b_spr->width * btn_scale) + 4;
+    }
+    font_begin(BLEND_ALPHA);
+    font_color(RGBA32(0, 0, 0, 217));
+    font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, "Back");
+    font_color(C_MENU);
+    font_draw(FONT_SMALL, btn_x, by_btn, "Back");
+}
+
 void menu_draw(void)
 {
     if (!open) return;
@@ -2337,6 +3243,8 @@ void menu_draw(void)
     else if (screen == SCR_LOAD) draw_load();
     else if (screen == SCR_SAVE) draw_save();
     else if (screen == SCR_LEAVE) draw_title_hl();
+    else if (screen == SCR_H2H_CHARS) draw_h2h_chars();
+    else if (screen == SCR_H2H_MAP) draw_h2h_map();
     else draw_main();
     switch (screen) {
     case SCR_OPTIONS_LEGACY: draw_options_legacy(); break;

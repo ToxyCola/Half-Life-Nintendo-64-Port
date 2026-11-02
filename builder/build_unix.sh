@@ -80,7 +80,7 @@ fi
 echo "== converters"
 cp tools/*.py "$STAGE/hl64/tools/"
 cp src/npc.c "$STAGE/hl64/src/"
-cp assets/*.png assets/*.mp3 "$STAGE/hl64/assets/"
+cp assets/*.png assets/*.mp3 assets/*.bsp "$STAGE/hl64/assets/"
 cp valve_sdk/LICENSE "$STAGE/licenses/valve-sdk-LICENSE" 2>/dev/null || true
 cp "$STAGE/python/LICENSE"* "$STAGE/licenses/" 2>/dev/null || true
 cp README.md "$STAGE/licenses/HL64-README.md"

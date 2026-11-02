@@ -82,6 +82,15 @@ def resolve_valve(p):
     return None
 
 
+def ps2_valid(d):
+    """a copy of the PS2 disc's files: VALVE/PAK0.PAK (any case)"""
+    try:
+        v = next((n for n in os.listdir(d) if n.lower() == 'valve'), None)
+        return bool(v) and any(n.lower() == 'pak0.pak' for n in os.listdir(os.path.join(d, v)))
+    except OSError:
+        return False
+
+
 def find_steam_halflife():
     if IS_MAC:
         steams = ['~/Library/Application Support/Steam']
@@ -109,9 +118,10 @@ def find_steam_halflife():
 
 # ---------------------------------------------------------------- the build (a worker thread)
 class Build(threading.Thread):
-    def __init__(self, valve, outdir, tempdir, clean, events):
+    def __init__(self, valve, outdir, tempdir, clean, events, ps2=None):
         super().__init__(daemon=True)
         self.valve, self.outdir, self.tempdir, self.clean, self.ev = valve, outdir, tempdir, clean, events
+        self.ps2 = ps2   # the PS2 disc's files (Head-To-Head), or None
         self.rom = None
         self.proc = None
         self.stop = False
@@ -169,7 +179,7 @@ class Build(threading.Thread):
 
         fsdir = os.path.join(work, 'filesystem')
         stamp = os.path.join(work, 'converted.txt')
-        want = '%s\n%s\n' % (VERSION, self.valve)
+        want = '%s\n%s\n%s\n' % (VERSION, self.valve, self.ps2 or '')
         have = ''
         try:
             have = open(stamp).read()
@@ -184,8 +194,11 @@ class Build(threading.Thread):
             self.status('Converting the game data (about 30-90 minutes)...', None, True)
             self.log('[1/3] Converting maps, textures, models, sprites, sounds and music.\n'
                      '      This takes a while (about 30-90 minutes, most of it compressing the maps).\n\n')
-            code = self.run_step([sys.executable, os.path.join(ROOT, 'hl64', 'tools', 'build_assets.py'),
-                                  self.valve, fsdir, '-j', str(jobs)], env)
+            cmd = [sys.executable, os.path.join(ROOT, 'hl64', 'tools', 'build_assets.py'), self.valve, fsdir, '-j', str(jobs)]
+            if self.ps2:
+                cmd += ['--ps2', self.ps2]
+                self.log('      With Head-To-Head from the PS2 files in %s\n\n' % self.ps2)
+            code = self.run_step(cmd, env)
             if code != 0:
                 self.fail('converting the game data failed (see the messages above).')
             open(stamp, 'w').write(want)
@@ -248,7 +261,7 @@ def main():
     root = tk.Tk()
     root.title('Half-Life 64 ROM builder (%s)' % VERSION)
     root.minsize(640, 460)
-    root.geometry('780x600')
+    root.geometry('780x660')
     try:
         style = ttk.Style()
         style.theme_use('aqua' if IS_MAC else 'clam')
@@ -262,6 +275,8 @@ def main():
     v_temp_on = tk.BooleanVar(value=c.get('custom_temp', '0') == '1')
     v_temp = tk.StringVar(value=c.get('temp') or default_temp())
     v_clean = tk.BooleanVar(value=clean_arg)
+    v_ps2_on = tk.BooleanVar(value=c.get('ps2_on', '0') == '1')
+    v_ps2 = tk.StringVar(value=c.get('ps2', ''))
     v_status = tk.StringVar(value='Ready.')
 
     hl = given or c.get('halflife', '')
@@ -307,8 +322,22 @@ def main():
     temp_btn = ttk.Button(frm, text='Browse...', command=pick_temp)
     temp_btn.grid(row=6, column=1, sticky='e', padx=(8, 0), pady=(2, 8))
 
+    # Head-To-Head: the PS2 version's two-player maps and characters, from a copy of its disc's files
+    cb_ps2 = ttk.Checkbutton(frm, text='Add Head-To-Head from the PlayStation 2 version (optional): the folder with its disc\'s files:', variable=v_ps2_on)
+    cb_ps2.grid(row=7, column=0, columnspan=2, sticky='w')
+    ps2_entry = ttk.Entry(frm, textvariable=v_ps2)
+    ps2_entry.grid(row=8, column=0, sticky='ew', pady=(2, 8))
+
+    def pick_ps2():
+        d = filedialog.askdirectory(parent=root, title='Choose the folder with the PS2 disc\'s files (SLUS_200.66, VALVE ...)',
+                                    initialdir=v_ps2.get() if os.path.isdir(v_ps2.get()) else os.path.expanduser('~'))
+        if d:
+            v_ps2.set(d)
+    ps2_btn = ttk.Button(frm, text='Browse...', command=pick_ps2)
+    ps2_btn.grid(row=8, column=1, sticky='e', padx=(8, 0), pady=(2, 8))
+
     bar = ttk.Frame(frm)
-    bar.grid(row=7, column=0, columnspan=2, sticky='ew')
+    bar.grid(row=9, column=0, columnspan=2, sticky='ew')
     bar.columnconfigure(0, weight=1)
     cb_clean = ttk.Checkbutton(bar, text="Convert everything again (don't reuse the last run's game data)", variable=v_clean)
     cb_clean.grid(row=0, column=0, sticky='w')
@@ -317,12 +346,12 @@ def main():
     btn_build.grid(row=0, column=2, sticky='e')
 
     prog = ttk.Progressbar(frm, mode='determinate', maximum=100)
-    prog.grid(row=8, column=0, columnspan=2, sticky='ew', pady=(10, 2))
-    ttk.Label(frm, textvariable=v_status).grid(row=9, column=0, columnspan=2, sticky='w')
+    prog.grid(row=10, column=0, columnspan=2, sticky='ew', pady=(10, 2))
+    ttk.Label(frm, textvariable=v_status).grid(row=11, column=0, columnspan=2, sticky='w')
 
     logf = ttk.Frame(frm)
-    logf.grid(row=10, column=0, columnspan=2, sticky='nsew', pady=(6, 0))
-    frm.rowconfigure(10, weight=1)
+    logf.grid(row=12, column=0, columnspan=2, sticky='nsew', pady=(6, 0))
+    frm.rowconfigure(12, weight=1)
     logf.columnconfigure(0, weight=1)
     logf.rowconfigure(0, weight=1)
     log = tk.Text(logf, wrap='none', height=12, font=('Menlo' if IS_MAC else 'DejaVu Sans Mono', 10), state='disabled',
@@ -347,6 +376,8 @@ def main():
         c['output'] = v_out.get()
         c['temp'] = v_temp.get()
         c['custom_temp'] = '1' if v_temp_on.get() else '0'
+        c['ps2'] = v_ps2.get()
+        c['ps2_on'] = '1' if v_ps2_on.get() else '0'
         try:
             with open(ini, 'w') as f:
                 cfg.write(f)
@@ -356,14 +387,18 @@ def main():
     state = {'build': None, 'rom': None}
 
     def set_busy(busy):
-        for w in controls + [cb_temp, cb_clean, btn_build]:
+        for w in controls + [cb_temp, cb_ps2, cb_clean, btn_build]:
             w.state(['disabled'] if busy else ['!disabled'])
         custom = v_temp_on.get() and not busy
         temp_entry.state(['!disabled'] if custom else ['disabled'])
         temp_btn.state(['!disabled'] if custom else ['disabled'])
+        p = v_ps2_on.get() and not busy
+        ps2_entry.state(['!disabled'] if p else ['disabled'])
+        ps2_btn.state(['!disabled'] if p else ['disabled'])
         btn_build.configure(text='Building...' if busy else 'Build ROM')
 
     v_temp_on.trace_add('write', lambda *a: set_busy(False))
+    v_ps2_on.trace_add('write', lambda *a: set_busy(False))
 
     events = queue.Queue()
 
@@ -377,6 +412,14 @@ def main():
         outdir = os.path.expanduser(v_out.get().strip()) or default_output()
         tempdir = os.path.expanduser(v_temp.get().strip()) if v_temp_on.get() else default_temp()
         tempdir = tempdir or default_temp()
+        ps2 = None
+        if v_ps2_on.get():
+            ps2 = os.path.expanduser(v_ps2.get().strip())
+            if not ps2_valid(ps2):
+                messagebox.showwarning('Half-Life 64 ROM builder',
+                                       "That folder doesn't have the PS2 version's files: it needs VALVE/PAK0.PAK.\n\n"
+                                       'Choose the folder with the files from the Half-Life PS2 disc, or untick Head-To-Head.', parent=root)
+                return
         save_settings()
         log.configure(state='normal')
         log.delete('1.0', 'end')
@@ -385,7 +428,7 @@ def main():
         btn_show.grid_remove()
         set_busy(True)
         prog.configure(mode='determinate', value=10)
-        b = Build(valve, outdir, tempdir, v_clean.get(), events)
+        b = Build(valve, outdir, tempdir, v_clean.get(), events, ps2)
         state['build'] = b
         b.start()
 

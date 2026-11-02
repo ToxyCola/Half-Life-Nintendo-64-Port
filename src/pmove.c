@@ -655,7 +655,7 @@ bool pm_find_free_position_hull(float *origin, int usehull)
 
 // Watchdog: if the player has been embedded in solid geometry (a bad level-transition offset,
 // a door closing on them) for a moment, move them to the nearest free spot.
-static float stuck_time;
+static PCTX float stuck_time;
 bool pm_unstick(float dt)
 {
     if (pm->movetype == MOVETYPE_NOCLIP) { stuck_time = 0; return false; }
@@ -949,3 +949,10 @@ bool pm_ducking(void) { return pm->usehull == 1; }
 bool pm_noclip_active(void) { return pm->movetype == MOVETYPE_NOCLIP; }
 int  pm_get_oldwaterlevel(void) { return pm->waterlevel; }
 void pm_set_view_ofs_z(float z) { pm->view_ofs[2] = z; }
+
+// Head-To-Head: the player's own movement state (everything in playermove_t before the physents,
+// which are rebuilt for every move)
+#include <stddef.h>
+int pm_ctx_size(void) { return (int)offsetof(playermove_t, numphysent); }
+void pm_ctx_save(void *buf) { memcpy(buf, pm, offsetof(playermove_t, numphysent)); }
+void pm_ctx_load(const void *buf) { memcpy(pm, buf, offsetof(playermove_t, numphysent)); }

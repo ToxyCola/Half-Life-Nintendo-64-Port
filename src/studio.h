@@ -41,8 +41,10 @@ typedef struct studio_s {
     int16_t *strip_idx;    // tiny3d strip index lists (DMEM format), per chunk: strips [cs_first, +cs_count)
     uint32_t *strip_ofs;   // per strip: offset (int16 units) << 8 | count
     uint16_t *cs_first, *cs_count;
+    int hand_bone;         // the right hand ("Bip01 R Hand"), -1 none: a Head-To-Head player's gun hangs there
 } studio_t;
 
+extern int studio_reserve;   // bytes a model load must leave free (load_map raises it while a map loads)
 studio_t *studio_get(const char *name);      // load (cached per map) "scientist" -> rom:/models/scientist.hlm
 void studio_free_all(void);
 void studio_free(studio_t *m);
@@ -69,7 +71,14 @@ typedef struct {
     bool cacheable;          // the pose is final (a body on the floor): cache it
     const void *lod_inst;    // optional: the instance (npc) this is, for half-rate animation far away
     bool lod_half;           // far away: reuse last frame's bones every other frame
+    int want_bone;           // optional (with bone_out): this bone's world matrix after drawing, -1 none
+    float (*bone_out)[4];    //   3x4, rotation | position (a player's hand, for the gun it holds)
+    float near_cull;         // the view model: leave out the parts wholly nearer the eye than this
+                             // (model units along +x); tiny3d clips only at the eye itself, so a
+                             // part between the eye and the near plane (the shotgun's spare shell,
+                             // parked at the eye) is blown up across the screen. 0: off
 } studio_draw_t;
 
 void studio_begin_frame(int frame_index);
+void studio_begin_view(int frame_index, int view, int nviews);   // one of a split-screen frame's views
 void studio_draw(const studio_draw_t *d);

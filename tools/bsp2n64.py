@@ -59,6 +59,15 @@ class BSP:
 
 # ---------------------------------------------------------------- textures
 
+# maps that don't live in <valve>/maps (the PS2 Head-To-Head maps, converted to .bsp in a temporary
+# folder by build_assets.py): map name -> .bsp path
+EXTRA_MAPS = {}
+
+
+def map_path(valve, name):
+    return EXTRA_MAPS.get(name) or os.path.join(valve, 'maps', name + '.bsp')
+
+
 def read_wads(paths):
     tex = {}
     for p in paths:

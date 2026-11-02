@@ -74,14 +74,15 @@ def write_fnt(path, height, rects, glow_pad=0):
     open(path, 'wb').write(out)
 
 
-def mksprite(png, outdir, fmt='I4'):
+def mksprite(png, outdir, fmt='I4', compress=None):
     tool = shutil.which('mksprite') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mksprite')
-    r = subprocess.run([tool, '-f', fmt, '-o', outdir.replace('\\', '/'), png.replace('\\', '/')], capture_output=True, text=True)
+    extra = ['-c', str(compress)] if compress else []
+    r = subprocess.run([tool, '-f', fmt] + extra + ['-o', outdir.replace('\\', '/'), png.replace('\\', '/')], capture_output=True, text=True)
     if r.returncode:
         raise RuntimeError(r.stderr)
 
 
-def build(valve, out, tmp):
+def build(valve, out, tmp, h2h=False):
     ui = os.path.join(out, 'ui')
     os.makedirs(ui, exist_ok=True)
     os.makedirs(tmp, exist_ok=True)
@@ -150,8 +151,7 @@ def build(valve, out, tmp):
     mksprite(png, ui)
 
     # main menu logo: white "HALF-LIFE" with alpha -> intensity
-    logo = Image.open(os.path.join(valve, 'resource', 'logo.tga')).convert('RGBA')
-    a = logo.split()[3]
+    a = menu_logo(valve)
     bb = a.getbbox()
     a = a.crop(bb)
     w = 288
@@ -162,6 +162,8 @@ def build(valve, out, tmp):
 
     build_fx(valve, ui, tmp)
     build_title(valve, ui, tmp)
+    if h2h:
+        build_h2h_menu(ui, tmp)
 
     shutil.copy(os.path.join(valve, 'titles.txt'), os.path.join(out, 'titles.txt'))
     print('ui: fonts %s, hud sprites, logo, titles.txt' % ', '.join(n for n, _ in SIZES))
@@ -194,6 +196,39 @@ def _white(im):
     o = Image.new('RGBA', im.size, (255, 255, 255, 0))
     o.putalpha(a)
     return o
+
+
+def find_ci(folder, *parts):
+    """folder/parts..., matching each name without regard to case (None if it isn't there)"""
+    p = folder
+    for part in parts:
+        try:
+            m = next((n for n in os.listdir(p) if n.lower() == part.lower()), None)
+        except OSError:
+            return None
+        if m is None:
+            return None
+        p = os.path.join(p, m)
+    return p
+
+
+def menu_logo(valve):
+    """the main menu's "HALF-LIFE" as an alpha mask: the game's resource/logo.tga, or, for an
+    install without it (some copies of the game have no resource folder), this port's own
+    lettering (assets/hl.png, the lower row)"""
+    p = find_ci(valve, 'resource', 'logo.tga')
+    if p:
+        try:
+            return Image.open(p).convert('RGBA').split()[3]
+        except OSError as e:
+            print('ui: %s could not be read (%s): using the built-in logo' % (p, e))
+    else:
+        print('ui: no resource/logo.tga in %s: using the built-in logo' % valve)
+    here = os.path.dirname(os.path.abspath(__file__))
+    im = Image.open(os.path.join(here, '..', 'assets', 'hl.png')).convert('RGBA').convert('L')
+    im = im.crop((0, 64, im.width, im.height))
+    # the glow's brightness -> coverage: the letters solid, the halo faint
+    return im.point(lambda v: 0 if v < 70 else min(255, (v - 70) * 4))
 
 
 def build_fx(valve, ui, tmp):
@@ -267,6 +302,135 @@ def build_fx(valve, ui, tmp):
 
 
 # ---------------------------------------------------------------- title background
+
+def build_h2h_menu(ui, tmp):
+    """the Head-To-Head menu's art (assets/: the community build's menu): its logo, the
+    characters' portraits and faces, the map previews and thumbnails. Only built with the PS2 maps."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    h2h_src = os.path.join(here, '..', 'assets', 'head2head_logo.png')
+    if os.path.exists(h2h_src):
+        h2h_im = Image.open(h2h_src).convert('RGB')
+        top = h2h_im.crop((0, 0, 512, 64))
+        bot = h2h_im.crop((0, 64, 512, 128))
+
+        p_top = Image.new('RGBA', top.size)
+        for y in range(top.height):
+            for x in range(top.width):
+                r, g, b = top.getpixel((x, y))
+                br = max(r, g, b)
+                if br <= 4:
+                    p_top.putpixel((x, y), (0, 0, 0, 0))
+                else:
+                    a = int(min(110, max(0, (br - 4) / (80.0 - 4.0) * 110)))
+                    scale = 255.0 / max(1, min(255, int((br / 94.0) * 255)))
+                    p_top.putpixel((x, y), (min(255, int(r * scale)), min(255, int(g * scale)), min(255, int(b * scale)), a))
+
+        p_bot = Image.new('RGBA', bot.size)
+        for y in range(bot.height):
+            for x in range(bot.width):
+                r, g, b = bot.getpixel((x, y))
+                br = max(r, g, b)
+                if br <= 4:
+                    p_bot.putpixel((x, y), (0, 0, 0, 0))
+                else:
+                    a = int(min(255, max(0, (br - 4) / (85.0 - 4.0) * 255)))
+                    scale = 255.0 / max(1, a)
+                    p_bot.putpixel((x, y), (min(255, int(r * scale)), min(255, int(g * scale)), min(255, int(b * scale)), a))
+
+        h2h_top_png = os.path.join(tmp, 'h2h_top.png')
+        h2h_bot_png = os.path.join(tmp, 'h2h_bot.png')
+        p_top.save(h2h_top_png)
+        p_bot.save(h2h_bot_png)
+        mksprite(h2h_top_png, ui, 'RGBA32', 2)
+        mksprite(h2h_bot_png, ui, 'RGBA32', 2)
+
+    for c in ('gina', 'gordon', 'colette', 'barney', 'decay_soldier', 'decay_scientist'):
+        c_src = os.path.join(here, '..', 'assets', c + '.png')
+        if os.path.exists(c_src):
+            c_im = Image.open(c_src).convert('RGBA')
+            c_png = os.path.join(tmp, c + '.png')
+            c_im.save(c_png)
+            mksprite(c_png, ui, 'RGBA16', 2)
+
+    h2h_sel_src = os.path.join(here, '..', 'assets', 'h2h_select.png')
+    if os.path.exists(h2h_sel_src):
+        h2h_sel = Image.open(h2h_sel_src).convert('RGBA')
+        faces = [
+            ('h2h_face0', (10, 3, 57, 61)),
+            ('h2h_face1', (10, 67, 57, 125)),
+            ('h2h_face2', (74, 67, 121, 125)),
+            ('h2h_face3', (74, 3, 121, 61)),
+            ('h2h_face4', (74, 131, 121, 189)),
+            ('h2h_face5', (10, 131, 57, 189)),
+            ('h2h_p1', (7, 192, 60, 256)),
+            ('h2h_p2', (73, 192, 122, 256)),
+        ]
+        for name, box in faces:
+            crop = h2h_sel.crop(box)
+            crop_png = os.path.join(tmp, name + '.png')
+            crop.save(crop_png)
+            mksprite(crop_png, ui, 'RGBA32', 2)
+
+    # Head-to-head map previews (h2h_pieces_01.png and h2h_pieces_02.png)
+    h2h_map_crops = [
+        ('h2h_map0', 'h2h_pieces_01.png', (0, 0, 128, 64)),
+        ('h2h_map1', 'h2h_pieces_01.png', (128, 0, 256, 64)),
+        ('h2h_map2', 'h2h_pieces_01.png', (0, 64, 128, 128)),
+        ('h2h_map3', 'h2h_pieces_01.png', (128, 64, 256, 128)),
+        ('h2h_map4', 'h2h_pieces_01.png', (0, 128, 128, 192)),
+        ('h2h_map5', 'h2h_pieces_01.png', (128, 128, 256, 192)),
+        ('h2h_map6', 'h2h_pieces_01.png', (0, 192, 128, 256)),
+        ('h2h_map7', 'h2h_pieces_01.png', (128, 192, 256, 256)),
+        ('h2h_map8', 'h2h_pieces_02.png', (0, 0, 128, 64)),
+        ('h2h_map9', 'h2h_pieces_02.png', (128, 0, 256, 64)),
+        ('h2h_map10', 'h2h_pieces_crimson.png', (0, 0, 128, 64)),
+    ]
+    for mname, msrc, mbox in h2h_map_crops:
+        mpath = os.path.join(here, '..', 'assets', msrc)
+        if os.path.exists(mpath):
+            mim = Image.open(mpath).convert('RGBA').crop(mbox)
+            mpng = os.path.join(tmp, mname + '.png')
+            mim.save(mpng)
+            mksprite(mpng, ui, 'RGBA16', 2)
+
+    # Head-to-head map thumbnails (h2h_map_selections.png)
+    h2h_sel_path = os.path.join(here, '..', 'assets', 'h2h_map_selections.png')
+    if os.path.exists(h2h_sel_path):
+        thumb_im = Image.open(h2h_sel_path).convert('RGBA')
+        thumbs = [
+            ('h2h_thumb0', (2, 5, 72, 36)),
+            ('h2h_thumb1', (144, 5, 214, 36)),
+            ('h2h_thumb2', (73, 39, 143, 70)),
+            ('h2h_thumb3', (2, 73, 72, 104)),
+            ('h2h_thumb4', (144, 73, 214, 104)),
+            ('h2h_thumb5', (73, 107, 143, 138)),
+            ('h2h_thumb6', (2, 141, 72, 172)),
+            ('h2h_thumb7', (144, 141, 214, 172)),
+            ('h2h_thumb8', (73, 175, 143, 206)),
+            ('h2h_thumb9', (2, 209, 72, 240)),
+            ('h2h_thumb_hi', (156, 211, 230, 238)),
+        ]
+        for tname, tbox in thumbs:
+            tim = thumb_im.crop(tbox)
+            tpng = os.path.join(tmp, tname + '.png')
+            tim.save(tpng)
+            mksprite(tpng, ui, 'RGBA16', 2)
+
+    h2h_crimson_thumb = os.path.join(here, '..', 'assets', 'h2h_map_selections_crimson.png')
+    if os.path.exists(h2h_crimson_thumb):
+        cthumb_im = Image.open(h2h_crimson_thumb).convert('RGBA').crop((2, 5, 72, 36))
+        cpng = os.path.join(tmp, 'h2h_thumb10.png')
+        cthumb_im.save(cpng)
+        mksprite(cpng, ui, 'RGBA16', 2)
+
+    # Arrow right (arrows_02.png)
+    arrow_path = os.path.join(here, '..', 'assets', 'arrows_02.png')
+    if os.path.exists(arrow_path):
+        aim = Image.open(arrow_path).convert('RGBA').crop((16, 0, 32, 32))
+        apng = os.path.join(tmp, 'h2h_arrow_r.png')
+        aim.save(apng)
+        mksprite(apng, ui, 'RGBA32', 2)
+
 def build_title(valve, ui, tmp):
     """title.sprite (320x240 title-screen background) and lambda.sprite (the icon beside
     "LOADING"): this port's own artwork, kept in the repository's assets/ folder"""

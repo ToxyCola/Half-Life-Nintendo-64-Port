@@ -14,6 +14,7 @@
 #include "menu.h"
 #include "weapons.h"
 #include "nav.h"
+#include "h2h.h"
 #ifdef TESTCFG
 #include "testcfg.h"
 #endif
@@ -42,15 +43,18 @@ void pm_set_ontrain(bool on);
 
 // ------------------------------------------------------------------ state
 int trace_frames;
+#ifdef H2HTHENSP
+bool test_then_sp;
+#endif
 static uint32_t prof_lights, prof_gtb, prof_npc, prof_ents, prof_pm, prof_play, prof_rend;
-static player_input_t input;
-static float view_angles[3];
-static bool noclip;
+static PCTX player_input_t input;
+static PCTX float view_angles[3];
+static PCTX bool noclip;
 static bool in_game;
 static float game_clock;
 static float fps_value;
-static int prev_buttons;
-static float turn_held;
+static PCTX int prev_buttons;
+static PCTX float turn_held;
 
 static char maplist[160][16];
 static int num_maps;
@@ -71,10 +75,10 @@ static int cam_ent = -1;
 static bool cam_freeze, cam_snap;
 static float cam_angles[3];
 
-static float last_eye[3], last_ang[3];
+static PCTX float last_eye[3], last_ang[3];
 
 // view shake (UTIL_ScreenShake / V_ApplyShake)
-static float shake_amp, shake_freq, shake_end, shake_dur;
+static PCTX float shake_amp, shake_freq, shake_end, shake_dur;
 void game_shake(float amplitude, float frequency, float duration)
 {
     if (amplitude > 16) amplitude = 16;
@@ -86,12 +90,13 @@ void game_shake(float amplitude, float frequency, float duration)
     }
 }
 float game_view_yaw(void) { return view_angles[1]; }
+float game_view_pitch(void) { return view_angles[0]; }
 
 // where the player arrived in this map (a death restarts from here)
 static char cur_map[32];
 static float arrive_origin[3], arrive_angles[3];
-static bool weapon_fire, weapon_fire2, weapon_reload;
-static int weapon_select;
+static PCTX bool weapon_fire, weapon_fire2, weapon_reload;
+static PCTX int weapon_select;
 
 void game_add_view_yaw(float dyaw) { view_angles[1] = fmodf(view_angles[1] + dyaw + 360.0f, 360.0f); }
 
@@ -240,6 +245,22 @@ static void mapmem_store(const char *map)
     } else mapmem[slot].map[0] = 0;
     free(tmp);
 }
+// the stored maps' blobs were allocated while the last map filled the heap, somewhere in the
+// middle of it: once that map is freed, move them out of the way (a fresh copy goes to the lowest
+// free spot) so the next map's big buffer finds one unbroken block (going back from c2a1b to c2a1a
+// ran out of memory over a 1 KB blob)
+static void mapmem_compact(void)
+{
+    for (int i = 0; i < MAPMEM_N; i++) {
+        if (!mapmem[i].blob) continue;
+        int n = mapmem[i].ne + mapmem[i].nn;
+        uint8_t *b = malloc(n > 0 ? n : 1);
+        if (!b) continue;
+        memcpy(b, mapmem[i].blob, n);
+        free(mapmem[i].blob);
+        mapmem[i].blob = b;
+    }
+}
 static void mapmem_apply(const char *map)
 {
     for (int i = 0; i < MAPMEM_N; i++) {
@@ -270,7 +291,8 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     nav_load(NULL);
     num_npcs = 0;
     bsp_free();
-#ifdef MAPCYCLE
+    mapmem_compact();
+#if defined(MAPCYCLE) || defined(CHAINTEST)
     { heap_stats_t hs; sys_get_heap_stats(&hs); int lo = 0, hi = 8 << 20; while (hi - lo > 4096) { int mid = (lo + hi) / 2; void *volatile p = malloc(mid); if (p) { free(p); lo = mid; } else hi = mid; }
       debugf("heap after free: %d KB used, largest block %d KB\n", hs.used / 1024, lo / 1024); }
 #ifdef HEAPDBG
@@ -298,6 +320,10 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     }
     menu_draw_loading(0.5f);
     nav_load(name);
+    // while the map's characters load, keep free what the renderer still has to allocate for it
+    // (render_new_map: strips about 7 bytes a triangle, the face lists and bounds 28 bytes a face)
+    // so a big map's models don't take it all and leave the renderer short
+    studio_reserve = world.numtris * 7 + world.numfaces * 28 + world.numleafs * 3 + 64 * 1024;
     ents_spawn_all();
     npcs_spawn_all();
     npcs_mark_base();
@@ -321,6 +347,7 @@ static bool load_map(const char *name, const char *landmark, const float *old_la
     }
     npc_scripts_init();
     menu_draw_loading(0.8f);
+    studio_reserve = 48 * 1024;   // in play: a margin for everything else
     render_new_map();
     setup_sky();
     cam_ent = -1;
@@ -695,7 +722,7 @@ static bool load_save(int slot)
     // was still the fresh one from player_new_game: take them again from the loaded player
     // (dying after a load used to restart without the suit and weapons, and the autosave of the
     // next level then kept that: no HUD, no weapons, chargers refused)
-    { extern bool weapons_hidden; weapons_hidden = false; }
+    { weapons_hidden = false; }
     game_set_camera(-1, 0, false);
     player_map_start();
     weapons_map_start();
@@ -872,6 +899,7 @@ static float axis(int v, float dead)
     return f;
 }
 
+static joypad_port_t cur_port = JOYPAD_PORT_1;   // the controller of the player being handled
 static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
 {
     memset(&input, 0, sizeof(input));
@@ -886,7 +914,7 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
         // short ramp so taps can aim precisely), D-pad = move
         fwd = sy * speed;
         side = sx * speed;
-        if (joypad_get_style(JOYPAD_PORT_1) == JOYPAD_STYLE_GCN) {   // the GameCube C-stick is analog
+        if (joypad_get_style(cur_port) == JOYPAD_STYLE_GCN) {   // the GameCube C-stick is analog
             float cx = axis(in.cstick_x, 0.15f), cy = axis(in.cstick_y, 0.15f);
             view_angles[1] -= (200.0f * cx * fabsf(cx) + 40.0f * cx) * sens * dt;
             view_angles[0] -= inv * (140.0f * cy * fabsf(cy) + 30.0f * cy) * sens * dt;
@@ -957,7 +985,7 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
     if (b_jump) input.buttons |= IN_JUMP;
     if (b_duck) input.buttons |= IN_DUCK;
     {   // PS2-style crouch-jump: keep jump held after jumping and the legs tuck up in the air
-        static float a_held;
+        static PCTX float a_held;
         extern int pm_get_groundent(void);
         a_held = b_jump ? a_held + dt : 0;
         extern int pm_get_waterlevel(void);
@@ -969,7 +997,7 @@ static void build_input(float dt, joypad_inputs_t in, joypad_buttons_t pressed)
     weapon_reload = pad_pressed(&pressed, bd[BIND_RELOAD]);
     // a GameCube controller (JoyBus, through a plug adapter): X reloads and Y uses unless the
     // mapping already gives them a job
-    bool gcn = joypad_get_style(JOYPAD_PORT_1) == JOYPAD_STYLE_GCN;
+    bool gcn = joypad_get_style(cur_port) == JOYPAD_STYLE_GCN;
     if (gcn) {
         bool x_bound = false, y_bound = false;
         for (int i = 0; i < NUM_BINDS; i++) { x_bound |= bd[i] == PAD_X; y_bound |= bd[i] == PAD_Y; }
@@ -1120,13 +1148,270 @@ static void test_keys(float t, joypad_inputs_t *in, joypad_buttons_t *pressed)
 }
 #endif
 
+
+// ------------------------------------------------------------------ Head-To-Head (h2h.c)
+// Each frame: the world moves once (doors, items, projectiles of the world) with player 1's
+// context in, then each player in turn: the other's damage, input from their own controller,
+// movement, the suit and weapons, their view. Then the screen: player 1 on top, player 2 below.
+static int pause_owner;
+static void h2h_hud(void)
+{
+#ifndef NOHUD
+    if (!paused) {
+        player_draw_hud(hud_dt);
+        weapons_draw_hud(hud_dt, true);
+    }
+#endif
+    hud_draw_fade();
+    h2h_draw_hud(h2h_cur);
+}
+
+static void h2h_render(void)
+{
+    render_begin();
+    for (int p = 0; p < 2; p++) {
+        h2h_switch(p);
+        hud_y0 = p * 120; hud_h = 120;
+        float eye[3], ang[3];
+        h2h_view(p, eye, ang);
+        render_view(eye, ang, h2h_hud, 0, p * 120, 320, 120);
+    }
+    hud_y0 = 0; hud_h = 240;
+    rdpq_set_scissor(0, 0, 320, 240);
+    rdpq_set_mode_fill(RGBA32(0, 0, 0, 255));
+    rdpq_fill_rectangle(0, 119, 320, 121);   // the line between the halves
+    rdpq_set_mode_standard();
+    if (paused) menu_draw();
+    render_end();
+}
+
+static bool any_button(joypad_buttons_t b) { return b.a || b.b || b.z || b.l || b.r; }
+
+#ifdef H2HTRACE
+#define HT(x) do { if (game_clock > H2HTRACE) debugf("HT %s\n", x); } while (0)
+#else
+#define HT(x)
+#endif
+static void h2h_frame(float dt)
+{
+    joypad_inputs_t in[2];
+    joypad_buttons_t pr[2];
+    for (int k = 0; k < 2; k++) {
+        in[k] = joypad_get_inputs(k ? JOYPAD_PORT_2 : JOYPAD_PORT_1);
+        pr[k] = joypad_get_buttons_pressed(k ? JOYPAD_PORT_2 : JOYPAD_PORT_1);
+    }
+#ifdef TESTKEYS
+    test_keys(game_clock, &in[0], &pr[0]);
+#endif
+#ifdef TESTKEYS2
+    {   // player 2's script (the same format; run with its own clock so the edges are its own)
+        static float t2;
+        t2 += dt;
+        static const char *s2 = TESTKEYS2;
+        joypad_inputs_t *ip = &in[1]; joypad_buttons_t *pp = &pr[1];
+        const char *p = s2; static float last2;
+        while (*p) {
+            float at, hold = 0.1f; char key[4] = {0}; int n = 0;
+            if (sscanf(p, "%f:%3[A-Z]%n", &at, key, &n) < 2) break;
+            p += n;
+            if (*p == ':') { int m = 0; sscanf(p + 1, "%f%n", &hold, &m); p += 1 + m; }
+            while (*p == ' ' || *p == ',') p++;
+            bool down = t2 >= at && t2 < at + hold, edge = last2 < at && t2 >= at;
+#define K2(name, field) if (!strcmp(key, name)) { if (down) ip->btn.field = 1; if (edge) pp->field = 1; }
+            K2("A", a) K2("B", b) K2("Z", z) K2("R", r) K2("L", l) K2("CL", c_left) K2("CR", c_right) K2("CU", c_up) K2("CD", c_down)
+#undef K2
+            if (down && !strcmp(key, "SU")) ip->stick_y = 80;
+            if (down && !strcmp(key, "SD")) ip->stick_y = -80;
+            if (down && !strcmp(key, "SL")) ip->stick_x = -80;
+            if (down && !strcmp(key, "SR")) ip->stick_x = 80;
+        }
+        last2 = t2;
+    }
+#endif
+    {   // the listener is player 1 (each player's own sounds play at full volume for both)
+        float e[3], a[3];
+        h2h_view(0, e, a);
+        float y = a[1] * M_PI / 180, right[3] = {sinf(y), -cosf(y), 0};
+        snd_update(e, right);
+    }
+    // ---- pause menu (either player's Start; that player drives it)
+    if (menu_is_open()) {
+        char map[32] = "";
+        menu_action_t act = menu_update(dt, in[pause_owner], pr[pause_owner], map, sizeof(map));
+        if (act == MENU_ACT_LEAVE) { h2h_end(); leave_game(); return; }
+        paused = menu_is_open();
+        if (paused) { h2h_render(); return; }
+    }
+    paused = false;
+    for (int k = 0; k < 2; k++)
+        if (pr[k].start) { pause_owner = k; menu_open(true); paused = true; h2h_render(); return; }
+
+    hud_update(dt);
+    hud_dt = dt;
+    // ---- the world, with player 1's context
+    HT("world");
+    h2h_switch(0);
+    h2h_inflictor = -1;
+    pm_clear_basevelocity();
+    ents_think(dt);
+    HT("ents");
+    { extern void lights_think(float dt); lights_think(dt); }
+    game_trace_begin_frame();
+    npcs_think(dt);
+    HT("npcs");
+    // ---- each player
+    bool over = h2h_intermission();
+    for (int p = 0; p < 2; p++) {
+        h2h_switch(p);
+        if (p == 1) {
+            extern void ents_touch_only(float dt);
+            pm_clear_basevelocity();
+            ents_touch_only(dt);
+            npcs_items_touch();
+        }
+        HT("turn");
+        h2h_turn_begin(p);
+        HT("begun");
+        cur_port = p ? JOYPAD_PORT_2 : JOYPAD_PORT_1;
+#ifdef H2HITEM
+        if (p == 1) {   // test: player 2 walks over every item in turn
+            static float nt = 5; static int k = -1;
+            if (game_clock > nt) {
+                nt = game_clock + 1.5f;
+                for (int i = k + 1; i < num_npcs; i++)
+                    if (npc_is_item(i) && !entities[npcs[i].ent].removed) {
+                        k = i;
+                        float o[3] = {npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2] + 40};
+                        extern void pm_set_origin(const float *o); pm_set_origin(o);
+                        debugf("H2HITEM p2 to %s\n", entities[npcs[i].ent].classname);
+                        break;
+                    }
+            }
+        }
+#endif
+#ifdef H2HAIM
+        if (p == 1 && game_clock > 6) {   // test: player 2 turns to player 1 and holds the trigger
+            extern void h2h_origin(int p, float *o);
+            float a[3], b[3]; h2h_origin(0, a); pm_get_origin(b);
+            static bool moved;
+            if (!moved) {   // next to player 1, where there is room
+                moved = true;
+                static const float off[8][2] = {{160, 0}, {-160, 0}, {0, 160}, {0, -160}, {120, 120}, {-120, 120}, {120, -120}, {-120, -120}};
+                for (int k = 0; k < 8; k++) {
+                    float o[3] = {a[0] + off[k][0], a[1] + off[k][1], a[2]};
+                    if (pm_position_free(o) && game_visible(a, o)) { extern void pm_set_origin(const float *o); pm_set_origin(o); memcpy(b, o, 12); debugf("H2HAIM moved p2 to %.0f %.0f %.0f\n", o[0], o[1], o[2]); break; }
+                }
+            }
+            view_angles[1] = atan2f(a[1] - b[1], a[0] - b[0]) * 180 / M_PI;
+            view_angles[0] = -atan2f(a[2] - b[2], sqrtf((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]))) * 180 / M_PI;
+            in[1].btn.z = 1;
+        }
+#endif
+#ifdef H2HDBG
+        { static float nd; if (p == 0 && game_clock > nd) { nd = game_clock + 1; extern void h2h_debug(void); h2h_debug(); debugf("   hp p%d %.0f\n", p, player.health); } }
+        if (p == 1) { static float nd2; if (game_clock > nd2) { nd2 = game_clock + 1; debugf("   hp p1 %.0f\n", player.health); } }
+#endif
+        joypad_inputs_t pin = in[p];
+        joypad_buttons_t ppr = pr[p];
+        if (over) { memset(&pin, 0, sizeof(pin)); memset(&ppr, 0, sizeof(ppr)); }
+        build_input(dt, pin, ppr);
+        int newly = input.buttons & ~prev_buttons;
+        prev_buttons = input.buttons;
+        if (player.dead) {
+            h2h_turn_dead(p, any_button(pr[p]));
+            input.forward = input.side = input.up = 0;
+            input.buttons = 0;
+            weapon_fire = weapon_fire2 = weapon_reload = false;
+            weapon_select = 0;
+        }
+        float origin[3], vofs[3], vel[3], punch[3];
+        if ((input.buttons & IN_USE) && player_alive()) {
+            pm_get_origin(origin);
+            pm_get_view_ofs(vofs);
+            float eye0[3] = {origin[0] + vofs[0], origin[1] + vofs[1], origin[2] + vofs[2]};
+            float y = view_angles[1] * M_PI / 180, pi = view_angles[0] * M_PI / 180;
+            float fwd[3] = {cosf(pi) * cosf(y), cosf(pi) * sinf(y), -sinf(pi)};
+            ents_player_use_hold(eye0, fwd, (newly & IN_USE) != 0);
+        }
+        HT("pm");
+        h2h_inflictor = -1;
+        pm_run(&input, dt);
+        pm_unstick(dt);
+        HT("think");
+        player_think(dt);
+        {   // at a gun's controls (stalkyard2): the view aims it and the trigger fires it
+            extern bool ents_tank_driving(void); extern void ents_tank_input(const float *view, bool fire);
+            weapons_hidden = ents_tank_driving();
+            if (weapons_hidden) { ents_tank_input(view_angles, weapon_fire); weapon_fire = weapon_fire2 = false; }
+        }
+        HT("weap");
+        weapons_think(dt, view_angles, weapon_fire, weapon_fire2, weapon_reload, weapon_select, !noclip && !over);
+        h2h_inflictor = -1;
+        pm_get_origin(origin);
+        pm_get_view_ofs(vofs);
+        pm_get_velocity(vel);
+        pm_get_punch(punch);
+        float eye[3] = {origin[0] + vofs[0], origin[1] + vofs[1], origin[2] + vofs[2]};
+        if (!noclip && !player.dead) eye[2] += calc_bob(vel, game_clock);
+        float ang[3] = {view_angles[0] + punch[0], view_angles[1] + punch[1], view_angles[2] + punch[2]};
+        ang[2] += calc_roll(view_angles, vel);
+        if (player.dead) ang[2] = 80;
+        if (shake_end > game_clock) {
+            float a = shake_amp * (shake_end - game_clock) / (shake_dur > 0 ? shake_dur : 1);
+            for (int k = 0; k < 3; k++) eye[k] += a * ((rand() % 200) - 100) / 100.0f * 0.5f;
+            ang[2] += a * sinf(game_clock * shake_freq) * 0.5f;
+        }
+        memcpy(last_eye, eye, 12);
+        memcpy(last_ang, ang, 12);
+        HT("end");
+        h2h_turn_end(p, eye, ang, dt, weapon_fire && player_alive());
+    }
+    HT("render");
+    cur_port = JOYPAD_PORT_1;
+    if (h2h_think(dt, any_button(pr[0]) || any_button(pr[1]))) {
+        h2h_end();
+        leave_game();
+        menu_open_h2h();
+#ifdef H2HTHENSP
+        { extern bool test_then_sp; test_then_sp = true; }
+#endif
+        return;
+    }
+    h2h_render();
+    HT("done");
+}
+
+// a Head-To-Head match on a map: load it, then both players in
+static void start_h2h(const char *map, int c1, int c2, int frags, int minutes)
+{
+    h2h_end();
+    if (!start_game(map)) return;
+    title_delay = 0;
+    hud_reset();
+    h2h_begin(c1, c2, frags, minutes);
+#ifdef H2HGIVE
+    {   // test: player 1 holds this gun (weapons.h id)
+        extern void weapons_test_select(int id);
+        weapons_give("weapon_shotgun"); weapons_give("weapon_9mmAR"); weapons_give("weapon_crossbow");
+        weapons_give_ammo("ammo_buckshot");
+        weapons_test_select(H2HGIVE);
+    }
+#endif
+#ifdef H2HPOS
+    { float tp[5] = {H2HPOS}; pm_reset_player(tp); view_angles[1] = tp[3]; view_angles[0] = tp[4]; }
+#endif
+#ifdef H2HPOS2
+    { h2h_switch(1); float tp[5] = {H2HPOS2}; pm_reset_player(tp); view_angles[1] = tp[3]; view_angles[0] = tp[4]; h2h_switch(0); }
+#endif
+}
+
 // ------------------------------------------------------------------ main
 #ifdef WATCHDOG
 static volatile int wd_frames, wd_last, wd_stall;
 static void wd_cb(int ovfl)
 {
     (void)ovfl;
-    if (wd_frames == wd_last) { if (++wd_stall >= 3) { debugf("WATCHDOG: main loop stalled\n"); assertf(0, "watchdog"); } }
+    if (wd_frames == wd_last) { if (++wd_stall >= 20) { debugf("WATCHDOG: main loop stalled\n"); assertf(0, "watchdog"); } }
     else wd_stall = 0;
     wd_last = wd_frames;
 }
@@ -1171,12 +1456,26 @@ int main(void)
     menu_open(false);
     snd_menu_music_start();
 
+#ifdef H2HMENUMAP
+    menu_open_h2h();
+#endif
+#ifdef H2HSTART
+    menu_close();
+#ifndef H2HFRAGS
+#define H2HFRAGS 50
+#endif
+    start_h2h(H2HSTART, 0, 1, H2HFRAGS, 0);
+    settings.show_stats = true;
+#endif
 #ifdef AUTOSTART_MAP
     menu_close();
 #ifdef DEBUGWARP
     debug_load = true;
 #endif
     start_game(AUTOSTART_MAP);
+#ifdef TRACESTART
+    trace_frames = TRACESTART;
+#endif
     settings.show_stats = true;
     settings.cheats = true;
 #ifdef TESTPOS
@@ -1279,8 +1578,13 @@ int main(void)
                     o[0] += 64;
                     extern void game_spawn_gibs(const float *o, int count, bool alien, float speed);
                     if (st == 3) { game_spawn_gibs(o, 8, cyc & 1, 200); debugf("TEST gibs\n"); }
-                    if (st == 4 && (cyc % 5) == 0) { game_save_manual(); debugf("TEST save\n"); }
-                    if (st == 5 && (cyc % 10) == 0) { debugf("TEST load\n"); load_save(-1); }
+#ifdef SAVECYCLE
+                    const int sv_every = 1, ld_every = 1;   // every map: saved, then loaded back
+#else
+                    const int sv_every = 5, ld_every = 10;
+#endif
+                    if (st == 4 && (cyc % sv_every) == 0) { game_save_manual(); debugf("TEST save\n"); }
+                    if (st == 5 && (cyc % ld_every) == 0) { debugf("TEST load\n"); load_save(-1); }
                     if (st == 6) { pressed.d_right = 1; }
                 }
             }
@@ -1350,7 +1654,11 @@ int main(void)
         { static bool done; if (!done && in_game && game_clock > 3) { done = true; debugf("TESTFIRE %s\n", TESTFIRE); { char tl[128]; strncpy(tl, TESTFIRE, 127); tl[127] = 0; for (char *t = strtok(tl, ","); t; t = strtok(NULL, ",")) ents_fire_targets(t); } } }
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f;
             for (int i = 0; i < num_npcs; i++) if (!strcmp(entities[npcs[i].ent].classname, "monster_alien_slave")) debugf("SLAVE %d %.0f %.0f %.0f ai %d %s\n", i, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].ai, entities[npcs[i].ent].removed ? "GONE" : "");
-            for (int i = 0; i < num_npcs; i++) if (entities[npcs[i].ent].targetname[0]) debugf("NPC %s %.0f %.0f %.0f hp %.0f ai %d script %d %s\n", entities[npcs[i].ent].targetname, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].health, npcs[i].ai, npcs[i].script, entities[npcs[i].ent].removed ? "GONE" : ""); } }
+            for (int i = 0; i < num_npcs; i++) if (entities[npcs[i].ent].targetname[0] || !strcmp(entities[npcs[i].ent].classname, "monster_scientist")) debugf("NPC %s %.0f %.0f %.0f hp %.0f ai %d script %d seq %s %s\n", entities[npcs[i].ent].targetname, npcs[i].origin[0], npcs[i].origin[1], npcs[i].origin[2], npcs[i].health, npcs[i].ai, npcs[i].script, npcs[i].model && npcs[i].seq >= 0 && npcs[i].seq < npcs[i].model->numseqs ? npcs[i].model->seqs[npcs[i].seq].name : "?", entities[npcs[i].ent].removed ? "GONE" : ""); } }
+#endif
+#ifdef TESTENTLOG
+        { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f; int k = ents_find_targetname(TESTENTLOG, 0);
+            if (k >= 0) debugf("ENT %s %.0f %.0f %.0f state %d\n", TESTENTLOG, entities[k].origin[0], entities[k].origin[1], entities[k].origin[2], entities[k].state); } }
 #endif
 #ifdef TESTWEAPONS
         { extern void weapons_test_select(int id); static int k = 0; static float nt = 3;
@@ -1361,6 +1669,10 @@ int main(void)
 #endif
 #ifdef TESTWEAPON
         { extern void weapons_test_select(int id); static bool done; if (!done && in_game && game_clock > 2) { done = true; dbg_give_all = true; } else if (done == 1 && in_game && game_clock > 2.5f) { static bool d2; if (!d2) { d2 = true; weapons_test_select(TESTWEAPON); } } }
+#endif
+#ifdef TESTENTMODEL
+        { static float nt = 1; if (in_game && game_clock > nt) { nt = game_clock + 0.5f; float o[3]; pm_get_origin(o);
+            for (int i = 1; i < num_entities; i++) if (entities[i].model == TESTENTMODEL) debugf("ENTM t=%.1f %.1f %.1f %.1f player %.0f %.0f %.0f\n", game_clock, entities[i].origin[0], entities[i].origin[1], entities[i].origin[2], o[0], o[1], o[2]); } }
 #endif
 #ifdef TESTCART
         { static float nt = 1; if (in_game && game_clock > nt) { nt = game_clock + 1;
@@ -1533,12 +1845,23 @@ int main(void)
             char map[32] = "";
             menu_action_t act = menu_update(dt, in, pressed, map, sizeof(map));
             if (act == MENU_ACT_START_MAP) { debug_load = map[0] != '*' && menu_debug_warped(); start_game(map); continue; }
+#ifdef H2HTHENSP
+            { extern bool test_then_sp; static int fr; if (test_then_sp && ++fr > 60) { test_then_sp = false; menu_close(); debugf("H2HTHENSP: starting %s\n", H2HTHENSP); start_game(H2HTHENSP); settings.show_stats = true; continue; } }
+#endif
+            if (act == MENU_ACT_START_H2H) {
+                int c1, c2, fr, mn;
+                menu_h2h_settings(&c1, &c2, &fr, &mn);
+                start_h2h(map, c1, c2, fr, mn);
+                continue;
+            }
             if (!menu_is_open()) menu_open(false);
             rdpq_attach_clear(display_get(), NULL);
             menu_draw();
             rdpq_detach_show();
             continue;
         }
+
+        if (h2h_active) { h2h_frame(dt); continue; }
 
         // ---- pause menu over the frozen game
         if (menu_is_open()) {
@@ -1598,7 +1921,7 @@ int main(void)
         uint32_t tp1 = TICKS_READ();
         TR("L"); player_think(dt); game_autosave_tick(); TR("W");
         { extern bool ents_tank_driving(void); extern void ents_tank_input(const float *view, bool fire);
-          extern bool weapons_hidden;
+
           weapons_hidden = ents_tank_driving();
           if (weapons_hidden) { ents_tank_input(view_angles, weapon_fire); weapon_fire = weapon_fire2 = false; } }
         weapons_think(dt, view_angles, weapon_fire && cam_ent < 0, weapon_fire2 && cam_ent < 0, weapon_reload, weapon_select,

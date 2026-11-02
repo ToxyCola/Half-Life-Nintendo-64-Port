@@ -36,6 +36,7 @@ entity_t entities[MAX_ENTITIES];
 int num_entities;
 static float g_time;
 float g_wish_move[2];
+static bool plat_toggle(const entity_t *e);
 static bool pushable_settle_pending;
 float game_time(void) { return g_time; }
 
@@ -308,7 +309,7 @@ void game_effect_particles(const float *o, int count, float speed, int r, int g,
 static void ambient_use(entity_t *e);
 static void play_cd_track(int track);
 static void spark_sound(entity_t *e);
-typedef struct { int16_t ia, ib; uint8_t c[4]; bool laser, init, plain; float radius, strike; } beam_cache_t;
+typedef struct { int16_t ia, ib; uint8_t c[4]; bool laser, init, plain; uint8_t tex, noise, width; float radius, strike; } beam_cache_t;
 static beam_cache_t beam_cache[MAX_ENTITIES];   // env_beam endpoints, resolved on first use
 void pm_set_ontrain(bool on);
 void pm_set_velocity(const float *v);
@@ -459,7 +460,9 @@ static void mover_reached(entity_t *e)
             const char *nn = ent_value(e, "netname");
             if (nn && (e->spawnflags & 1)) ents_fire_targets(nn);
         } else if (e->type == ENT_PLAT) {
-            e->nextthink = g_time + 3.0f;
+            // CFuncPlat::HitTop: back down after 3 seconds -- not a toggle plat (SF_PLAT_TOGGLE, the
+            // Anomalous Materials lift ele_2), which stays until its button is used again
+            if (!plat_toggle(e)) e->nextthink = g_time + 3.0f;
         } else if (e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) {
             fire_entity_target(e);
             if (e->wait >= 0) e->nextthink = g_time + e->wait;
@@ -575,6 +578,7 @@ static void play_cd_track(int track)
 
 void game_effect_sparks(const float *o);
 void game_effect_lightning(const float *a, const float *b, int r, int g, int bl);
+void game_effect_env_beam(const float *a, const float *b, int r, int g, int bl, int tex, float noise, float boltwidth, float life);
 static void spark_sound(entity_t *e)
 {
     game_effect_sparks(e->origin);
@@ -954,10 +958,10 @@ static int monster_touching(entity_t *e)
 }
 static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs);
 static int ents_gen;   // bumped for every map (and saved game) spawn
-static int tank_driven = -1;   // the tank the player is using
-static int tank_ctrl = -1;     // and the controls they are standing in
-static bool tank_fire_held;
-static float tank_view[3];
+static PCTX int tank_driven = -1;   // the tank the player is using
+static PCTX int tank_ctrl = -1;     // and the controls they are standing in
+static PCTX bool tank_fire_held;
+static PCTX float tank_view[3];
 static float angle_wrap(float a) { while (a > 180) a -= 360; while (a < -180) a += 360; return a; }
 static void tank_barrel(entity_t *e, float *pos, float *dir)
 {
@@ -1009,16 +1013,37 @@ static void tank_think(entity_t *e, int idx, float dt, const float *porg)
     float rate = ent_float(e, "firerate", 1);
     if (rate <= 0) rate = 1;
     if (idx == tank_driven) {
-        // manned: follow the view; the attack button fires; walking off the controls lets go
+        // manned: follow the view; the attack button fires; walking off the controls (or dying) lets go
+        if (!player_alive()) { tank_driven = -1; return; }
+#ifdef BOSSDEBUG
+        { static int c; if ((c++ & 31) == 0) debugf("tank %d manned by ctx %d fire %d view %.0f %.0f ang %.0f %.0f\n", idx, h2h_cur, tank_fire_held, tank_view[0], tank_view[1], e->angles[0], e->angles[1]); }
+#endif
         if (tank_ctrl > 0 && entities[tank_ctrl].model > 0) {
+            // (the box of the controls, a little grown: the player is stopped right at the edge
+            // of a thin one by the gun or its railing)
+            entity_t *c = &entities[tank_ctrl];
+            bmodel_t *cb = &world.bmodels[c->model];
             float mn[3], mx[3];
             pm_get_hull(mn, mx);
-            if (!player_touches(&entities[tank_ctrl], porg, mn, mx)) { tank_driven = -1; return; }
+            for (int k = 0; k < 3; k++)
+                if (porg[k] + mn[k] > c->origin[k] + cb->maxs[k] + 4 || porg[k] + mx[k] < c->origin[k] + cb->mins[k] - 4) {
+#ifdef BOSSDEBUG
+                    debugf("tank: let go (walked off the controls)\n");
+#endif
+                    tank_driven = -1; return;
+                }
         }
         tank_turn(e, tank_view[1], tank_view[0], dt * 3);
-        if (tank_fire_held && g_time >= e->ltime2) { e->ltime2 = g_time + 1 / rate; tank_fire(e, true); }
+        if (tank_fire_held && g_time >= e->ltime2) {
+            e->ltime2 = g_time + 1 / rate;
+            int oi = h2h_inflictor;
+            h2h_inflictor = h2h_cur;   // Head-To-Head: the player at the controls is doing the shooting
+            tank_fire(e, true);
+            h2h_inflictor = oi;
+        }
         return;
     }
+    if (h2h_active) return;   // (Head-To-Head: the guns only fire with someone at the controls)
     if (!e->active || !(e->spawnflags & 2) || !player_alive() || pm_noclip_active()) return;
     float pos[3], dir[3];
     tank_barrel(e, pos, dir);
@@ -1079,6 +1104,9 @@ void ents_tank_input(const float *view, bool fire)
 }
 static void tank_controls_use(entity_t *c)
 {
+#ifdef BOSSDEBUG
+    debugf("tank controls used (driving %d)\n", tank_driven);
+#endif
     if (tank_driven >= 0) { tank_driven = -1; return; }   // let go
     for (int t = ents_find_targetname(c->target, 1); t >= 0; t = ents_find_targetname(c->target, t + 1))
         if (entities[t].type == ENT_TANK && (entities[t].spawnflags & 32)) {
@@ -1937,16 +1965,18 @@ static void push_pushable(entity_t *p, const float *porg, const float *pmins, co
     if (!player_touches(p, porg, mn, mx)) return;
     float v[3];
     pm_get_velocity(v);
-    // pushing head-on, the cart stops the player dead: use the wished move instead (CPushable::Move
-    // uses the player's speed toward it; here a blocked player still shoves at walking pace)
-    if (v[0] * v[0] + v[1] * v[1] < 400 && (g_wish_move[0] != 0 || g_wish_move[1] != 0)) {
-        float l = sqrtf(g_wish_move[0] * g_wish_move[0] + g_wish_move[1] * g_wish_move[1]);
-        float sp = l > 1 ? 120 : 120 * l;
-        v[0] = g_wish_move[0] / (l > 0 ? l : 1) * sp;
-        v[1] = g_wish_move[1] / (l > 0 ? l : 1) * sp;
-    }
     bmodel_t *pb = &world.bmodels[p->model];
     float c[2] = {p->origin[0] + (pb->mins[0] + pb->maxs[0]) * 0.5f - porg[0], p->origin[1] + (pb->mins[1] + pb->maxs[1]) * 0.5f - porg[1]};
+    // pushing head-on, the crate stops the player dead (what's left of the velocity is a slow
+    // creep, or a slide along it): when the wished move pushes into the crate harder than the
+    // velocity does, push with that, at walking pace (CPushable::Move takes the player's speed
+    // toward it, which the PC keeps while pushing; here the collision has already eaten it)
+    if (g_wish_move[0] != 0 || g_wish_move[1] != 0) {
+        float l = sqrtf(g_wish_move[0] * g_wish_move[0] + g_wish_move[1] * g_wish_move[1]);
+        float sp = l > 1 ? 150 : 150 * l;
+        float w[2] = {g_wish_move[0] / l * sp, g_wish_move[1] / l * sp};
+        if (w[0] * c[0] + w[1] * c[1] > v[0] * c[0] + v[1] * c[1]) { v[0] = w[0]; v[1] = w[1]; }
+    }
     if (v[0] * c[0] + v[1] * c[1] <= 0) return;   // moving away
     float d[3] = {v[0] * dt * 0.9f, v[1] * dt * 0.9f, 0};
     pushable_move(p, d);
@@ -2764,7 +2794,90 @@ static void trackchange_think(entity_t *e, int idx, float dt)
     }
 }
 
+static bool plat_toggle(const entity_t *e)
+{
+    return (e->spawnflags & 1) || !strcasecmp(e->classname, "func_plat_toggle");   // SF_PLAT_TOGGLE
+}
 static float frame_dt_for_use;
+// Head-To-Head: what the second player's touching does (ents_think, run with player 1's context,
+// handles player 1 and everything that moves; this is the touch part of it for player 2)
+void ents_touch_only(float dt)
+{
+    static float hurt_next[MAX_ENTITIES];
+    float porg[3], pmins[3], pmaxs[3];
+    pm_get_origin(porg);
+    pm_get_hull(pmins, pmaxs);
+    for (int i = 1; i < num_entities; i++) {
+        entity_t *e = &entities[i];
+        if (e->removed || e->model <= 0) continue;
+        if (i == tank_driven && e->type == ENT_TANK) { tank_think(e, i, dt, porg); continue; }   // player 2 at a gun's controls
+        switch (e->type) {
+        case ENT_DOOR: case ENT_DOOR_ROTATING:
+            if (!e->targetname[0] && e->contents >= 0 && !(e->spawnflags & 256) && e->state == MS_AT_BOTTOM && master_ok(e)) {
+                float mn[3], mx[3];
+                for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 2; mx[k] = pmaxs[k] + 2; }
+                if (player_touches(e, porg, mn, mx)) door_go_up(e, true);
+            }
+            break;
+        case ENT_PLAT:
+            if (e->state == MS_AT_BOTTOM && !plat_toggle(e) && pm_entity_for_physent(pm_get_groundent()) == i) {
+                e->state = MS_GOING_UP;
+                move_linear(e, e->pos1);
+                mover_sound_start(e);
+            }
+            break;
+        case ENT_TRIGGER_HURT:
+            if (!(e->spawnflags & 8) && e->active && g_time >= hurt_next[i] && player_touches(e, porg, pmins, pmaxs)) {
+                float dmg = ent_float(e, "dmg", 10) * 0.5f;
+                int type = (int)ent_float(e, "damagetype", 0);
+                if (dmg < 0) player_take_health(-dmg, type);
+                else if (dmg > 0) player_take_damage(dmg, type, NULL, i);
+                hurt_next[i] = g_time + 0.5f;
+            }
+            break;
+        case ENT_TRIGGER_ONCE:
+        case ENT_TRIGGER_MULTIPLE:
+            if (g_time >= e->nextthink && master_ok(e) && !(e->spawnflags & 2) && player_touches(e, porg, pmins, pmaxs)) {
+                fire_entity_target(e);
+                if (e->type == ENT_TRIGGER_ONCE) e->removed = true;
+                else e->nextthink = g_time + e->wait;
+            }
+            break;
+        case ENT_TRIGGER_TELEPORT:
+            if (!(e->spawnflags & 2) && player_touches(e, porg, pmins, pmaxs) && master_ok(e)) {
+                int d = ents_find_targetname(e->target, 1);
+                if (d >= 0) {
+                    float o[3];
+                    memcpy(o, entities[d].origin, 12);
+                    o[2] += -pmins[2] + 1;
+                    pm_set_origin(o);
+                    float zero[3] = {0, 0, 0};
+                    pm_set_velocity(zero);
+                    game_set_view_angles(entities[d].angles);
+                    memcpy(porg, o, 12);
+                }
+            }
+            break;
+        case ENT_TRIGGER_PUSH:
+            if (e->active && player_touches(e, porg, pmins, pmaxs)) {
+                float v[3];
+                for (int k = 0; k < 3; k++) v[k] = e->movedir[k] * e->speed;
+                pm_add_basevelocity(v);
+            }
+            break;
+        case ENT_TRIGGER_GRAVITY:
+            if (player_touches(e, porg, pmins, pmaxs)) {
+                extern void pm_set_gravity(float g);
+                float g = ent_float(e, "gravity", 1);
+                pm_set_gravity(g > 0 ? g : 1);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
 void ents_think(float dt)
 {
     frame_dt_for_use = dt;
@@ -2860,8 +2973,8 @@ void ents_think(float dt)
                 for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 2; mx[k] = pmaxs[k] + 2; }
                 if (player_touches(e, porg, mn, mx)) door_go_up(e, true);
             }
-            // plats rise when stood on
-            if (e->type == ENT_PLAT && e->state == MS_AT_BOTTOM &&
+            // plats rise when stood on (PlatSpawnInsideTrigger; a toggle plat only moves when used)
+            if (e->type == ENT_PLAT && e->state == MS_AT_BOTTOM && !plat_toggle(e) &&
                 pm_entity_for_physent(pm_get_groundent()) == i) {
                 e->state = MS_GOING_UP;
                 move_linear(e, e->pos1);
@@ -2969,6 +3082,10 @@ void ents_think(float dt)
                     bc->strike = ent_float(e, "StrikeTime", 0);
                     const char *tx = ent_value(e, "texture");
                     bc->plain = (tx && strstr(tx, "laserbeam")) || ent_float(e, "NoiseAmplitude", 1) == 0;   // straight lasers (c1a3's tripwire beams)
+                    // its sprite (1 lgtning, 2 laserbeam, 5 xbeam), NoiseAmplitude, BoltWidth
+                    bc->tex = (tx && strstr(tx, "laserbeam")) ? 2 : (tx && (strstr(tx, "xbeam") || strstr(tx, "XBeam") || strstr(tx, "Xbeam"))) ? 5 : 1;
+                    { float nz = bc->laser ? 0 : ent_float(e, "NoiseAmplitude", 0); bc->noise = nz < 0 ? 0 : nz > 255 ? 255 : (uint8_t)nz; }
+                    { float bw = ent_float(e, bc->laser ? "width" : "BoltWidth", 0); bc->width = bw < 0 ? 0 : bw > 255 ? 255 : (uint8_t)bw; }
                     bc->init = true;
                 }
                 if (bc->ib < 0 && bc->radius > 0) {
@@ -2991,8 +3108,7 @@ void ents_think(float dt)
                         gtrace_t tr;
                         game_trace(pa, end, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
                         if (tr.fraction >= 1 || tr.fraction < 0.1f) continue;
-                        if (bc->plain) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, tr.endpos, bc->c[0], bc->c[1], bc->c[2]); }
-                        else game_effect_lightning(pa, tr.endpos, bc->c[0], bc->c[1], bc->c[2]);
+                        game_effect_env_beam(pa, tr.endpos, bc->c[0], bc->c[1], bc->c[2], bc->tex, bc->noise, bc->width, 0.12f);
                         break;
                     }
                     break;
@@ -3006,8 +3122,7 @@ void ents_think(float dt)
                 float da = 0, db = 0;
                 for (int k = 0; k < 3; k++) { da += (pa[k] - porg[k]) * (pa[k] - porg[k]); db += (pb[k] - porg[k]) * (pb[k] - porg[k]); }
                 if (da > 2500.0f * 2500.0f && db > 2500.0f * 2500.0f) break;
-                if (bc->laser || bc->plain) { extern void game_effect_beam_plain(const float *, const float *, int, int, int); game_effect_beam_plain(pa, pb, bc->c[0], bc->c[1], bc->c[2]); }
-                else game_effect_lightning(pa, pb, bc->c[0], bc->c[1], bc->c[2]);
+                game_effect_env_beam(pa, pb, bc->c[0], bc->c[1], bc->c[2], bc->tex, bc->noise, bc->width, 0.12f);
             }
             break;
         case ENT_TRIGGER_GRAVITY:
@@ -3096,6 +3211,27 @@ void ents_think(float dt)
                     fire_entity_target(e);
                     if (e->spawnflags & 1) e->target[0] = 0;   // SF_TRIGGER_HURT_TARGETONCE
                 }
+            }
+            // monsters get hurt too (CTriggerHurt::HurtTouch: anything that takes damage, unless
+            // SF_TRIGGER_HURT_CLIENTONLYTOUCH): the scientists that fall down the shaft in c1a1
+            // land in kill_pain and burst into gibs
+            if (e->model > 0 && e->active && !(e->spawnflags & 32) && g_time >= e->ltime2) {
+                bmodel_t *bm = &world.bmodels[e->model];
+                float dmg = ent_float(e, "dmg", 10) * 0.5f;
+                int type = (int)ent_float(e, "damagetype", 0);
+                bool any = false;
+                for (int n = 0; n < num_npcs && dmg > 0; n++) {
+                    if (!npc_alive(n) || h2h_active) continue;   // (the Head-To-Head puppets are players)
+                    npc_t *m = &npcs[n];
+                    bool in = true;
+                    for (int k = 0; k < 3 && in; k++)
+                        if (m->origin[k] + m->maxs[k] < e->origin[k] + bm->mins[k] || m->origin[k] + m->mins[k] > e->origin[k] + bm->maxs[k]) in = false;
+                    if (!in) continue;
+                    float up[3] = {0, 0, 1};
+                    npc_take_damage(n, dmg, type, up, -1);
+                    any = true;
+                }
+                if (any) e->ltime2 = g_time + 0.5f;
             }
             break;
         case ENT_ENDSECTION:
@@ -3260,6 +3396,9 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
         if (d2 < 16 * 16) dot += 0.3f; // right next to it
         if (dot > bestdot) { bestdot = dot; best = i; }
     }
+#ifdef BOSSDEBUG
+    if (pressed) debugf("use: best %d (%s) dot %.2f\n", best, best >= 0 ? entities[best].classname : "-", bestdot);
+#endif
     int npc = npc_find_usable(eye, forward, &bestdot);
     if (npc >= 0) {
         if (pressed) npc_player_use(npc);

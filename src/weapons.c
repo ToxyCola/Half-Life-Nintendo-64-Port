@@ -65,35 +65,36 @@ static const wdef_t W[] = {
 static const wdef_t *wdef(int id) { return (id > 0 && id < NUM_W && W[id].id == id) ? &W[id] : NULL; }
 
 // ------------------------------------------------------------------ state
-static int cur = 0;              // current weapon id (0 = none / holstered)
-static int pending = 0;          // switching to
-static float next_attack, next_attack2, idle_time, reload_end, holster_end;
-static bool reloading;
-static studio_t *vmodel;
-static int vseq;
-static float vframe;
-static bool vseq_done;
-static int vbody;
+static PCTX int cur = 0;              // current weapon id (0 = none / holstered)
+static PCTX int pending = 0;          // switching to
+static PCTX float next_attack, next_attack2, idle_time, reload_end, holster_end;
+static PCTX bool reloading;
+static PCTX studio_t *vmodel;
+static PCTX int vseq;
+static PCTX float vframe;
+static PCTX bool vseq_done;
+static PCTX int vbody;
 static float wtime;              // weapon clock
-static bool prev_fire, prev_fire2;
+static PCTX bool prev_fire, prev_fire2;
 // selection HUD
-static float select_show;
-static int select_slot = -1;
+static PCTX float select_show;
+static PCTX int select_slot = -1;
 // special weapon states
-static int shotgun_reload_state;     // 0 none, 1 starting, 2 shells going in
-static float gauss_charge_start;
-static bool gauss_charging;
-static int egon_state;              // 0 off, 1 firing
-static float egon_ammo_time;
+static PCTX int shotgun_reload_state;     // 0 none, 1 starting, 2 shells going in
+static PCTX float gauss_charge_start;
+static PCTX bool gauss_charging;
+static PCTX int egon_state;              // 0 off, 1 firing
+static PCTX float egon_ammo_time;
 static float grenade_start;          // pin pulled (0 = not)
-static float hornet_regen;
-static int satchel_out;              // satchels in the world
-static bool rpg_laser = true;
-static int muzzle_flash;
-static float bob_t;
+static PCTX float hornet_regen;
+static PCTX int satchel_out;              // satchels in the world
+static PCTX bool rpg_laser = true;
+static PCTX int muzzle_flash;
+static PCTX float bob_t;
 
 // ------------------------------------------------------------------ effects (2D-projected lines)
-typedef struct { float a[3], b[3]; uint8_t r, g, bl, alpha; float life, end; float width; uint8_t tex; bool world_w; } beam_t;
+typedef struct { float a[3], b[3]; uint8_t r, g, bl, alpha; float life, end; float width; uint8_t tex; bool world_w; float noise; uint32_t seed; } beam_t;
+static float beam_noise_next;   // jagged: the env_beam's NoiseAmplitude (0..255), 0 = straight
 static int beam_tex_next;   // 1 = lgtning.spr, 2 = laserbeam.spr, 5 = xbeam1.spr
 static bool beam_world_next; // width in world units (perspective) instead of pixels
 static sprite_t *fx_spr[5];  // lgtning, laserbeam, wallpuff, blood, xbeam1
@@ -115,6 +116,8 @@ static void add_beam(const float *a, const float *b, int r, int g, int bl, float
     bm->width = width;
     bm->tex = beam_tex_next;
     bm->world_w = beam_world_next;
+    bm->noise = beam_noise_next;
+    bm->seed = (uint32_t)rand();
 }
 
 void game_effect_tracer(const float *from, const float *to)
@@ -148,6 +151,19 @@ void game_effect_armbeam(const float *hand, int r, int g, int bl)
     else add_beam(hand, tr.endpos, r, g, bl, 0.1f, 2);
 }
 void game_effect_beam(const float *from, const float *to, int r, int g, int b) { game_effect_lightning(from, to, r, g, b); game_effect_particles(to, 6, 80, r, g, b, 0.3f, 0); }
+// an env_beam / env_laser as the map sets it up (CBeam: its sprite, NoiseAmplitude, BoltWidth)
+void game_effect_env_beam(const float *a, const float *b, int r, int g, int bl, int tex, float noise, float boltwidth, float life)
+{
+    // tex: 1 lgtning.spr (also for the sprites this port doesn't carry: plasma, ...), 2 laserbeam, 5 xbeam
+    if (tex < 1 || tex > 5 || !fx_spr[tex - 1]) tex = fx_spr[0] ? 1 : 0;
+    beam_tex_next = tex;
+    beam_noise_next = noise;
+    // BoltWidth is tenths of a unit on the PC; here pixels, kept between thin and bold
+    float w = boltwidth > 0 ? boltwidth * 0.35f : (tex == 2 ? 6 : 10);
+    add_beam(a, b, r, g, bl, life, w < 2 ? 2 : (w > 16 ? 16 : w));
+    beam_tex_next = 0;
+    beam_noise_next = 0;
+}
 void game_effect_beam_plain(const float *a, const float *b, int r, int g, int bl) { beam_tex_next = 2; add_beam(a, b, r, g, bl, 0.12f, 6); beam_tex_next = 0; }
 void game_effect_debris(const float *origin, int material) { (void)origin; (void)material; }
 
@@ -238,7 +254,7 @@ void game_effect_sparks(const float *o) { game_effect_particles(o, 10, 140, 255,
 // a jagged electric arc between two points (env_beam / zaps)
 void game_effect_lightning(const float *a, const float *b, int r, int g, int bl)
 {
-    if (fx_spr[0]) { beam_tex_next = 1; add_beam(a, b, r, g, bl, 0.12f, 10); beam_tex_next = 0; return; }
+    if (fx_spr[0]) { beam_tex_next = 1; beam_noise_next = 60; add_beam(a, b, r, g, bl, 0.12f, 10); beam_tex_next = 0; beam_noise_next = 0; return; }
     float prev[3];
     memcpy(prev, a, 12);
     for (int s = 1; s <= 5; s++) {
@@ -252,7 +268,7 @@ void game_effect_lightning(const float *a, const float *b, int r, int g, int bl)
 // textured billboards: zerogxplode.spr explosions (animated), muzzleflash1-3.spr, gluon flare
 static sprite_t *fx_expl[8], *fx_muzzle[3], *fx_xspark[11];
 // kind 0 explosion, 1..3 muzzle, 4 gluon flare (xspark1.spr); view = the first-person gun's muzzle
-typedef struct { int kind; float o[3], rad, start, life; uint8_t r, g, b; bool view; } bill_t;
+typedef struct { int kind; float o[3], rad, start, life; uint8_t r, g, b; bool view; int8_t owner; } bill_t;
 #define MAX_BILLS 16
 static bill_t bills[MAX_BILLS];
 static int bill_next;
@@ -278,12 +294,15 @@ static void add_bill(int kind, const float *o, float rad, float life, int r, int
     bl->view = false;
 }
 // the view model's muzzle (attachment 0), updated every frame it is drawn
-static float vm_att[1][3];
-static bool vm_att_ok;
+static PCTX float vm_att[1][3];
+static PCTX bool vm_att_ok;
+static PCTX float vm_fwd[3] = {1, 0, 0};   // the view's forward when the gun was drawn
 static void add_view_flash(float rad)
 {
     add_bill(1 + rand() % 3, vm_att[0], rad, 0.06f, 255, 255, 255);
     bills[(bill_next - 1) % MAX_BILLS].view = true;
+    // Head-To-Head: the flash belongs to the player who fired, and shows on their half only
+    bills[(bill_next - 1) % MAX_BILLS].owner = h2h_active ? h2h_cur : 0;
 }
 void game_effect_flash(const float *o, float rad) { add_bill(4, o, rad, 0.5f, 255, 255, 255); }
 void game_effect_muzzleflash(const float *o, float rad) { add_bill(1 + rand() % 3, o, rad, 0.06f, 255, 255, 255); }
@@ -376,6 +395,7 @@ typedef struct {
     float o[3], v[3], yaw, pitch;
     float die, armed;
     int owner;          // 0 player, n+1 npc
+    int8_t pl;          // Head-To-Head: which player (its context) owns it
     int target;         // for homing
     bool stuck;
     float bounce_t;     // when the last bounce sound played
@@ -396,6 +416,7 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
     p->kind = kind;
     memcpy(p->o, origin, 12);
     p->owner = owner;
+    p->pl = owner == 0 ? h2h_cur : -1;
     p->target = target;
     float speed = 0;
     const char *model = NULL;
@@ -494,11 +515,21 @@ static int nearest_target(const float *o, int owner, float range)
         pm_get_origin(po);
         float d = sqrtf((po[0] - o[0]) * (po[0] - o[0]) + (po[1] - o[1]) * (po[1] - o[1]) + (po[2] - o[2]) * (po[2] - o[2]));
         if (d < bd && player_alive()) { bd = d; best = 0; }
+        if (h2h_active) {   // Head-To-Head: the other player too (the snark pit's snarks hunt both)
+            extern bool npc_is_puppet(int i);
+            for (int i = 0; i < num_npcs; i++) {
+                npc_t *n = &npcs[i];
+                if (!npc_is_puppet(i) || !n->solid) continue;
+                float dd = sqrtf((n->origin[0] - o[0]) * (n->origin[0] - o[0]) + (n->origin[1] - o[1]) * (n->origin[1] - o[1]) + (n->origin[2] - o[2]) * (n->origin[2] - o[2]));
+                if (dd < bd) { bd = dd; best = i + 1; }
+            }
+        }
     }
     if (owner == 0) {
         for (int i = 0; i < num_npcs; i++) {
             npc_t *n = &npcs[i];
             if (!npc_alive(i) || (n->flags & 32 /* talker */)) continue;
+            if (h2h_active && !n->solid) continue;   // (a Head-To-Head player lying dead)
             float d = sqrtf((n->origin[0] - o[0]) * (n->origin[0] - o[0]) + (n->origin[1] - o[1]) * (n->origin[1] - o[1]) + (n->origin[2] - o[2]) * (n->origin[2] - o[2]));
             if (d < bd) { bd = d; best = i + 1; }
         }
@@ -512,11 +543,25 @@ static void target_point(int t, float *o)
     else { npc_t *n = &npcs[t - 1]; o[0] = n->origin[0]; o[1] = n->origin[1]; o[2] = n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f; }
 }
 
+static void projs_think_one(proj_t *p, float dt);
 static void projs_think(float dt)
 {
     for (int i = 0; i < MAX_PROJ; i++) {
         proj_t *p = &projs[i];
         if (p->kind == P_NONE) continue;
+        // Head-To-Head: a player's things move while that player's context is in (so "the player"
+        // is its owner and the other player is a puppet it can hit); the world's with player 1's
+        if (h2h_active && (p->owner == 0 ? p->pl != h2h_cur : h2h_cur != 0)) continue;
+        int old_inflictor = h2h_inflictor;
+        h2h_inflictor = p->owner == 0 ? h2h_cur : -1;
+        projs_think_one(p, dt);
+        h2h_inflictor = old_inflictor;
+    }
+}
+
+static void projs_think_one(proj_t *p, float dt)
+{
+    do {   // (continue: done with this one)
         p->frame += dt * 10;
         if (wtime > p->die) {
             if (p->kind == P_HGRENADE) explode(p->o, skill_get("sk_plr_hand_grenade"), p->owner);
@@ -538,7 +583,8 @@ static void projs_think(float dt)
                 p->stuck = true;
                 snd_emit(-1, CHAN_VOICE, "weapons/mine_activate.wav", 0.5f, ATTN_NORM, 75, p->o);
             }
-            add_beam(p->o, p->beam_end, 255, 40, 40, dt * 1.5f, 1);
+            if (fx_spr[1]) { beam_tex_next = 2; add_beam(p->o, p->beam_end, 200, 240, 236, dt * 1.5f, 3); beam_tex_next = 0; }
+            else add_beam(p->o, p->beam_end, 200, 240, 236, dt * 1.5f, 1);
             gtrace_t tr;
             game_trace(p->o, p->beam_end, NULL, NULL, 0, -1, &tr);
             if (tr.fraction < 0.99f && (tr.player || tr.npc >= 0)) {
@@ -551,7 +597,7 @@ static void projs_think(float dt)
         // homing
         if (p->kind == P_HORNET || p->kind == P_HORNET_P || p->kind == P_SNARK || (p->kind == P_BALL && p->target >= 0) ||
             p->kind == P_TELEBALL || p->kind == P_NIHZAP) {
-            if (p->target < 0 || (p->target > 0 && !npc_alive(p->target - 1))) p->target = nearest_target(p->o, p->owner, p->kind == P_SNARK ? 1024 : 512);
+            if (p->target < 0 || (p->target > 0 && !npc_alive(p->target - 1)) || h2h_active) p->target = nearest_target(p->o, p->owner, p->kind == P_SNARK ? 1024 : 512);
             if (p->target >= 0) {
                 float t[3];
                 target_point(p->target, t);
@@ -703,13 +749,13 @@ static void projs_think(float dt)
             break;
         }
         }
-    }
+    } while (0);
 }
 
 static void satchels_detonate(void)
 {
     for (int i = 0; i < MAX_PROJ; i++)
-        if (projs[i].kind == P_SATCHEL && projs[i].owner == 0) { explode(projs[i].o, skill_get("sk_plr_satchel"), 0); projs[i].kind = P_NONE; }
+        if (projs[i].kind == P_SATCHEL && projs[i].owner == 0 && (!h2h_active || projs[i].pl == h2h_cur)) { explode(projs[i].o, skill_get("sk_plr_satchel"), 0); projs[i].kind = P_NONE; }
     satchel_out = 0;
 }
 
@@ -829,6 +875,11 @@ static void release_vmodel(void)
     if (vmodel && strcmp(vmodel->name, "v_tripmine")) {
         bool used = false;
         for (int i = 0; i < MAX_PROJ; i++) if (projs[i].kind != P_NONE && projs[i].model == vmodel) used = true;
+        {   // Head-To-Head: the other player may have the same gun in hand
+            extern const void *h2h_other_copy(const void *var);
+            studio_t *const *o = h2h_other_copy(&vmodel);
+            if (o && *o == vmodel) used = true;
+        }
         if (!used) studio_free(vmodel);
     }
     vmodel = NULL;
@@ -914,6 +965,21 @@ void weapons_map_start(void)
 }
 
 int weapons_current(void) { return cur; }
+const char *weapons_class(int id) { const wdef_t *w = wdef(id); return w ? w->cls : NULL; }
+// Head-To-Head respawn: empty-handed, nothing charging, reloading or burning (the world's
+// projectiles and decals stay)
+void weapons_player_reset(void)
+{
+    if (egon_state) { egon_state = 0; snd_stop(0, CHAN_STATIC, NULL); }
+    cur = pending = 0;
+    vmodel = NULL;
+    reloading = false;
+    shotgun_reload_state = 0;
+    gauss_charging = false;
+    next_attack = next_attack2 = idle_time = wtime;
+    select_show = 0;
+    player.cur_weapon = 0;
+}
 
 static void select_next(int dir)
 {
@@ -935,7 +1001,7 @@ static void select_next(int dir)
 }
 
 // ------------------------------------------------------------------ aiming
-static float aim_dir[3];
+static PCTX float aim_dir[3];
 void weapons_aim(float *f) { memcpy(f, aim_dir, 12); }
 
 // autoaim (CBasePlayer::GetAutoaimVector, sv_aim 1 in single player)
@@ -1304,7 +1370,8 @@ static void primary(const wdef_t *w)
         shotgun_reload_state = 0;
         play_vseq("shoot");
         snd_emit(0, CHAN_WEAPON, "weapons/sbarrel1.wav", 0.95f, ATTN_NORM, 93 + rand() % 31, NULL);
-        fire_bullets(6, 0.17365f, 0.17365f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);
+        if (h2h_active) fire_bullets(4, 0.08716f, 0.04362f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);   // VECTOR_CONE_DM_SHOTGUN
+        else fire_bullets(6, 0.17365f, 0.17365f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);
         punch(-5);
         next_attack = next_attack2 = wtime + 0.75f;
         muzzle_flash = 2;
@@ -1464,7 +1531,8 @@ static void secondary(const wdef_t *w)
         shotgun_reload_state = 0;
         play_vseq("shoot_big");
         snd_emit(0, CHAN_WEAPON, "weapons/dbarrel1.wav", 1, ATTN_NORM, 85 + rand() % 31, NULL);
-        fire_bullets(12, 0.17365f, 0.17365f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);
+        if (h2h_active) fire_bullets(8, 0.17365f, 0.04362f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);   // VECTOR_CONE_DM_DOUBLESHOTGUN
+        else fire_bullets(12, 0.17365f, 0.17365f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);
         punch(-10);
         next_attack = next_attack2 = wtime + 1.5f;
         muzzle_flash = 2;
@@ -1609,8 +1677,9 @@ static void egon_stop(void)
 void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bool reload_pressed, int select_dir,
                    bool can_fire)
 {
-    wtime += dt;
+    if (!h2h_active || h2h_cur == 0) wtime += dt;   // one clock for both Head-To-Head players
     bob_t += dt;
+    h2h_inflictor = h2h_cur;   // whoever this context is (shots and explosions it causes)
     if (select_show > 0) select_show -= dt;
     {   // a view model that couldn't be loaded yet (a full heap right after a map load): try again
         static float retry;
@@ -1633,6 +1702,9 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         npc_autoaim(eye, aim_dir);
     }
 #ifdef TESTBEAM
+#ifndef TESTBEAM_D
+#define TESTBEAM_D 220
+#endif
     {   // beams across the view: lightning (top), laser (middle), gluon (bottom)
         static float nt = 3;
         if (wtime > nt) {
@@ -1640,7 +1712,7 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
             float o[3]; pm_get_origin(o);
             float y = view_angles[1] * (float)M_PI / 180, f[3] = {cosf(y), sinf(y), 0}, r[3] = {sinf(y), -cosf(y), 0};
             float a[3], c[3];
-            for (int k = 0; k < 3; k++) { a[k] = o[k] + f[k] * 220 - r[k] * 160; c[k] = o[k] + f[k] * 220 + r[k] * 160; }
+            for (int k = 0; k < 3; k++) { a[k] = o[k] + f[k] * TESTBEAM_D - r[k] * 160; c[k] = o[k] + f[k] * TESTBEAM_D + r[k] * 160; }
             a[2] += 70; c[2] += 70;
             game_effect_lightning(a, c, 140, 120, 255);
             a[2] -= 50; c[2] -= 50;
@@ -1694,7 +1766,7 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
     }
 #endif
     projs_think(dt);
-    gibs_think(dt);
+    if (!h2h_active || h2h_cur == 0) gibs_think(dt);
     // hornets grow back (CHgun::WeaponIdle / Reload)
     if ((player.weapons & (1u << WEAPON_HORNETGUN)) && player.ammo[AM_HORNET] < 8 && wtime > hornet_regen) {
         player.ammo[AM_HORNET]++;
@@ -1781,7 +1853,7 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         } else if (!fire2) {
             gauss_release(w);
         } else if (t < 4 && player.ammo[w->ammo1] > 0) {
-            static float use;
+            static PCTX float use;
             if (wtime > use) { player.ammo[w->ammo1]--; use = wtime + 0.3f; }
         }
     }
@@ -1834,13 +1906,16 @@ static bool project(const float *p, float *sx, float *sy)
     if (fabsf(out.v[0]) > 1500 || fabsf(out.v[1]) > 1500) return false;
     *sx = out.v[0];
     *sy = out.v[1];
-    proj_z = out.v[2];
+    // the depth the RDP compares: tiny3d maps clip-space z (-1 near .. 1 far) to 0..1, so the
+    // effects must too. Using z as it was put them all nearer than the walls: beams, sparks and
+    // decals showed through the solid things in front of them
+    proj_z = (out.v[2] + 1) * 0.5f;
     return true;
 }
 
 // world-space projectiles (models) and the first-person weapon; called by the renderer
 static float fx_eye[3], fx_angles[3], fx_up[3] = {0, 0, 1};
-bool weapons_hidden;   // manning a func_tank: no view model
+PCTX bool weapons_hidden;   // manning a func_tank: no view model
 // billboards (explosions, muzzle flashes, the gluon flare): one sprite upload per billboard.
 // view = the first-person gun's own flashes, drawn over the view model at its muzzle
 static sprite_t *fx_projspr[5];   // spit, momma spit, nihilanth zap, controller ball, teleport ball
@@ -2169,11 +2244,14 @@ static void draw_bills(bool view)
         bill_t *bl = &bills[i];
         float age = wtime - bl->start;
         if (bl->life <= 0 || age < 0 || age > bl->life || bl->view != view) continue;
-        if (view && !vm_att_ok) continue;
+        if (view && (!vm_att_ok || bl->owner != (h2h_active ? h2h_cur : 0))) continue;
         sprite_t *sp = bl->kind == 0 ? fx_expl[(int)(age / bl->life * 8) & 7]
                      : bl->kind == 4 ? fx_xspark[(int)(wtime * 15) % 11] : fx_muzzle[(bl->kind - 1) % 3];
         if (!sp) continue;
-        const float *o = view ? vm_att[0] : bl->o;
+        // the gun's own flash sits just past the end of the barrel, so the barrel hides its back half
+        float vo[3];
+        if (view) for (int k = 0; k < 3; k++) vo[k] = vm_att[0][k] + vm_fwd[k] * bl->rad * 0.7f;
+        const float *o = view ? vo : bl->o;
         float x, y, x2, y2;
         if (!project(o, &x, &y)) continue;
         float z = proj_z;
@@ -2186,19 +2264,19 @@ static void draw_bills(bool view)
         rdpq_set_mode_standard();
         rdpq_mode_combiner(RDPQ_COMBINER1((TEX0, 0, PRIM, 0), (TEX0, 0, PRIM, 0)));
         rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-        rdpq_mode_zbuf(!view, false);
+        rdpq_mode_zbuf(true, false);   // the gun's flash too: tested against the gun, like the beams
         rdpq_mode_filter(FILTER_BILINEAR);
         rdpq_sprite_upload(TILE0, sp, NULL);
         float fade = bl->kind == 0 ? (age < bl->life * 0.6f ? 1 : 1 - (age - bl->life * 0.6f) / (bl->life * 0.4f)) : 1;
         rdpq_set_prim_color(RGBA32(bl->r, bl->g, bl->b, (int)(255 * fade)));
         float tw = sp->width, th = sp->height;
-        zrect(x - rad, y - rad, x + rad, y + rad, z, 0, 0, tw, th, !view);
+        zrect(x - rad, y - rad, x + rad, y + rad, z, 0, 0, tw, th, true);
     }
 }
 
 
-static float fl_point[3];
-static bool fl_valid;
+static PCTX float fl_point[3];
+static PCTX bool fl_valid;
 // where the flashlight's dynamic light is this frame (for lighting characters)
 bool weapons_flashlight_point(float *out) { if (fl_valid) memcpy(out, fl_point, 12); return fl_valid; }
 #ifdef PROFX
@@ -2309,25 +2387,33 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
         d.xform[k][2] = u[k];
         d.xform[k][3] = eye[k] + f[k] * bob * 0.4f + u[k] * (bob * 0.3f - 1);
     }
+    d.near_cull = 4.0f - bob * 0.4f;   // the world's near plane, from the model's origin
     memcpy(d.light, light, 3);
     d.light[0] = d.light[0] < 60 ? 60 : d.light[0];
     d.light[1] = d.light[1] < 60 ? 60 : d.light[1];
     d.light[2] = d.light[2] < 60 ? 60 : d.light[2];
+    extern void render_viewmodel_projection(bool on);
+    render_viewmodel_projection(true);
 #ifndef NOCLEARZ
     t3d_screen_clear_depth();
 #endif
     studio_draw(&d);
+    render_viewmodel_projection(false);
     WD(3);
     vm_att_ok = vmodel->numatt > 0;
 #ifdef PROFX
     if (++wd_n == 30) { debugf("  w3d: projs+gibs %d fx %d trans %d vm %d us\n", (int)TICKS_TO_US(wd_acc[0] / 30), (int)TICKS_TO_US(wd_acc[1] / 30), (int)TICKS_TO_US(wd_acc[2] / 30), (int)TICKS_TO_US(wd_acc[3] / 30)); memset(wd_acc, 0, sizeof(wd_acc)); wd_n = 0; }
 #endif
-    // the gun's own muzzle flash over the view model (no depth test, like the PC's)
+    memcpy(vm_fwd, f, 12);
+    // the gun's own muzzle flash in front of its barrel, depth-tested against the gun (drawn with
+    // the gun's projection so the depths compare)
     bool anyv = false;
-    for (int i = 0; i < MAX_BILLS; i++) if (bills[i].view && wtime - bills[i].start <= bills[i].life) anyv = true;
+    for (int i = 0; i < MAX_BILLS; i++) if (bills[i].view && bills[i].owner == (h2h_active ? h2h_cur : 0) && wtime - bills[i].start <= bills[i].life) anyv = true;
     if (anyv) {
         rdpq_sync_pipe(); rdpq_sync_tile(); rdpq_sync_load();
+        render_viewmodel_projection(true);
         draw_bills(true);
+        render_viewmodel_projection(false);
         rdpq_set_mode_standard();
     }
 }
@@ -2358,10 +2444,10 @@ void weapons_draw_effects(void)
         float f[3] = {cosf(p) * cosf(y), cosf(p) * sinf(y), -sinf(p)};
         float end[3] = {fx_eye[0] + f[0] * 2048, fx_eye[1] + f[1] * 2048, fx_eye[2] + f[2] * 2048};
         // the view trace is the costly part: reuse it while the view holds still
-        static gtrace_t tr;
-        static float last_eye[3], last_ang[2];
-        static bool have_tr;
-        static uint8_t tr_age;
+        static PCTX gtrace_t tr;
+        static PCTX float last_eye[3], last_ang[2];
+        static PCTX bool have_tr;
+        static PCTX uint8_t tr_age;
         if (!have_tr || ++tr_age >= 6 || fabsf(fx_eye[0] - last_eye[0]) + fabsf(fx_eye[1] - last_eye[1]) + fabsf(fx_eye[2] - last_eye[2]) > 1.0f ||
             fabsf(fx_angles[0] - last_ang[0]) + fabsf(fx_angles[1] - last_ang[1]) > 0.25f) {
             game_trace(fx_eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
@@ -2435,11 +2521,44 @@ void weapons_draw_effects(void)
 #ifdef TESTZAP
                     { static int c; if ((c++ & 31) == 0) { float x1, y1; bool pa = project(b->a, &x1, &y1); float x2, y2; bool pb = project(b->b, &x2, &y2); debugf("BEAM tex %d a %d (%.0f %.0f) b %d (%.0f %.0f) w %.0f end %.2f wtime %.2f\n", tex, pa, x1, y1, pb, x2, y2, b->width, b->end, wtime); } }
 #endif
+                    // the beam's points: straight, or jagged like the PC's noisy beams (r_beams.c
+                    // R_DrawSegs with FracNoise: offsets across the beam, none at the two ends)
+                    float pts[13][3];
+                    int nseg = 1;
+                    float wl = sqrtf((b->b[0] - b->a[0]) * (b->b[0] - b->a[0]) + (b->b[1] - b->a[1]) * (b->b[1] - b->a[1]) + (b->b[2] - b->a[2]) * (b->b[2] - b->a[2]));
+                    memcpy(pts[0], b->a, 12);
+                    if (b->noise > 0 && wl > 8) {
+                        nseg = (int)(wl / 20) + 2;
+                        if (nseg > 12) nseg = 12;
+                        float d[3] = {(b->b[0] - b->a[0]) / wl, (b->b[1] - b->a[1]) / wl, (b->b[2] - b->a[2]) / wl};
+                        float u[3] = {d[1] * fx_up[2] - d[2] * fx_up[1], d[2] * fx_up[0] - d[0] * fx_up[2], d[0] * fx_up[1] - d[1] * fx_up[0]};
+                        float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+                        if (ul < 0.01f) { u[0] = 1; u[1] = 0; u[2] = 0; ul = 1; }
+                        for (int k = 0; k < 3; k++) u[k] /= ul;
+                        float v[3] = {d[1] * u[2] - d[2] * u[1], d[2] * u[0] - d[0] * u[2], d[0] * u[1] - d[1] * u[0]};
+                        float amp = fminf(b->noise * 0.01f * wl * 0.12f, 48);
+                        uint32_t sd = b->seed;
+                        for (int q = 1; q < nseg; q++) {
+                            float t = (float)q / nseg;
+                            sd = sd * 1103515245u + 12345u; float n1 = ((sd >> 16) & 0x7fff) / 16383.5f - 1;
+                            sd = sd * 1103515245u + 12345u; float n2 = ((sd >> 16) & 0x7fff) / 16383.5f - 1;
+                            float env = sinf(t * (float)M_PI);   // pinned at both ends
+                            for (int k = 0; k < 3; k++) pts[q][k] = b->a[k] + (b->b[k] - b->a[k]) * t + (u[k] * n1 + v[k] * n2) * amp * env;
+                        }
+                    }
+                    memcpy(pts[nseg], b->b, 12);
+                    float a = (b->end - wtime) / b->life;
+                    // GoldSrc beams: the sprite's width runs across the beam and its height along
+                    // it, once every 100 units (length * 0.01, at least half the sprite); the
+                    // egon's scrolls (SetScrollRate), lightning starts at a random place
+                    float span = fminf(fmaxf(wl * 0.01f, 0.5f) * th, 900.0f);   // texture coordinates stay inside s10.5
+                    float tstart = b->world_w ? fmodf(wtime * 110, th) : (float)(b->seed % (uint32_t)th);
+                    for (int sg = 0; sg < nseg; sg++) {
                     float ax, ay, bx, by;
                     // a beam that ends at (or behind) the camera, like a vortigaunt's bolt hitting the
                     // player, is cut where it passes 24 units in front of the eye instead of not drawn
                     float pa3[3], pb3[3];
-                    memcpy(pa3, b->a, 12); memcpy(pb3, b->b, 12);
+                    memcpy(pa3, pts[sg], 12); memcpy(pb3, pts[sg + 1], 12);
                     {
                         float da = (pa3[0] - fx_eye[0]) * fx_fwd[0] + (pa3[1] - fx_eye[1]) * fx_fwd[1] + (pa3[2] - fx_eye[2]) * fx_fwd[2];
                         float db = (pb3[0] - fx_eye[0]) * fx_fwd[0] + (pb3[1] - fx_eye[1]) * fx_fwd[1] + (pb3[2] - fx_eye[2]) * fx_fwd[2];
@@ -2462,7 +2581,6 @@ void weapons_draw_effects(void)
                         rdpq_sync_tile(); rdpq_sync_load(); rdpq_sprite_upload(TILE0, sp, &(rdpq_texparms_t){.s.repeats = REPEAT_INFINITE, .t.repeats = REPEAT_INFINITE});
                         up = true;
                     }
-                    float a = (b->end - wtime) / b->life;
                     rdpq_set_prim_color(RGBA32(b->r, b->g, b->bl, (int)(255 * a)));
                     // half widths at both ends: pixels, or world units seen in perspective
                     float wa = b->width * 0.5f, wb = wa;
@@ -2476,18 +2594,12 @@ void weapons_draw_effects(void)
                         if (wb < 0.75f) wb = 0.75f;
                     }
                     float nx = -dy / l, ny = dx / l;
-                    // GoldSrc beams: the sprite's width runs across the beam, its height along it
-                    // r_beams R_DrawSegs: the sprite's width runs across the beam and its height
-                    // along it, once every 100 units (length * 0.01, at least half the sprite);
-                    // the egon's scrolls (SetScrollRate), lightning starts at a random place
-                    float wl = sqrtf((b->b[0] - b->a[0]) * (b->b[0] - b->a[0]) + (b->b[1] - b->a[1]) * (b->b[1] - b->a[1]) + (b->b[2] - b->a[2]) * (b->b[2] - b->a[2]));
-                    float span = fminf(fmaxf(wl * 0.01f, 0.5f) * th, 900.0f);   // texture coordinates stay inside s10.5
-                    float t0 = b->world_w ? fmodf(wtime * 110, th) : (float)(rand() % (int)th);
-                    float t1 = t0 + span;
+                    float t0 = tstart + span * sg / nseg, t1 = tstart + span * (sg + 1) / nseg;
                     float v0[6] = {ax + nx * wa, ay + ny * wa, za, 0, t0, 1}, v1[6] = {ax - nx * wa, ay - ny * wa, za, tw, t0, 1};
                     float v2[6] = {bx + nx * wb, by + ny * wb, zb, 0, t1, 1}, v3[6] = {bx - nx * wb, by - ny * wb, zb, tw, t1, 1};
                     rdpq_triangle(&TRIFMT_ZBUF_TEX, v0, v1, v2);
                     rdpq_triangle(&TRIFMT_ZBUF_TEX, v1, v3, v2);
+                    }
                 }
             } else {
                 for (int i = 0; i < MAX_PARTS; i++) {
@@ -2694,8 +2806,8 @@ void weapons_hud_init(void)
     fx_flare = sprite_load("rom:/ui/fx_flare.sprite");
     fxspr_load_index();
 }
-static float ammo_fade;
-static int last_clip = -1, last_ammo = -1;
+static PCTX float ammo_fade;
+static PCTX int last_clip = -1, last_ammo = -1;
 
 
 static void hud_load(void)
@@ -2742,13 +2854,13 @@ void weapons_draw_hud(float dt, bool show_crosshair)
     if (show_crosshair && w && player_alive() && (w->cx || w->cy || w->id == WEAPON_CROWBAR)) {
         // the crosshair slides onto the monster the auto-aim locked on to (where the shots go)
         extern int npc_autoaim_target;
-        static float xh_x = 160, xh_y = 120;
-        float tx = 160, ty = 120;
+        static PCTX float xh_x = 160, xh_y = 120;
+        float tx = 160, ty = HUD_CY;
         int t = npc_autoaim_target;
         if (t >= 0 && t < num_npcs && npc_alive(t) && w->id != WEAPON_CROWBAR) {
             npc_t *n = &npcs[t];
             float c[3] = {n->origin[0], n->origin[1], n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f}, sx, sy;
-            if (project(c, &sx, &sy)) { tx = fminf(fmaxf(sx, 40), 280); ty = fminf(fmaxf(sy, 30), 210); }
+            if (project(c, &sx, &sy)) { tx = fminf(fmaxf(sx, 40), 280); ty = fminf(fmaxf(sy, hud_y0 + hud_h / 8), hud_y0 + hud_h * 7 / 8); }
         }
         float k = fminf(1, dt * (t >= 0 ? 30 : 18));   // snaps on fast, eases back to the centre
         xh_x += (tx - xh_x) * k; xh_y += (ty - xh_y) * k;
@@ -2762,7 +2874,7 @@ void weapons_draw_hud(float dt, bool show_crosshair)
         if (ammo_fade > 100) ammo_fade -= dt * 20 * 10;
         if (ammo_fade < 100) ammo_fade = 100;
         font_color(hud_color(ammo_fade));
-        int y = 240 - 16 - 8 - 8 - HUD_SAFE_Y;
+        int y = hud_y0 + hud_h - 16 - 8 - 8 - (hud_y0 + hud_h < 240 ? 4 : HUD_SAFE_Y);
         int x;
         if (clip >= 0) {
             x = 320 - HUD_SAFE_X - 8 * 12 - 24 - 8;
@@ -2789,7 +2901,7 @@ void weapons_draw_hud(float dt, bool show_crosshair)
     if (select_show > 0) {
         int show = pending ? pending : cur;
         const wdef_t *sw = wdef(show);
-        int x = 10 + HUD_SAFE_X, y = 10 + HUD_SAFE_Y;
+        int x = 10 + HUD_SAFE_X, y = hud_y0 + 10 + (hud_y0 ? 0 : HUD_SAFE_Y);
         for (int s = 0; s < 5; s++) {
             font_color(RGBA32(255, 160, 0, 255));
             image_draw(&hud2, x, y, 108, 16 + s * 12, 12, 12);

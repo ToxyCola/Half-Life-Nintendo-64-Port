@@ -47,6 +47,7 @@ enum { AI_IDLE = 0, AI_COMBAT, AI_ATTACK, AI_PAIN, AI_DYING, AI_DEAD, AI_FLEE, A
 #define NF_GAG       4096
 #define NF_PRISONER  8192
 #define NF_WAITSEEN  16384
+#define NF_PUPPET    32768
 
 enum { C_NONE, C_ALLY, C_MILITARY, C_ALIEN, C_PREY, C_MACHINE };
 enum { R_NONE, R_BULLET, R_ZAP, R_SONIC, R_LEAP, R_SPIT, R_HORNET, R_BALL, R_FLAME, R_SHOTGUN };
@@ -137,6 +138,7 @@ static const mdef_t defs[] = {
     {"monster_osprey", "osprey", {-240, -240, -60}, {240, 240, 60}, NF_NODROP | NF_FLY, NULL, 400, C_MILITARY, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_hevsuit_dead", "player", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_bigmomma", "big_mom", {-32, -32, 0}, {32, 32, 64}, 0, NULL, 150, C_ALIEN, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"h2h_player", "pl_gordon", {-16, -16, -36}, {16, 16, 36}, NF_NOAI | NF_NODROP | NF_PUPPET, NULL, 100, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_nihilanth", "nihilanth", {-160, -160, 0}, {160, 160, 420}, NF_NODROP | NF_FLY, "sk_nihilanth_health", 800, C_ALIEN, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     // Xen flora (xen.cpp): lights that pull in, hair, trees that swat, spore pods
     {"xen_plantlight", "light", {-8, -8, 0}, {8, 8, 32}, NF_NODROP | NF_STATIC | NF_INVULN | NF_NOTSOLID, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
@@ -1107,7 +1109,9 @@ static void script_play(npc_t *n)
         if (n->script_idle_only) { n->sstate = NS_SCRIPT_IDLE; set_seq(n, n->idle_seq); return; }
         // a start-now script with only an idle pose (Barney at the front desk): the monster
         // keeps that pose while it waits for the next script
-        const char *idle = ent_value(sc, "m_iszIdle");
+        // A triggered script (console_guy's console_script in c1a0c) ends its idle pose instead:
+        // the monster goes back to its normal idle, as CCineMonster::SequenceDone does
+        const char *idle = sc->targetname[0] ? NULL : ent_value(sc, "m_iszIdle");
         if (idle) {
             int is = studio_find_seq(n->model, idle);
             if (is >= 0) n->idle_seq = is;
@@ -1425,6 +1429,11 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
         game_effect_blood_color(bp, npc_alien(n));
     }
     hit_valid = false;
+    if (n->flags & NF_PUPPET) {   // Head-To-Head: a hit on the other player
+        extern void h2h_puppet_hit(int player, float dmg, int dmgtype, const float *dir);
+        h2h_puppet_hit(n->puppet, dmg, dmgtype, dir);
+        return;
+    }
     // corpses (monster_*_dead, or already dead): never get up again; enough damage, a laser or an
     // explosion turns them into gibs (CBaseMonster::TakeDamage on a DEAD_DEAD monster -> GibMonster)
     bool corpse = strstr(ne->classname, "_dead") != NULL || is_dead(n);
@@ -3080,7 +3089,34 @@ static void item_think(npc_t *n, int i)
     if (player_touch_item(cls, i)) {
         e->removed = true;
         ents_fire_entity_target(e);   // CItem::ItemTouch / DefaultTouch: SUB_UseTargets
+        // deathmatch: it comes back where it was (CHalfLifeMultiplay::FlWeaponRespawnTime 20,
+        // FlItemRespawnTime 30, FlAmmoRespawnTime 20 seconds); a dead player's dropped gun doesn't
+        if (h2h_active && !n->spawned && !(e->spawnflags & 1024 /* SF_NORESPAWN */))
+            n->respawn_at = game_time() + (!strncasecmp(cls, "item_", 5) ? 30 : 20);
     }
+}
+
+void npcs_items_touch(void)
+{
+    pm_get_origin(player_pos);
+    for (int i = 0; i < num_npcs; i++)
+        if ((npcs[i].flags & NF_ITEM) && !entities[npcs[i].ent].removed) item_think(&npcs[i], i);
+}
+
+bool npc_is_puppet(int i) { return i >= 0 && i < num_npcs && (npcs[i].flags & NF_PUPPET) && !entities[npcs[i].ent].removed; }
+
+int npc_spawn_puppet(const char *model, int player)
+{
+    float o[3] = {0, 0, -30000};
+    int i = npc_spawn_item("h2h_player", o, 0);
+    if (i < 0) return -1;
+    npc_t *n = &npcs[i];
+    studio_t *m = studio_get(model);
+    if (m) n->model = m;
+    n->puppet = player;
+    n->solid = false;
+    n->seq = 0; n->frame = 0;
+    return i;
 }
 
 // CBarney's "gun" body group: 0 in the holster, 1 in his hand (2: gone)
@@ -3158,8 +3194,17 @@ void npcs_think(float dt)
 #ifdef PROFX
         { uint32_t t = TICKS_READ(); if (pi >= 0) pn[pi] += TICKS_DISTANCE(tl, t); tl = t; pi = i; }
 #endif
-        if (entities[n->ent].removed) continue;
-        if (n->flags & NF_ITEM) { item_think(n, i); continue; }
+        if (entities[n->ent].removed) {
+            if (n->respawn_at > 0 && now >= n->respawn_at) {   // CItem::Materialize
+                n->respawn_at = 0;
+                entities[n->ent].removed = false;
+                debugf("h2h: %s is back\n", entities[n->ent].classname);
+                snd_emit(-1, CHAN_WEAPON, "items/suitchargeok1.wav", 1, ATTN_NORM, 150, n->origin);
+            }
+            continue;
+        }
+        if (n->flags & NF_ITEM) { if (!h2h_active || h2h_cur == 0) item_think(n, i); continue; }
+        if (n->flags & NF_PUPPET) continue;   // Head-To-Head: posed by h2h.c from the player it stands for
         studio_t *m = n->model;
         sseq_t *s = &m->seqs[n->seq];
         // Barney puts the pistol away a while after the fight (CBarney: m_fGunDrawn without an enemy)

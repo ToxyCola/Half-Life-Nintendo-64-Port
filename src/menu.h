@@ -33,7 +33,9 @@ void settings_save(void);    // to the cartridge's SRAM (after the save slots)
 void settings_load(void);
 extern settings_t settings;
 
-typedef enum { MENU_ACT_NONE, MENU_ACT_RESUME, MENU_ACT_START_MAP, MENU_ACT_LEAVE } menu_action_t;
+typedef enum { MENU_ACT_NONE, MENU_ACT_RESUME, MENU_ACT_START_MAP, MENU_ACT_LEAVE, MENU_ACT_START_H2H } menu_action_t;
+void menu_h2h_settings(int *c1, int *c2, int *frags, int *minutes);
+void menu_open_h2h(void);
 
 void menu_init(void);
 void menu_open(bool in_game);

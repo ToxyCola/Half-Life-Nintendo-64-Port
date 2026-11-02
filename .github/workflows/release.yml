@@ -154,6 +154,8 @@ jobs:
           2. Run the builder. It finds Half-Life through Steam; if it can't, use **Browse...** to pick your Half-Life folder. Choose where the ROM goes (and, if you like, where the temporary files are kept), then press **Build ROM**.
           3. Wait for it to convert the game (30-90 minutes the first time).
 
+          **Head-To-Head (optional):** extract your PlayStation 2 Half-Life disc image (the `.bin`) into a folder with a disc-image tool such as 7-Zip; the folder should contain `SLUS_200.66` and a `VALVE` folder. In the builder, tick **Add Head-To-Head from the PlayStation 2 version** and choose that extracted folder before pressing **Build ROM**.
+
           Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.
 
           The builder contains the N64 engine built from this release's source, libdragon's tools and a private copy of Python. It contains no Valve game data. The ROM it makes does, so keep it for yourself.

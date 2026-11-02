@@ -33,3 +33,4 @@ void weapons_aim(float *f);
 int  hud_number(int x, int y, int value, int digits, bool draw_zero);
 void hud_icon2(int x, int y, int sx, int sy, int w, int h);
 void weapons_hud_init(void);
+extern PCTX bool weapons_hidden;   // manning a func_tank: no view model

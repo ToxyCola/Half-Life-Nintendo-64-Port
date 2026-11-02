@@ -178,7 +178,11 @@ def i16(x):
     return max(-32768, min(32767, int(round(x))))
 
 
-def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
+
+def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True, lod=None, hand_root=False):
+    """hand_root: a player's weapon (p_*): the right hand and the bones above it are held at the
+    origin, so the game draws the gun with the matrix of the hand of the player holding it (the
+    PC's bone merge, MOVETYPE_FOLLOW)"""
     m = Mdl(mdl_path)
     base = os.path.splitext(mdl_path)[0]
     tex_m = m
@@ -188,6 +192,13 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
         tex_m = Mdl(base + 'T.mdl')
     bones = m.bones()
     seqs = m.seqs()
+    hand = next((i for i, b in enumerate(bones) if b['name'].lower() == 'bip01 r hand'), -1)
+    held = set()
+    if hand_root and hand >= 0:
+        b = hand
+        while b >= 0:
+            held.add(b)
+            b = bones[b]['parent']
 
     # ---- which sequences to keep
     wanted = {n.lower() for n in wanted_names if not n.startswith('#') and not n.startswith('@')}
@@ -223,6 +234,8 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
         if gd is None or s['numframes'] <= 0:
             continue
         frames = decode_frames(m, gd, s, bones)
+        if held:
+            frames = [[((0.0, 0.0, 0.0, 1.0), [0.0, 0.0, 0.0]) if bi in held else fb[bi] for bi in range(len(fb))] for fb in frames]
         fps = s['fps'] if s['fps'] > 0 else 10
         step = 1
         # RAM is tight (8 MB for map + characters): long sequences keep every 2nd or 3rd frame,
@@ -275,8 +288,20 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
         o = tex_m.textureindex + t * 80
         name = tex_m.d[o:o + 64].split(b'\0')[0].decode('latin1')
         flags, w, h, index = struct.unpack_from('<4i', tex_m.d, o + 64)
-        pix = np.frombuffer(tex_m.d, np.uint8, w * h, index).reshape(h, w)
-        pal = np.frombuffer(tex_m.d, np.uint8, 768, index + w * h).reshape(256, 3)
+        if tex_m.path.lower().endswith('.dol'):
+            # PS2 model: a 32-byte header (name, then width, height and the stored power-of-two
+            # size as 16-bit numbers), a 256 x RGBA palette in the GS's CSM1 order, then the pixels
+            sw, sh = struct.unpack_from('<2H', tex_m.d, index + 28)
+            raw = np.frombuffer(tex_m.d, np.uint8, 1024, index + 32).reshape(256, 4)
+            order = [(i & 0b11100111) | ((i & 8) << 1) | ((i & 16) >> 1) for i in range(256)]
+            pal = raw[order, :3].copy()
+            spix = np.frombuffer(tex_m.d, np.uint8, sw * sh, index + 1056).reshape(sh, sw)
+            ys = (np.arange(h) * sh) // h
+            xs = (np.arange(w) * sw) // w
+            pix = spix[ys][:, xs]
+        else:
+            pix = np.frombuffer(tex_m.d, np.uint8, w * h, index).reshape(h, w)
+            pal = np.frombuffer(tex_m.d, np.uint8, 768, index + w * h).reshape(256, 3)
         # chrome (NF_CHROME): kept as it is, the game maps it as a reflection (tiny3d's spherical
         # UV vertex effect: the texture follows the surface normals as seen from the camera)
         tw, th, data, p16 = convert_texture(('{' if flags & NF_MASKED else '') + name, w, h, pix, pal, max_texels)
@@ -308,8 +333,20 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
     for bp in range(m.numbodyparts):
         o = m.bodypartindex + bp * 76
         nummodels, bbase, modelindex = struct.unpack_from('<3i', m.d, o + 64)
+        pick = range(nummodels)
+        if lod is not None and nummodels > 1:
+            # the PS2 player models carry their levels of detail as body submodels (LOD0..LOD3):
+            # keep the most detailed one within `lod` triangles
+            def mtris(k):
+                mo_ = modelindex + k * 112
+                nmesh_, mesh_ = struct.unpack_from('<2i', m.d, mo_ + 72)
+                return sum(struct.unpack_from('<i', m.d, mesh_ + 20 * e)[0] for e in range(nmesh_))
+            counts = [mtris(k) for k in range(nummodels)]
+            fit = [k for k in range(nummodels) if counts[k] <= lod]
+            pick = [max(fit, key=lambda k: counts[k]) if fit else min(range(nummodels), key=lambda k: counts[k])]
+            nummodels = 1
         bodyparts.append((nummodels, bbase, len(models_out)))
-        for mi in range(nummodels):
+        for mi in pick:
             mo = modelindex + mi * 112
             (mtype, radius, nummesh, meshindex, numverts, vertinfoindex, vertindex, numnorms, norminfoindex,
              normindex, numgroups, groupindex) = struct.unpack_from('<if10i', m.d, mo + 64)
@@ -339,7 +376,8 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
                             t = (pts[j - 1], pts[j - 2], pts[j])
                         else:
                             t = (pts[j - 2], pts[j - 1], pts[j])
-                        mtris.append(t)
+                        if t[0][0] != t[1][0] and t[1][0] != t[2][0] and t[0][0] != t[2][0]:
+                            mtris.append(t)      # (the PS2 models stitch strips with degenerate triangles)
                 # greedy chunking: <= MAX_CHUNK_VERTS unique verts (incl. per-bone even padding)
                 pending = mtris
                 while pending:
@@ -438,11 +476,13 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
         if cidx == 0 and (ct & 0x07):
             ctl0 = struct.pack(E + 'hHff', cb, ct, cs, ce)
     blob['ctl0'] = ctl0
+    # the right hand's bone (a Head-To-Head player's: where the gun goes)
+    blob['hand'] = struct.pack(E + 'hh', hand, 0) if hand >= 0 else b''
     order = ['bones', 'seqs', 'anim', 'tex', 'texdata', 'skins', 'bodyparts', 'models', 'chunks', 'loads',
-             'verts', 'tris', 'events', 'ctrl', 'att', 'ctl0']
+             'verts', 'tris', 'events', 'ctrl', 'att', 'ctl0', 'hand']
     counts = dict(bones=len(bones), seqs=len(seq_out), anim=len(animblob), tex=len(tex_hdr), texdata=len(tex_out),
                   skins=len(skins), bodyparts=len(bodyparts), models=len(models_out), chunks=len(chunks),
-                  loads=len(loads), verts=len(verts), tris=len(tris) // 3, events=len(eventblob) // 64, ctrl=1 if ctl else 0, att=len(att) // 16, ctl0=1 if ctl0 else 0)
+                  loads=len(loads), verts=len(verts), tris=len(tris) // 3, events=len(eventblob) // 64, ctrl=1 if ctl else 0, att=len(att) // 16, ctl0=1 if ctl0 else 0, hand=1 if hand >= 0 else 0)
     hdr = bytearray(b'HLM1' + struct.pack(E + 'IIII', POS_SCALE, tex_m.numskinref, tex_m.numskinfamilies, len(order)))
     hdr += struct.pack(E + '9f', *m.eye, *m.hullmin, *m.hullmax)
     hdrsize = len(hdr) + 8 * len(order)
@@ -468,4 +508,10 @@ def convert(mdl_path, out_path, wanted_names=(), max_texels=2048, verbose=True):
 
 
 if __name__ == '__main__':
-    convert(sys.argv[1], sys.argv[2], sys.argv[3:])
+    args = sys.argv[3:]
+    lod = None
+    if '--lod-tris' in args:      # PS2 models: keep the level of detail with at most this many triangles
+        i = args.index('--lod-tris')
+        lod = int(args[i + 1])
+        del args[i:i + 2]
+    convert(sys.argv[1], sys.argv[2], args, lod=lod)

@@ -305,6 +305,7 @@ static int read_text(const char *path, char *buf, int max)
 
 // ------------------------------------------------------------------ the build (a worker thread)
 static char g_valve[MAX_PATH], g_outdir[MAX_PATH], g_tempdir[MAX_PATH], g_rom[MAX_PATH];
+static char g_ps2[MAX_PATH];   // the PS2 disc's files for Head-To-Head (optional, "" = none)
 static int g_clean;
 
 static void set_status(const char *s) { SetWindowTextA(g_status, s); }
@@ -339,7 +340,7 @@ static DWORD WINAPI build_thread(LPVOID unused)
     char fsdir[MAX_PATH], stamp[MAX_PATH], want[MAX_PATH * 2], have[MAX_PATH * 2] = "";
     snprintf(fsdir, sizeof fsdir, "%s\\filesystem", g_work);
     snprintf(stamp, sizeof stamp, "%s\\converted.txt", g_work);
-    snprintf(want, sizeof want, "%s\n%s\n", HL64_VERSION, g_valve);
+    snprintf(want, sizeof want, "%s\n%s\n%s\n", HL64_VERSION, g_valve, g_ps2);
     int reuse = !g_clean && read_text(stamp, have, sizeof have) && !strcmp(have, want) && dir_exists(fsdir);
     if (reuse) {
         logf_("[1/3] Game data already converted by a previous run (tick \"Convert everything again\" to redo it).\r\n");
@@ -365,6 +366,11 @@ static DWORD WINAPI build_thread(LPVOID unused)
         char cmd[MAX_PATH * 6];
         snprintf(cmd, sizeof cmd, "\"%s\\python\\python.exe\" \"%s\\hl64\\tools\\build_assets.py\" \"%s\" \"%s\" -j %d",
                  g_root, g_root, g_valve, fsdir, jobs);
+        if (g_ps2[0]) {   // Head-To-Head from the PS2 version (only when chosen)
+            size_t l = strlen(cmd);
+            snprintf(cmd + l, sizeof cmd - l, " --ps2 \"%s\"", g_ps2);
+            logf_("      With Head-To-Head from the PS2 files in %s\r\n\r\n", g_ps2);
+        }
         if (run(cmd) != 0) fail("converting the game data failed (see the messages above).%s", "");
         write_text(stamp, want);
     }
@@ -407,8 +413,8 @@ static DWORD WINAPI build_thread(LPVOID unused)
 }
 
 // ------------------------------------------------------------------ the window
-enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG };
-static HWND h_valve, h_out, h_temp_on, h_temp, h_temp_br, h_clean, h_build, h_open, h_valve_br, h_out_br;
+enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG, ID_PS2_ON, ID_PS2, ID_PS2_BR };
+static HWND h_valve, h_out, h_temp_on, h_temp, h_temp_br, h_clean, h_build, h_open, h_valve_br, h_out_br, h_ps2_on, h_ps2, h_ps2_br;
 static HFONT g_font, g_mono;
 static char g_default_temp[MAX_PATH], g_settings[MAX_PATH];
 static HANDLE g_thread;
@@ -464,6 +470,9 @@ static void save_settings(void)
     WritePrivateProfileStringA("builder", "output", o, g_settings);
     WritePrivateProfileStringA("builder", "temp", t, g_settings);
     WritePrivateProfileStringA("builder", "custom_temp", SendMessageA(h_temp_on, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_settings);
+    get_text(h_ps2, t, sizeof t);
+    WritePrivateProfileStringA("builder", "ps2", t, g_settings);
+    WritePrivateProfileStringA("builder", "ps2_on", SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_settings);
 }
 
 static void set_busy(int busy)
@@ -474,6 +483,9 @@ static void set_busy(int busy)
     EnableWindow(h_temp_on, !busy); EnableWindow(h_clean, !busy);
     int custom = SendMessageA(h_temp_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(h_temp, !busy && custom); EnableWindow(h_temp_br, !busy && custom);
+    int ps2 = SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(h_ps2_on, !busy);
+    EnableWindow(h_ps2, !busy && ps2); EnableWindow(h_ps2_br, !busy && ps2);
     SetWindowTextA(h_build, busy ? "Building..." : "Build ROM");
 }
 
@@ -495,6 +507,18 @@ static void start_build(void)
     else g_tempdir[0] = 0;
     if (!g_tempdir[0]) snprintf(g_tempdir, sizeof g_tempdir, "%s", g_default_temp);
     g_clean = SendMessageA(h_clean, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    g_ps2[0] = 0;
+    if (SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        get_text(h_ps2, g_ps2, sizeof g_ps2);
+        char pak[MAX_PATH];
+        snprintf(pak, sizeof pak, "%s\\VALVE\\PAK0.PAK", g_ps2);   // (Windows paths ignore case)
+        if (!file_exists(pak)) {
+            MessageBoxA(g_wnd, "That folder doesn't have the PS2 version's files: it needs VALVE\\PAK0.PAK.\n\n"
+                        "Choose the folder with the files from the Half-Life PS2 disc, or untick Head-To-Head.", "Half-Life 64 ROM builder", MB_ICONWARNING);
+            g_ps2[0] = 0;
+            return;
+        }
+    }
     save_settings();
     SetWindowTextA(g_log, "");
     logf_("Half-Life 64 ROM builder (%s)\r\nHalf-Life: %s\r\nROM to: %s\r\nTemporary files: %s\r\n\r\n", HL64_VERSION, g_valve, g_outdir, g_tempdir);
@@ -513,16 +537,18 @@ static HWND mk(const char *cls, const char *text, DWORD style, int x, int y, int
 
 static void layout(int W, int H)
 {
-    int bw = 90, m = 12, ew = W - 2 * m - bw - 8;
+    int bw = 90, m = 12, ew = W - 2 * m - bw - 8, d = 54;   // d: the Head-To-Head rows
     MoveWindow(h_valve, m, 54, ew, 24, TRUE);   MoveWindow(h_valve_br, W - m - bw, 53, bw, 26, TRUE);
     MoveWindow(h_out, m, 108, ew, 24, TRUE);    MoveWindow(h_out_br, W - m - bw, 107, bw, 26, TRUE);
     MoveWindow(h_temp, m, 162, ew, 24, TRUE);   MoveWindow(h_temp_br, W - m - bw, 161, bw, 26, TRUE);
-    MoveWindow(h_clean, m, 194, W - 2 * m - 300, 22, TRUE);
-    MoveWindow(h_open, W - m - 280, 192, 140, 28, TRUE);
-    MoveWindow(h_build, W - m - 130, 192, 130, 28, TRUE);
-    MoveWindow(g_prog, m, 230, W - 2 * m, 18, TRUE);
-    MoveWindow(g_status, m, 252, W - 2 * m, 20, TRUE);
-    MoveWindow(g_log, m, 276, W - 2 * m, H - 276 - m, TRUE);
+    MoveWindow(h_ps2_on, m, 192, W - 2 * m, 22, TRUE);
+    MoveWindow(h_ps2, m, 216, ew, 24, TRUE);    MoveWindow(h_ps2_br, W - m - bw, 215, bw, 26, TRUE);
+    MoveWindow(h_clean, m, 194 + d, W - 2 * m - 300, 22, TRUE);
+    MoveWindow(h_open, W - m - 280, 192 + d, 140, 28, TRUE);
+    MoveWindow(h_build, W - m - 130, 192 + d, 130, 28, TRUE);
+    MoveWindow(g_prog, m, 230 + d, W - 2 * m, 18, TRUE);
+    MoveWindow(g_status, m, 252 + d, W - 2 * m, 20, TRUE);
+    MoveWindow(g_log, m, 276 + d, W - 2 * m, H - 276 - d - m, TRUE);
 }
 
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -540,6 +566,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         h_temp_on = mk("BUTTON", "Keep the temporary files somewhere else (optional; they take about 1.5 GB):", BS_AUTOCHECKBOX, 12, 138, 600, 22, ID_TEMP_ON);
         h_temp = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_TEMP);
         h_temp_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_TEMP_BR);
+        h_ps2_on = mk("BUTTON", "Add Head-To-Head from the PlayStation 2 version (optional): the folder with its disc's files:", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_PS2_ON);
+        h_ps2 = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_PS2);
+        h_ps2_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_PS2_BR);
         h_clean = mk("BUTTON", "Convert everything again (don't reuse the last run's game data)", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_CLEAN);
         h_open = mk("BUTTON", "Show the ROM", BS_PUSHBUTTON, 0, 0, 10, 10, ID_OPEN);
         ShowWindow(h_open, SW_HIDE);
@@ -553,7 +582,7 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_SIZE: layout(LOWORD(lp), HIWORD(lp)); return 0;
-    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 640; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 440; return 0;
+    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 640; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 500; return 0;
     case WM_CTLCOLORSTATIC:
         if ((HWND)lp == g_log) { SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW)); return (LRESULT)GetSysColorBrush(COLOR_WINDOW); }
         break;
@@ -563,6 +592,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_OUT_BR: browse(h_out, "Choose where to save hl64.z64"); return 0;
         case ID_TEMP_BR: browse(h_temp, "Choose where to keep the temporary files"); return 0;
         case ID_TEMP_ON: set_busy(0); return 0;
+        case ID_PS2_ON: set_busy(0); return 0;
+        case ID_PS2_BR: browse(h_ps2, "Choose the folder with the PS2 disc's files (SLUS_200.66, VALVE ...)"); return 0;
         case ID_BUILD: start_build(); return 0;
         case ID_OPEN: {
             char args[MAX_PATH + 16];
@@ -630,7 +661,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     RegisterClassA(&wc);
     char title[96];
     snprintf(title, sizeof title, "Half-Life 64 ROM builder (%s)", HL64_VERSION);
-    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 600, NULL, NULL, inst, NULL);
+    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 660, NULL, NULL, inst, NULL);
 
     // what was chosen last time; a folder on the command line (or dropped on the .exe) wins
     char v[MAX_PATH] = "", o[MAX_PATH] = "", t[MAX_PATH] = "", on[8] = "0";
@@ -654,6 +685,13 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     SetWindowTextA(h_out, o[0] ? o : g_exedir);
     SetWindowTextA(h_temp, t[0] ? t : g_default_temp);
     SendMessageA(h_temp_on, BM_SETCHECK, on[0] == '1' ? BST_CHECKED : BST_UNCHECKED, 0);
+    {   // Head-To-Head: off unless it was chosen last time
+        char p2[MAX_PATH] = "", p2on[8] = "0";
+        GetPrivateProfileStringA("builder", "ps2", "", p2, sizeof p2, g_settings);
+        GetPrivateProfileStringA("builder", "ps2_on", "0", p2on, sizeof p2on, g_settings);
+        SetWindowTextA(h_ps2, p2);
+        SendMessageA(h_ps2_on, BM_SETCHECK, p2on[0] == '1' ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     set_busy(0);
     logf_("Choose your Half-Life folder and where the ROM goes, then press Build ROM.\r\n");
     if (v[0]) logf_("Half-Life found: %s\r\n", v);

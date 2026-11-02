@@ -11,7 +11,7 @@
 #include "hud.h"
 #include "weapons.h"
 
-player_t player;
+PCTX player_t player;
 static player_t snapshot;
 
 void pm_get_view_ofs(float *v);
@@ -20,20 +20,20 @@ int  pm_get_groundent(void);
 // suit voice (CBasePlayer::SetSuitUpdate / CheckSuitUpdate)
 #define SUIT_QUEUE 4
 #define SUIT_NOREPEAT 32
-static char suit_queue[SUIT_QUEUE][24];
-static bool suit_group[SUIT_QUEUE];
-static float suit_next;
-static struct { char name[24]; float until; } norepeat[SUIT_NOREPEAT];
+static PCTX char suit_queue[SUIT_QUEUE][24];
+static PCTX bool suit_group[SUIT_QUEUE];
+static PCTX float suit_next;
+static PCTX struct { char name[24]; float until; } norepeat[SUIT_NOREPEAT];
 
-static float max_fall;
-static bool was_onground = true;
-static float air_finished, drown_next, drown_dmg;
-static float health_fade, armor_fade, flash_fade;
-static float last_health = -1, last_armor = -1;
-static float pain_alpha[4];   // front, right, back, left
-static float dead_time;
-static float flash_time;
-static float lastdmg_time;
+static PCTX float max_fall;
+static PCTX bool was_onground = true;
+static PCTX float air_finished, drown_next, drown_dmg;
+static PCTX float health_fade, armor_fade, flash_fade;
+static PCTX float last_health = -1, last_armor = -1;
+static PCTX float pain_alpha[4];   // front, right, back, left
+static PCTX float dead_time;
+static PCTX float flash_time;
+static PCTX float lastdmg_time;
 
 float player_max_health(void) { return 100; }
 bool player_alive(void) { return player.health > 0 && !player.dead; }
@@ -98,7 +98,7 @@ bool player_take_armor(float amount)
 
 void player_suit_update(const char *name, bool group, float nonrepeat)
 {
-    if (!player.suit || !name) return;
+    if (!player.suit || !name || h2h_active) return;   // (no suit voice in Head-To-Head)
     float now = game_time();
     if (nonrepeat > 0) {
         int freeslot = -1;
@@ -124,6 +124,7 @@ void player_suit_update(const char *name, bool group, float nonrepeat)
 // EMIT_SOUND_SUIT: the suit speaks on the player at "suitvolume"
 static void suit_say(const char *s, bool group)
 {
+    if (h2h_active) return;
     int pitch = (rand() & 1) ? 98 + rand() % 7 : PITCH_NORM;
     if (group) snd_sentence(0, s, 0.6f, ATTN_NORM, pitch);
     else snd_emit(0, CHAN_STATIC, s, 0.6f, ATTN_NORM, pitch, NULL);
@@ -178,7 +179,8 @@ void player_take_damage(float dmg, int type, const float *from, int attacker_ent
     }
     if (player.health <= 0) {
         // CBasePlayer::Killed: blown apart by a big hit (health under -40, or an explosion)
-        if (player.health < -40 || ((type & DMG_BLAST) && player.health < -10)) {
+        bool gibbed = player.health < -40 || ((type & DMG_BLAST) && player.health < -10);
+        if (gibbed) {
             extern void game_spawn_gibs(const float *o, int count, bool alien, float speed);
             float o[3];
             pm_get_origin(o);
@@ -187,6 +189,7 @@ void player_take_damage(float dmg, int type, const float *from, int attacker_ent
         player.health = 0;
         player.dead = true;
         dead_time = game_time();
+        if (h2h_active) { extern void h2h_player_died(bool gibbed); h2h_player_died(gibbed); }
         static const char *ds[] = {"player/pl_pain5.wav", "player/pl_pain6.wav", "player/pl_pain7.wav"};
         snd_emit(0, CHAN_VOICE, ds[rand() % 3], 1, ATTN_NORM, PITCH_NORM, NULL);
         if (player.suit) suit_say("HEV_DEAD", true);
@@ -363,9 +366,9 @@ void player_draw_hud(float dt)
     for (int i = 0; i < 4; i++) {
         if (pain_alpha[i] <= 0 || !player.suit) continue;
         font_color(RGBA32(255 * fminf(pain_alpha[i], 1), 0, 0, 255));
-        int x = 160 - fw[i] / 2, y = 120 - fh[i] / 2;
-        if (i == 0) y = 120 - fh[i] * 3;
-        if (i == 2) y = 120 + fh[i] * 2;
+        int x = 160 - fw[i] / 2, y = HUD_CY - fh[i] / 2;
+        if (i == 0) y = HUD_CY - fh[i] * (hud_h < 200 ? 2 : 3);
+        if (i == 2) y = HUD_CY + fh[i] * (hud_h < 200 ? 1 : 2);
         if (i == 1) x = 160 + fw[i] * 2;
         if (i == 3) x = 160 - fw[i] * 3;
         image_draw(&pain_img, x, y, fx[i], 0, fw[i], fh[i]);
@@ -376,7 +379,7 @@ void player_draw_hud(float dt)
     if (player.armor != last_armor) { armor_fade = 255; last_armor = player.armor; }
     health_fade = fmaxf(100, health_fade - dt * 200);
     armor_fade = fmaxf(100, armor_fade - dt * 200);
-    int y = 240 - 16 - 8 - 8 - HUD_SAFE_Y;
+    int y = hud_y0 + hud_h - 16 - 8 - 8 - (hud_y0 + hud_h < 240 ? 4 : HUD_SAFE_Y);
     bool red = player.health <= 25;
     // health: cross + number + divider
     font_color(col(health_fade, red));
@@ -394,7 +397,7 @@ void player_draw_hud(float dt)
     hud_number(ax + 20, y, (int)player.armor, 3, true);
     // flashlight (CHudFlashlight)
     font_color(col(player.flashlight ? 255 : 120, false));
-    hud_icon2(320 - 18 - 12 - HUD_SAFE_X, 10 + HUD_SAFE_Y, player.flashlight ? 16 : 34, 72, 18, 16);
-    if (player.flashlight) hud_icon2(320 - 12 - HUD_SAFE_X, 10 + HUD_SAFE_Y, 52, 72, 6, 16);   // the beam ahead of the lamp (CHudFlashlight::Draw)
+    hud_icon2(320 - 18 - 12 - HUD_SAFE_X, hud_y0 + 10 + (hud_y0 ? 0 : HUD_SAFE_Y), player.flashlight ? 16 : 34, 72, 18, 16);
+    if (player.flashlight) hud_icon2(320 - 12 - HUD_SAFE_X, hud_y0 + 10 + (hud_y0 ? 0 : HUD_SAFE_Y), 52, 72, 6, 16);   // the beam ahead of the lamp (CHudFlashlight::Draw)
     rdpq_set_mode_standard();
 }

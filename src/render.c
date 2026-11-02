@@ -17,8 +17,13 @@
 #define MAX_ENT_MATS 128
 
 static T3DViewport viewport;
-static T3DMat4FP *mat_pool;          // FB_COUNT * (1 + MAX_ENT_MATS), uncached
+static T3DMat4FP *mat_pool;          // POOL_SETS * (1 + MAX_ENT_MATS), uncached
+// matrices the RSP reads: one set for the frame being built, one for the frame it may still be
+// drawing (display_get hands out a buffer only once the frame before last has finished)
+#define POOL_SETS 2
+static int pool_set;
 static int frame_index;
+static int view_slot;      // frame_index, plus FB_COUNT for the second split-screen view
 
 static int framecount = 1;
 #define ENT_MAX_LEAFS 32
@@ -52,13 +57,14 @@ void render_init(void)
 {
     display_init(RESOLUTION_320x240, DEPTH_16_BPP, FB_COUNT, GAMMA_NONE, FILTERS_RESAMPLE_ANTIALIAS_DEDITHER);
     rdpq_init();
+    display_get_zbuf();   // now, not on the first frame of a game: a save of a big map loaded from the title has no room left for it
     t3d_init((T3DInitParams){});
-    viewport = t3d_viewport_create_buffered(FB_COUNT);
-    mat_pool = malloc_uncached(sizeof(T3DMat4FP) * FB_COUNT * (1 + MAX_ENT_MATS));
+    viewport = t3d_viewport_create_buffered(FB_COUNT * 8);   // several attaches per view (the gun's projection), two views a frame
+    mat_pool = malloc_uncached(sizeof(T3DMat4FP) * POOL_SETS * (1 + MAX_ENT_MATS));   // per frame (split screen: half each view)
     // long-lived buffers are allocated up front, so they don't split the heap between maps
     sky_data = (uint8_t *)memalign(16, 16 + 6 * (512 + 4096)) + 12;   /* header at +12 so the texels after it are 16-byte aligned (the RDP hangs on misaligned loads) */
     sky_verts = malloc_uncached(sizeof(T3DVertPacked) * 48);
-    sky_mats = malloc_uncached(sizeof(T3DMat4FP) * FB_COUNT);
+    sky_mats = malloc_uncached(sizeof(T3DMat4FP) * FB_COUNT * 2);
     studio_begin_frame(0);
     rdpq_text_register_font(FONT_BUILTIN_DEBUG_MONO, rdpq_font_load_builtin(FONT_BUILTIN_DEBUG_MONO));
 }
@@ -364,14 +370,30 @@ static inline bool face_back(int fi, const float *eye)
 }
 
 static float cur_fovy = 74, cur_far = 4096;
-// the first-person weapon gets a near plane of 1 unit (the world's is 4): its barrel and hands
-// come within 4 units of the eye when the view bobs back, and triangles crossing the near plane
-// were clipped into screen-wide slivers (the shotgun's yellow band when walking backwards)
+// the first-person weapon's projection: the world's on the full screen; in a split-screen half the
+// full screen's, so the gun looks the same size and sits at the bottom of the half
+static int view_rect[4] = {0, 0, 320, 240};
 void render_viewmodel_projection(bool on)
 {
-    if (on) t3d_viewport_set_projection(&viewport, cur_fovy * M_PI / 180, 1.0f, 256.0f);
-    else t3d_viewport_set_projection(&viewport, cur_fovy * M_PI / 180, 4.0f, cur_far);
-    t3d_viewport_attach(&viewport);
+    int *r = view_rect;
+    if (r[3] < 240) {
+        // a split-screen half: the gun is drawn as on the full screen, its lower half showing in
+        // this player's half (the narrow view would push it out of the bottom)
+        if (on) {
+            // the full screen's projection, cut down to the band from 0.85 below the centre to
+            // 0.15 above it (an off-centre frustum: y' = 2 (y - a) - 1 in clip space)
+            const float full_fovy = 73.74f, a = -0.85f;
+            t3d_viewport_set_perspective(&viewport, full_fovy * M_PI / 180, 4.0f / 3.0f, 4.0f, 256.0f);
+            T3DMat4 m = viewport.matProj;
+            for (int c = 0; c < 4; c++) m.m[c][1] = 2 * m.m[c][1] - (2 * a + 1) * m.m[c][3];
+            t3d_viewport_set_projection_matrix(&viewport, &m);
+        } else {
+            t3d_viewport_set_projection(&viewport, cur_fovy * M_PI / 180, 4.0f, cur_far);
+        }
+        t3d_viewport_attach(&viewport);
+        return;
+    }
+    // full screen: the gun is drawn with the world's projection (1.1 dropped the near-plane change)
 }
 
 // ---------------------------------------------------------------- world
@@ -496,7 +518,7 @@ void render_dlight_world(const float *c, float R, float bright, const float *ski
                     // past full brightness on the RDP and turned lit surfaces blue/green
                     float a = in * in * bright * 0.6f;
                     if (a > 0.6f) a = 0.6f;
-                    sv[v][0] = o3.v[0]; sv[v][1] = o3.v[1]; sv[v][2] = o3.v[2] - 0.0004f;
+                    sv[v][0] = o3.v[0]; sv[v][1] = o3.v[1]; sv[v][2] = (o3.v[2] + 1) * 0.5f - 0.0004f;   // (tiny3d's depth: clip z -1..1 -> 0..1)
                     sv[v][3] = 1; sv[v][4] = 1; sv[v][5] = 0.92f; sv[v][6] = a;
                     if (in > 0) any = true;
                 }
@@ -705,6 +727,7 @@ void render_draw_translucent(void)
     rdpq_mode_end();
     t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED);
 }
+static int ent_mat_cap = MAX_ENT_MATS;
 static void draw_entities(const float *eye, T3DMat4FP *mats)
 {
     int used = 0;
@@ -713,7 +736,7 @@ static void draw_entities(const float *eye, T3DMat4FP *mats)
     extern int game_brush_entities(const int16_t **list);
     const int16_t *blist;
     int nb = game_brush_entities(&blist);
-    for (int bi = 0; bi < nb && used < MAX_ENT_MATS; bi++) {
+    for (int bi = 0; bi < nb && used < ent_mat_cap; bi++) {
         int i = blist[bi];
         entity_t *e = &entities[i];
         if (!e->visible || e->removed || e->model <= 0) continue;
@@ -802,7 +825,7 @@ void render_load_sky(const char *name)
     fclose(f);
     data_cache_hit_writeback(sky_data, 4 + 6 * (512 + 4096));
     if (!sky_verts) sky_verts = malloc_uncached(sizeof(T3DVertPacked) * 48);
-    if (!sky_mats) sky_mats = malloc_uncached(sizeof(T3DMat4FP) * FB_COUNT);
+    if (!sky_mats) sky_mats = malloc_uncached(sizeof(T3DMat4FP) * FB_COUNT * 2);
     for (int face = 0; face < 6; face++)
         for (int tile = 0; tile < 4; tile++) {
             int tx = tile & 1, ty = tile >> 1;
@@ -840,7 +863,7 @@ void render_load_sky(const char *name)
 static void draw_sky(const float *eye)
 {
     if (!sky_ok) return;
-    T3DMat4FP *m = &sky_mats[frame_index];
+    T3DMat4FP *m = &sky_mats[view_slot];
     t3d_mat4fp_from_srt_euler(m, (float[3]){1, 1, 1}, (float[3]){0, 0, 0}, (float[3]){eye[0], eye[1], eye[2]});
     rdpq_sync_pipe();
     rdpq_mode_begin();
@@ -863,7 +886,8 @@ static void draw_sky(const float *eye)
 #ifndef NPC_CULL
 #define NPC_CULL T3D_FLAG_CULL_FRONT
 #endif
-#define MAX_DRAWN_NPCS 12
+#define MAX_DRAWN_NPCS 24    // characters
+#define MAX_DRAWN_ITEMS 24    // pickups (one bone, a fixed pose: cheap)
 static void draw_npcs(const float *eye)
 {
     int order[MAX_NPCS];
@@ -876,7 +900,7 @@ static void draw_npcs(const float *eye)
         if (ce->removed || (ce->rendermode != 0 && ce->renderamt == 0)) continue;   // killed / env_render
         float d2 = 0;
         for (int k = 0; k < 3; k++) { float dd = c->origin[k] - eye[k]; d2 += dd * dd; }
-        if (d2 > 2500.0f * 2500.0f) continue;
+        if (d2 > cur_far * cur_far) continue;   // (as far as the world is drawn: 4096 outdoors, the fog's end indoors)
         float mn[3], mx[3];
         for (int k = 0; k < 3; k++) { mn[k] = c->origin[k] + c->mins[k]; mx[k] = c->origin[k] + c->maxs[k]; }
         mn[2] -= 8; mx[2] += 8;
@@ -891,20 +915,41 @@ static void draw_npcs(const float *eye)
 #endif
             goto visible;
         }
-        float mid[3] = {c->origin[0], c->origin[1], c->origin[2] + (c->mins[2] + c->maxs[2]) * 0.5f};
-        int lf = bsp_leaf_for_point(mid);
-        if (lf <= 0 || lf >= world.numleafs || !leaf_inpvs[lf]) {
-            lf = bsp_leaf_for_point(c->origin);   // origin can sit exactly on the floor plane
-            if (lf <= 0 || lf >= world.numleafs || !leaf_inpvs[lf]) continue;
+        {   // in a visible leaf: the middle, the origin (it can sit exactly on the floor plane), or,
+            // as the PC links an entity into every leaf its box touches, the box's top and corners
+            // (a character half in a wall or a doorway, a turret on the ceiling)
+            float mid[3] = {c->origin[0], c->origin[1], c->origin[2] + (c->mins[2] + c->maxs[2]) * 0.5f};
+            float pts[7][3] = {
+                {mid[0], mid[1], mid[2]}, {c->origin[0], c->origin[1], c->origin[2]},
+                {c->origin[0], c->origin[1], c->origin[2] + c->maxs[2] - 1},
+                {c->origin[0] + c->mins[0] + 1, c->origin[1] + c->mins[1] + 1, mid[2]},
+                {c->origin[0] + c->maxs[0] - 1, c->origin[1] + c->mins[1] + 1, mid[2]},
+                {c->origin[0] + c->mins[0] + 1, c->origin[1] + c->maxs[1] - 1, mid[2]},
+                {c->origin[0] + c->maxs[0] - 1, c->origin[1] + c->maxs[1] - 1, mid[2]}};
+            bool seen = false;
+            for (int k = 0; k < 7 && !seen; k++) {
+                int lf = bsp_leaf_for_point(pts[k]);
+                seen = lf > 0 && lf < world.numleafs && leaf_inpvs[lf];
+            }
+            if (!seen) continue;
         }
     visible:
-        if (npc_is_item(i)) d2 *= 4;   // characters before pickups when there are too many to draw
         // insertion sort by distance, keep the nearest
         int j = n++;
         while (j > 0 && dist[j - 1] > d2) { order[j] = order[j - 1]; dist[j] = dist[j - 1]; j--; }
         order[j] = i; dist[j] = d2;
     }
-    if (n > MAX_DRAWN_NPCS) n = MAX_DRAWN_NPCS;
+    {   // the nearest characters and the nearest pickups, each up to its own limit (one count for
+        // both used to let a room's ammo and weapons push characters off the list)
+        int nc = 0, ni = 0, k = 0;
+        for (int i = 0; i < n; i++) {
+            bool item = npc_is_item(order[i]);
+            if (item ? ni >= MAX_DRAWN_ITEMS : nc >= MAX_DRAWN_NPCS) continue;
+            if (item) ni++; else nc++;
+            order[k] = order[i]; dist[k] = dist[i]; k++;
+        }
+        n = k;
+    }
     rstats.npcs = n;
     if (!n) return;
     t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED | NPC_CULL);
@@ -956,18 +1001,52 @@ static void draw_npcs(const float *eye)
             float v = 0.5f + 0.3f * sinf(tt * 23.0f) + 0.2f * sinf(tt * 37.0f);
             d.mouth = v < 0 ? 0 : v;
         }
+        float hand[3][4];
+        studio_t *gun = c->weapmodel;
+        if (gun && c->model->hand_bone >= 0) {   // (a Head-To-Head player: its hand, for the gun)
+            d.want_bone = c->model->hand_bone; d.bone_out = hand;
+            d.cache_slot = NULL; d.cacheable = false; d.lod_half = false;
+        }
         studio_draw(&d);
+        if (gun && d.bone_out && hand[0][0] < 1e29f) {
+            // the gun it holds, hung from its hand (the PC's p_ model, bone-merged to the player)
+            studio_draw_t g = {.model = gun, .use_xform = true};
+            memcpy(g.xform, hand, sizeof(hand));
+            memcpy(g.light, d.light, 3);
+            studio_draw(&g);
+        }
     }
     t3d_state_set_drawflags(T3D_FLAG_DEPTH | T3D_FLAG_TEXTURED | T3D_FLAG_SHADED);
     bound_tex = -1;
     bound_alpha = -1;
 }
 
-void render_frame(const float *eye, const float *angles, void (*hud)(void))
+// a frame is render_begin(), one render_view() per player, render_end(); render_frame() does all
+// three for the whole screen
+static surface_t *cur_fb;
+static int views_this_frame;
+void render_begin(void)
 {
     frame_index = (frame_index + 1) % FB_COUNT;
-    framecount++;
+    pool_set ^= 1;
     rstats.tris = 0;
+    uint32_t t1 = TICKS_READ();
+    cur_fb = display_get();
+    rstats.t_wait += TICKS_DISTANCE(t1, TICKS_READ());
+    rdpq_attach(cur_fb, display_get_zbuf());
+    views_this_frame = 0;
+}
+
+void render_end(void)
+{
+    rdpq_detach_show();
+}
+
+void render_view(const float *eye, const float *angles, void (*hud)(void), int vx, int vy, int vw, int vh)
+{
+    // each view of a frame has its own matrices (the RSP may still be drawing the first)
+    view_slot = frame_index + FB_COUNT * (views_this_frame++ & 1);
+    framecount++;
 
     float f[3], r[3], u[3];
     {
@@ -979,15 +1058,24 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
         u[0] = cr * sp * cy + sr * sy; u[1] = cr * sp * sy - sr * cy; u[2] = cr * cp;
     }
     const float fovx = 90.0f;
-    const float fovy = 2.0f * atanf(tanf(fovx * 0.5f * M_PI / 180) * 0.75f) * 180 / M_PI;
+    const float fovy = 2.0f * atanf(tanf(fovx * 0.5f * M_PI / 180) * vh / (float)vw) * 180 / M_PI;
+    t3d_viewport_set_area(&viewport, vx, vy, vw, vh);
+    view_rect[0] = vx; view_rect[1] = vy; view_rect[2] = vw; view_rect[3] = vh;
 
-    T3DMat4FP *mats = &mat_pool[frame_index * (1 + MAX_ENT_MATS)];
+    // the frame's matrices: a split-screen view gets half of them (no more memory for single player)
+    bool split = vh < 240;
+    int vi = (views_this_frame - 1) & 1, half = (1 + MAX_ENT_MATS) / 2;
+    T3DMat4FP *mats = &mat_pool[pool_set * (1 + MAX_ENT_MATS) + (split ? vi * half : 0)];
+    ent_mat_cap = split ? half - 1 : MAX_ENT_MATS;
     t3d_mat4fp_from_srt_euler(&mats[0], (float[3]){1.0f / world.vertscale, 1.0f / world.vertscale, 1.0f / world.vertscale},
                               (float[3]){0, 0, 0}, (float[3]){0, 0, 0});
 
+    // indoors (no sky seen last frame from this view): fog hides distant geometry, far plane culls it
+    static bool view_sky[2];
+    int vslot = (views_this_frame - 1) & 1;
+    fog_on = !view_sky[vslot];
     t3d_viewport_set_projection(&viewport, fovy * M_PI / 180, 4.0f, fog_on ? FOG_END + 64 : 4096.0f);
     cur_fovy = fovy; cur_far = fog_on ? FOG_END + 64 : 4096.0f;
-    fog_on = !sky_visible;   // indoors: fog hides distant geometry, far plane culls it
     T3DVec3 e = {{eye[0], eye[1], eye[2]}};
     T3DVec3 tgt = {{eye[0] + f[0], eye[1] + f[1], eye[2] + f[2]}};
     T3DVec3 up = {{u[0], u[1], u[2]}};
@@ -997,12 +1085,8 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
     setup_frustum(eye, f, r, u, fovx + 4, fovy + 4);
     mark_visible(eye);
     uint32_t t1 = TICKS_READ();
-    surface_t *fb = display_get();
-    uint32_t t2 = TICKS_READ();
     rstats.t_vis += TICKS_DISTANCE(t0, t1);
-    rstats.t_wait += TICKS_DISTANCE(t1, t2);
 
-    rdpq_attach(fb, display_get_zbuf());
     t3d_frame_start();
 #ifdef EXP_SCISSOR
     rdpq_set_scissor(0, 0, 32, 24);
@@ -1021,6 +1105,7 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
     bound_alpha = -1;
 
     collect_world(eye);
+    view_sky[vslot] = sky_visible;
     if (!sky_visible || !sky_ok) t3d_screen_clear_color(sky_color);
     t3d_screen_clear_depth();
     uint8_t white[4] = {0xff, 0xff, 0xff, 0xff};
@@ -1046,7 +1131,7 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
 #endif
     uint32_t t5a = TICKS_READ();
     rstats.npcs = 0;
-    studio_begin_frame(frame_index);
+    studio_begin_view(pool_set, vi, split ? 2 : 1);
     draw_npcs(eye);
     uint32_t t5b = TICKS_READ();
     rstats.t_bents += TICKS_DISTANCE(t5, t5a);
@@ -1078,8 +1163,15 @@ void render_frame(const float *eye, const float *angles, void (*hud)(void))
     // 2D overlay
     rdpq_sync_pipe();
     rdpq_set_mode_standard();
+    rdpq_set_scissor(vx, vy, vx + vw, vy + vh);
     if (hud) hud();
-    rdpq_detach_show();
+}
+
+void render_frame(const float *eye, const float *angles, void (*hud)(void))
+{
+    render_begin();
+    render_view(eye, angles, hud, 0, 0, 320, 240);
+    render_end();
 }
 
 T3DViewport *render_viewport(void) { return &viewport; }

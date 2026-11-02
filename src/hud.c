@@ -31,6 +31,7 @@ static float hud_time;
 static bool end_after_message, end_now;
 static float game_title_time;
 static int train_level = -1;
+int hud_y0 = 0, hud_h = 240;
 
 static image_t hud3;
 

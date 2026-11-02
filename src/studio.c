@@ -17,12 +17,14 @@
 
 static studio_t *cache[MAX_MODELS];
 static int num_cached;
-static T3DMat4FP *bone_pool;         // FB_COUNT * MAX_DRAWN_BONES, uncached
+static T3DMat4FP *bone_pool;         // POOL_SETS * MAX_DRAWN_BONES, uncached (render.c: the frame being built and the one the RSP may still draw)
+#define POOL_SETS 2
 // poses that never change (bodies on the floor): their bone matrices are kept here once computed
 #define STATIC_BONES 384
 static T3DMat4FP *static_pool;
 static int static_used;
-static int pool_frame, pool_used;
+static int pool_frame, pool_used;   // pool_frame: where this view's bones start
+static int pool_cap = MAX_DRAWN_BONES;
 // shared fixed poses (gibs, mines, props, bodies on a key frame): model-local bone matrices are the
 // same for every instance, so they are computed once per map and kept in static_pool
 #define MAX_POSES 64
@@ -110,14 +112,15 @@ static uint8_t *compact_anims(uint8_t *buf, int *size)
     int oldsize = anim_end - anim_ofs;
     int delta = (oldsize - newsize) & ~15;
     if (delta < 4096) return buf;
-    uint8_t *tmp = memalign(16, newsize);
-    if (!tmp) return buf;
+    // the kept sequences slide down within the anim lump (they are stored in order, so each one
+    // only ever moves towards the start): no second buffer, so a big model needs no more memory
+    // to load than its own size
     int at = 0;
     uint32_t ofs0 = 0;
     for (int i = 0; i < numseqs && i < 256; i++) {
         if (!keep[i]) continue;
         int n = seq_anim_bytes(numbones, anim + seqs[i].animofs, seqs[i].numframes);
-        memcpy(tmp + at, anim + seqs[i].animofs, n);
+        memmove(anim + at, anim + seqs[i].animofs, n);
         seqs[i].animofs = at;
         if (i == 0) ofs0 = at;
         at += (n + 1) & ~1;
@@ -128,11 +131,9 @@ static uint8_t *compact_anims(uint8_t *buf, int *size)
         seqs[i].numframes = seqs[0].numframes;
         seqs[i].numevents = 0;
     }
-    // move the tail down over the freed space, put the compacted frames in, shrink
+    // move the tail down over the freed space, shrink
     int keepsize = oldsize - delta;                   // >= newsize, 16-aligned difference
     memmove(buf + anim_ofs + keepsize, buf + anim_end, *size - anim_end);
-    memcpy(buf + anim_ofs, tmp, at);
-    free(tmp);
     for (int i = 0; i < (int)h[4]; i++) if (tab[i * 2] > anim_ofs) tab[i * 2] -= delta;
     *size -= delta;
     uint8_t *nb = realloc(buf, *size);
@@ -201,6 +202,26 @@ static void build_model_strips(studio_t *m)
     debugf("studio strips: %s %d indices %d strips (%d bytes)\n", m->name, nidx, nst, (int)(nidx * 2 + nst * 4 + m->numchunks * 4));
 }
 
+int studio_reserve = 48 * 1024;
+// the unpacked size of a model file: libdragon's compressed-asset header ("DCA5", flags, then
+// varints: compressed size, original size, in-place margin), or the file's own size
+static int model_unpacked_size(const char *path, int filesize)
+{
+    uint8_t h[16] = {0};
+    FILE *f = fopen(path, "rb");
+    if (!f) return filesize;
+    int n = fread(h, 1, sizeof(h), f);
+    fclose(f);
+    if (n < 8 || memcmp(h, "DCA", 3)) return filesize;
+    const uint8_t *p = h + 5;
+    uint32_t v[3] = {0, 0, 0};
+    for (int k = 0; k < 3; k++) {
+        int sh = 0;
+        while (p < h + sizeof(h)) { uint8_t c = *p++; v[k] |= (uint32_t)(c & 0x7f) << sh; sh += 7; if (!(c & 0x80)) break; }
+    }
+    return (int)(v[1] + v[2]);
+}
+
 studio_t *studio_get(const char *name)
 {
     for (int i = 0; i < num_cached; i++)
@@ -213,19 +234,27 @@ studio_t *studio_get(const char *name)
     fseek(f, 0, SEEK_END);
     int csize = ftell(f);
     fclose(f);
-    // models loaded during play (a dropped gun, a weapon's view model): don't run out of memory
-    // over one, the game carries on without drawing it
+    // is there room? The model takes its unpacked size (the compressed file's header says it)
+    // in one block, and the heap must keep `studio_reserve` free besides (while a map loads: what
+    // its renderer still has to allocate; in play: a margin for everything else). Without room the
+    // game carries on without drawing it. (This used to ask for six times the compressed size in
+    // one block, about three times too much: big maps lost their scientists.)
     {
-        void *volatile probe = malloc(csize * 6 + 32 * 1024);
-        if (!probe) { debugf("studio: no room for %s\n", name); return NULL; }
-        free(probe);
+        int need = model_unpacked_size(path, csize) + 1024;
+        void *volatile probe = malloc(need);
+        // (gibs are small and short-lived: they may dig deeper into the margin)
+        int keep = strstr(name, "gibs") && studio_reserve > 16 * 1024 ? 16 * 1024 : studio_reserve;
+        void *volatile spare = probe && keep > 0 ? malloc(keep) : NULL;
+        bool ok = probe && (keep <= 0 || spare);
+        free(spare); free(probe);
+        if (!ok) { debugf("studio: no room for %s (%d KB + %d KB kept free)\n", name, need / 1024, studio_reserve / 1024); return NULL; }
     }
     int size;
     uint8_t *buf = asset_load(path, &size);
     if (!buf || memcmp(buf, "HLM1", 4)) { free(buf); return NULL; }
     // textures and palettes are read by the RDP straight from this buffer: it must be 8-byte
-    // aligned or the real RDP locks up (asset_load can hand back a 4-byte-aligned block)
-    if ((uintptr_t)buf & 15) {
+    // aligned or the real RDP locks up (malloc's blocks are; a misaligned one is copied)
+    if ((uintptr_t)buf & 7) {
         uint8_t *a = memalign(16, size);
         if (!a) { free(buf); return NULL; }
         memcpy(a, buf, size);
@@ -234,7 +263,7 @@ studio_t *studio_get(const char *name)
     }
     // (not the view models, nor monsters whose code plays their sequences by name: the Blast Pit
     // tentacles' level idles / strikes / rises, the turrets' deploy / fire / retire)
-    if (strncmp(name, "v_", 2) && strncmp(name, "tentacle", 8) && !strstr(name, "turret") && strcmp(name, "sentry"))
+    if (strncmp(name, "v_", 2) && strncmp(name, "pl_", 3) && strncmp(name, "p_", 2) && strncmp(name, "tentacle", 8) && !strstr(name, "turret") && strcmp(name, "sentry"))
         buf = compact_anims(buf, &size);
     studio_t *m = calloc(1, sizeof(studio_t));
     strncpy(m->name, name, sizeof(m->name) - 1);
@@ -273,6 +302,12 @@ studio_t *studio_get(const char *name)
     }
     m->numatt = 0; m->att = NULL;
     if (h[4] > 14) m->att = lump(buf, tab, 14, &m->numatt);
+    m->hand_bone = -1;
+    if (h[4] > 16) {
+        int has = 0;
+        uint8_t *c = lump(buf, tab, 16, &has);
+        if (has) m->hand_bone = *(int16_t *)c;
+    }
     m->ctl0_bone = -1;
     if (h[4] > 15) {
         int has = 0;
@@ -355,9 +390,16 @@ float studio_seq_duration(studio_t *m, int seq)
 
 void studio_begin_frame(int frame_index)
 {
-    if (!bone_pool) bone_pool = malloc_uncached(sizeof(T3DMat4FP) * MAX_DRAWN_BONES * FB_COUNT);
+    studio_begin_view(frame_index, 0, 1);
+}
+
+// a split-screen frame: each of its views gets a share of the frame's bones
+void studio_begin_view(int frame_index, int view, int nviews)
+{
+    if (!bone_pool) bone_pool = malloc_uncached(sizeof(T3DMat4FP) * MAX_DRAWN_BONES * POOL_SETS);
     if (!static_pool) static_pool = malloc_uncached(sizeof(T3DMat4FP) * STATIC_BONES);
-    pool_frame = frame_index % FB_COUNT;
+    pool_cap = MAX_DRAWN_BONES / nviews;
+    pool_frame = (frame_index % POOL_SETS) * MAX_DRAWN_BONES + view * pool_cap;
     pool_used = 0;
     lod_frame++;
 }
@@ -406,14 +448,18 @@ void studio_draw(const studio_draw_t *d)
     int pose = -1;
     // (only poses that stay put: a one-frame or finished sequence, or one the caller says won't change;
     // animating characters passing a key frame would just fill the pool)
-    bool keyed = !cached && (f0 == f1 || (d->cacheable && t < 0.01f)) && d->ctl0 == 0 && d->mouth <= 0 && !d->use_xform && m->numbones <= 128;
+    bool keyed = !cached && (f0 == f1 || (d->cacheable && t < 0.01f)) && d->ctl0 == 0 && d->mouth <= 0 && !d->use_xform && !d->bone_out && m->numbones <= 128;
     if (keyed) {
         for (int i = 0; i < num_poses; i++)
             if (poses[i].m == m && poses[i].seq == seq && poses[i].frame == f0) { pose = i; break; }
         if (pose >= 0) cached = true;
     }
     // keep room for the first-person weapon (drawn last): busy scenes used to run the pool dry
-    if (pool_used + (cached ? 0 : m->numbones) + 1 > MAX_DRAWN_BONES - (d->use_xform ? 0 : 160)) return;
+    if (pool_used + (cached ? 0 : m->numbones) + 1 > pool_cap - (d->use_xform ? 0 : pool_cap * 160 / MAX_DRAWN_BONES)) {
+        static int warned;
+        if (warned < 8) { warned++; debugf("studio: bone pool full (%d of %d), %s not drawn\n", pool_used, pool_cap, m->name); }
+        return;
+    }
 #ifdef TENTDBG
     if (!strncmp(m->name, "tentacle", 8)) { static int c; if ((c++ & 63) == 0) debugf("TDRAW seq %d f %.1f cached %d pose %d pool %d org %.0f %.0f %.0f\n", seq, fr, cached, pose, pool_used, d->origin[0], d->origin[1], d->origin[2]); }
 #endif
@@ -434,7 +480,7 @@ void studio_draw(const studio_draw_t *d)
     float ent[3][4] = {{cy, -sy, 0, d->origin[0]}, {sy, cy, 0, d->origin[1]}, {0, 0, 1, d->origin[2]}};
     if (d->use_xform) memcpy(ent, d->xform, sizeof(ent));
     // the entity transform is its own matrix on the stack: bone matrices stay model-local (shareable)
-    T3DMat4FP *emat = &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used++];
+    T3DMat4FP *emat = &bone_pool[pool_frame + pool_used++];
     {
         T3DMat4 tm;
         for (int r = 0; r < 3; r++) { tm.m[0][r] = ent[r][0]; tm.m[1][r] = ent[r][1]; tm.m[2][r] = ent[r][2]; tm.m[3][r] = ent[r][3]; }
@@ -445,7 +491,7 @@ void studio_draw(const studio_draw_t *d)
     float bonemat[128][3][4];
     float inv = 1.0f / m->posscale;
     T3DMat4FP *out = pose >= 0 ? &static_pool[poses[pose].off]
-                   : cached ? &static_pool[*d->cache_slot] : &bone_pool[pool_frame * MAX_DRAWN_BONES + pool_used];
+                   : cached ? &static_pool[*d->cache_slot] : &bone_pool[pool_frame + pool_used];
     if (pose >= 0) {
         for (int a = 0; a < d->att_n && a < poses[pose].natt; a++) {
             const float *la = poses[pose].att[a];
@@ -457,7 +503,7 @@ void studio_draw(const studio_draw_t *d)
 #endif
     // half-rate animation far away
     int ls = -1;
-    if (!cached && d->lod_inst && !d->use_xform && m->numbones <= LOD_BONES) {
+    if (!cached && d->lod_inst && !d->use_xform && !d->bone_out && m->numbones <= LOD_BONES) {
         int fr_ = -1;
         for (int i = 0; i < LOD_SLOTS; i++) {
             if (lod[i].inst == d->lod_inst) { ls = i; break; }
@@ -555,6 +601,14 @@ void studio_draw(const studio_draw_t *d)
         memcpy(out, wout, sizeof(T3DMat4FP) * m->numbones);
         lod[ls].inst = d->lod_inst; lod[ls].m = m; lod[ls].nb = m->numbones; lod[ls].stamp = lod_frame; lod[ls].reused = false;
     }
+    if (d->bone_out) {   // a bone's world matrix: the entity's transform times the bone's
+        int b = d->want_bone;
+        if (!cached && b >= 0 && b < m->numbones && b < 128) {
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 4; c++)
+                    d->bone_out[r][c] = ent[r][0] * bonemat[b][0][c] + ent[r][1] * bonemat[b][1][c] + ent[r][2] * bonemat[b][2][c] + (c == 3 ? ent[r][3] : 0);
+        } else d->bone_out[0][0] = 1e30f;   // (not known this frame)
+    }
     float latt[4][3];
     int natt = 0;
     for (int a = 0; a < m->numatt && a < 4; a++) {
@@ -605,6 +659,23 @@ void studio_draw(const studio_draw_t *d)
         ssubmodel_t *sm = &m->submodels[part->firstmodel + sub];
         for (uint32_t c = sm->firstchunk; c < sm->firstchunk + sm->numchunks; c++) {
             schunk_t *ch = &m->chunks[c];
+            if (d->near_cull > 0 && !cached && ls != -2) {
+                // a part wholly between the eye and the near plane: the PC never shows it
+                bool behind = true;
+                for (int l = 0; l < ch->numloads && behind; l++) {
+                    sload_t *ld = &m->loads[ch->firstload + l];
+                    if (ld->bone >= 128) { behind = false; break; }
+                    float r2 = 0;
+                    const T3DVertPacked *vp = &m->verts[ld->vofs >> 1];
+                    for (int i = 0; i < ld->cnt; i++) {
+                        const int16_t *p = (i & 1) ? vp[i >> 1].posB : vp[i >> 1].posA;
+                        float q = (float)p[0] * p[0] + (float)p[1] * p[1] + (float)p[2] * p[2];
+                        if (q > r2) r2 = q;
+                    }
+                    if (bonemat[ld->bone][0][3] + sqrtf(r2) * inv >= d->near_cull) behind = false;
+                }
+                if (behind) continue;
+            }
             int tex = ch->skinref;
             if (m->numskinref) tex = m->skins[family * m->numskinref + ch->skinref];
             if (tex != cur_tex && tex >= 0 && tex < m->numtex) {

@@ -83,6 +83,9 @@ typedef struct {
     float bt[4], bv[3];          //   timers, flying velocity
     int weapons;                 // human grunt "weapons" bits (1 mp5, 2 hand grenades, 4 launcher, 8 shotgun)
     float next_grenade, cover_until;
+    float respawn_at;            // Head-To-Head: a picked-up item comes back then (0: never)
+    int8_t puppet;               // Head-To-Head: the other player's body (player index), -1 none
+    void *weapmodel;             // Head-To-Head: the gun in its hand (studio_t, p_*), NULL none
     bool vis_cache; int vis_target; float vis_time;   // combat line-of-sight cache   // BSP leaf at leaf_org (PVS checks)
 } npc_t;
 
@@ -103,6 +106,8 @@ void npcs_restore_transition(const float *landmark_origin);
 void npc_take_damage(int npc, float dmg, int dmgtype, const float *dir, int attacker); // attacker: 0 player, n+1 npc
 void npc_hear(const float *origin, float radius, int source);                         // gunfire, explosions
 bool npc_is_item(int npc);
+int  npc_spawn_puppet(const char *model, int player);   // Head-To-Head: a player's body as the other sees it
+void npcs_items_touch(void);                          // item pickups for the player whose context is in
 bool npc_alive(int npc);
 void npc_teleport(int npc, const float *origin, float yaw);
 float npc_eye_height(int npc);
