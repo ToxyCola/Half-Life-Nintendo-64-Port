@@ -839,21 +839,24 @@ static void draw_hud_loading(void)
     draw_hud();
     font_begin(BLEND_ALPHA);
     font_color(RGBA32(255, 160, 0, 255));
-    font_draw_centered(FONT_LARGE, 160, 112, "LOADING");
+    // the lambda and the text are centred on screen together
+    extern sprite_t *loading_lambda;
+    int tw = font_width(FONT_LARGE, "LOADING");
+    int lw = loading_lambda ? loading_lambda->width + 5 : 0;
+    int left = 160 - (lw + tw) / 2;
+    font_draw_centered(FONT_LARGE, left + lw + tw / 2, 112, "LOADING");
     // the lambda coin just left of the text, at its own size (ui2n64 makes it 24 pixels: scaling
     // a bigger picture down with the RDP's bilinear filter would alias its detail), centred on
     // the letters' ink
-    extern sprite_t *loading_lambda;
     sprite_t *lam = loading_lambda;
     int t0, b0;
     if (lam && font_ink_rows(FONT_LARGE, 'L', &t0, &b0)) {
-        int w = font_width(FONT_LARGE, "LOADING");
         int cy = 112 + (t0 + b0) / 2;
         rdpq_sync_pipe();
         rdpq_set_mode_standard();
         rdpq_mode_combiner(RDPQ_COMBINER_TEX);
         rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-        rdpq_sprite_blit(lam, 160 - w / 2 - 5 - lam->width, cy - lam->height / 2, NULL);
+        rdpq_sprite_blit(lam, left, cy - lam->height / 2, NULL);
     }
 }
 static void draw_hud(void)
