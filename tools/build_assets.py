@@ -45,6 +45,60 @@ def slashes(p):
     return p.replace('\\', '/') if os.sep == '\\' else p
 
 
+def asset_size_ok(path):
+    """a compressed asset's header agrees with its file size (as libdragon's asset_read_header checks)"""
+    d = open(path, 'rb').read(17)
+    if d[:3] != b'DCA':
+        return False
+    pos, vals = 5, []
+    for _ in range(3):   # cmp_size, orig_size, inplace_margin (LEB128)
+        v = sh = 0
+        while True:
+            b = d[pos]; pos += 1
+            v |= (b & 0x7f) << sh; sh += 7
+            if not b & 0x80:
+                break
+        vals.append(v)
+    return vals[0] + pos + (pos & 1) == os.path.getsize(path)
+
+
+def compress_files(level, files, jobs=1):
+    """libdragon asset compression of files, in place. mkasset writes into a separate folder and
+    the results then replace the originals: compressing a file onto itself left the old file's
+    tail after the compressed data on Windows (asset_load then fails: "Wrong compressed size").
+    Each result is checked against its header; a file that doesn't match stays uncompressed."""
+    import struct as _st
+    from concurrent.futures import ThreadPoolExecutor
+    mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
+    files = list(files)
+    if not files:
+        return
+    tmp = tempfile.mkdtemp(prefix='hl64_mkasset_', dir=os.path.dirname(os.path.abspath(files[0])))
+    try:
+        chunks = [files[i::jobs] for i in range(jobs)]
+        def run(fl):
+            # (a few files per call keeps the command line well under Windows' limit)
+            for i in range(0, len(fl), 40):
+                subprocess.run([mk, '-c', str(level), '-w', '256', '-o', slashes(tmp)] + [slashes(f) for f in fl[i:i + 40]], capture_output=True)
+        with ThreadPoolExecutor(jobs) as ex:
+            list(ex.map(run, [c for c in chunks if c]))
+        bad = 0
+        for f in files:
+            c = os.path.join(tmp, os.path.basename(f))
+            try:
+                ok = asset_size_ok(c)
+            except OSError:
+                ok = False
+            if ok:
+                os.replace(c, f)
+            else:
+                bad += 1
+        if bad:
+            print('compression: %d files left uncompressed (mkasset output didn\'t check out)' % bad)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def npc_model_table():
     """classname -> model, read from src/npc.c so the table lives in one place"""
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'npc.c'), encoding='latin1').read()
@@ -127,9 +181,8 @@ def build_models(a, maps):
                 print('model %s failed: %s' % (os.path.basename(out), err))
             else:
                 outs.append(out)
-    mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
     if outs and not a.no_compress:
-        subprocess.run([mk, '-c', '2', '-w', '256', '-o', slashes(os.path.join(a.out, 'models'))] + [slashes(o) for o in outs], capture_output=True)
+        compress_files(2, outs, a.j)
     print('models: %d, %.1f MB' % (len(outs), sum(os.path.getsize(o) for o in outs) / 1048576))
 
 
@@ -148,9 +201,8 @@ def build_players(a, players):
             outs.append(out)
         except Exception as e:  # noqa
             print('player model %s failed: %r' % (name, e))
-    mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
     if outs and not a.no_compress:
-        subprocess.run([mk, '-c', '3', '-w', '256', '-o', slashes(os.path.join(a.out, 'models'))] + [slashes(o) for o in outs], capture_output=True)
+        compress_files(3, outs, a.j)
     print('Head-To-Head characters: %d, %.1f MB' % (len(outs), sum(os.path.getsize(o) for o in outs) / 1048576))
 
 
@@ -336,16 +388,10 @@ def main():
     # compress maps (libdragon asset compression; asset_load() decompresses on the N64).
     # Level 3 (Shrinkler) is ~20% smaller than level 2 (aPLib) and is needed to leave room on
     # the 64 MB cartridge for voices and music; it is slower to build and to load.
-    mk = shutil.which('mkasset') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'mkasset')
     if not a.no_compress:
         mapdir = os.path.join(a.out, 'maps')
         files = [os.path.join(mapdir, m + '.hlb') for m in allmaps]
-        def comp(fl):
-            return subprocess.run([mk, '-c', str(a.compress_level), '-w', '256', '-o', slashes(mapdir)] + [slashes(f) for f in fl], capture_output=True)
-        chunks = [files[i::a.j] for i in range(a.j)]
-        from concurrent.futures import ThreadPoolExecutor
-        with ThreadPoolExecutor(a.j) as ex:
-            list(ex.map(comp, [c for c in chunks if c]))
+        compress_files(a.compress_level, files, a.j)
         csize = sum(os.path.getsize(f) for f in files)
         print('compressed maps: %.1f MB' % (csize / 1048576))
     open(os.path.join(a.out, 'maps', 'maplist.txt'), 'w', newline='\n').write('\n'.join(maps) + '\n')
