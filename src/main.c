@@ -840,19 +840,20 @@ static void draw_hud_loading(void)
     font_begin(BLEND_ALPHA);
     font_color(RGBA32(255, 160, 0, 255));
     font_draw_centered(FONT_LARGE, 160, 112, "LOADING");
-    // the lambda just left of the text, exactly as tall as the letters' ink
+    // the lambda coin just left of the text, at its own size (ui2n64 makes it 24 pixels: scaling
+    // a bigger picture down with the RDP's bilinear filter would alias its detail), centred on
+    // the letters' ink
     extern sprite_t *loading_lambda;
     sprite_t *lam = loading_lambda;
     int t0, b0;
     if (lam && font_ink_rows(FONT_LARGE, 'L', &t0, &b0)) {
-        int h = b0 - t0 + 1, w = font_width(FONT_LARGE, "LOADING");
-        float sc = (float)h / lam->height;
+        int w = font_width(FONT_LARGE, "LOADING");
+        int cy = 112 + (t0 + b0) / 2;
         rdpq_sync_pipe();
         rdpq_set_mode_standard();
-        rdpq_mode_alphacompare(1);
+        rdpq_mode_combiner(RDPQ_COMBINER_TEX);
         rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-        rdpq_mode_filter(FILTER_BILINEAR);
-        rdpq_sprite_blit(lam, 160 - w / 2 - 4 - lam->width * sc, 112 + t0, &(rdpq_blitparms_t){.scale_x = sc, .scale_y = sc});
+        rdpq_sprite_blit(lam, 160 - w / 2 - 5 - lam->width, cy - lam->height / 2, NULL);
     }
 }
 static void draw_hud(void)
@@ -1419,8 +1420,13 @@ static void wd_cb(int ovfl)
 #define TR(x) do { if (trace_frames > 0) debugf("%s\n", x); } while (0)
 int main(void)
 {
+#ifdef HL64_DEBUG
+    // the debug log (test builds only): on a flashcart with no PC listening, every line can stall
+    // the game (an EverDrive's USB write waits up to 100 ms for a host that isn't there) and the
+    // IS-Viewer buffer sits in the cartridge's own address space, which an EverDrive lets it write
     debug_init_isviewer();
     debug_init_usblog();
+#endif
     dfs_init(DFS_DEFAULT_LOCATION);
     asset_init_compression(2);
     asset_init_compression(3);   // maps are Shrinkler-compressed
@@ -1658,7 +1664,12 @@ int main(void)
 #endif
 #ifdef TESTENTLOG
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f; int k = ents_find_targetname(TESTENTLOG, 0);
-            if (k >= 0) debugf("ENT %s %.0f %.0f %.0f state %d\n", TESTENTLOG, entities[k].origin[0], entities[k].origin[1], entities[k].origin[2], entities[k].state); } }
+            if (k >= 0) debugf("ENT %s %.0f %.0f %.0f state %d ang %.0f %.0f %.0f\n", TESTENTLOG, entities[k].origin[0], entities[k].origin[1], entities[k].origin[2], entities[k].state, entities[k].angles[0], entities[k].angles[1], entities[k].angles[2]); } }
+#endif
+#ifdef TESTDMGENT
+        { static bool done; if (!done && in_game && game_clock > 10) { done = true; int k = ents_find_targetname(TESTDMGENT, 0);
+            extern void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir);
+            debugf("TESTDMGENT %s %d\n", TESTDMGENT, k); if (k >= 0) ents_damage_brush(k, 10, DMG_BULLET, NULL); } }
 #endif
 #ifdef TESTWEAPONS
         { extern void weapons_test_select(int id); static int k = 0; static float nt = 3;

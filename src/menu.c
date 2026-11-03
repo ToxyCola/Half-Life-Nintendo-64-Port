@@ -273,6 +273,9 @@ void menu_open(bool ig)
     screen = SCR_MAIN;
     main_sel = 0;
     anim_t = 0;
+#ifdef TESTSCREEN
+    screen = TESTSCREEN;   // test: open straight on a screen
+#endif
 }
 
 void menu_close(void) { open = false; }
@@ -1757,11 +1760,16 @@ static void draw_button_mapping(void)
         const char *l = i < NUM_BINDS ? bind_names[i] : "Restore standard layout";
         ui_item(x, ry, l, armed, C_MENU);
         if (i < NUM_BINDS) {
-            const char *v = (armed && bind_listen) ? ((int)(anim_t * 3) & 1 ? "press a button" : "") : pad_names[settings.bind[i]];
+            // the button as its icon (the GameCube's X and Y, which have none, by name)
+            char ic[2] = {FONT_ICON(settings.bind[i]), 0};
+            const char *v = (armed && bind_listen) ? ((int)(anim_t * 3) & 1 ? "press a button" : "")
+                          : settings.bind[i] < PAD_X ? ic : pad_names[settings.bind[i]];
             font_begin(BLEND_ALPHA);
             rdpq_mode_filter(FILTER_BILINEAR);
-            font_color(RGBA32(0, 0, 0, 217));
-            font_draw_scaled(FONT_MEDIUM, vx + 1, ry + 1, v, 1.05f);
+            if (!FONT_IS_ICON(v[0])) {   // (an icon has no drop shadow)
+                font_color(RGBA32(0, 0, 0, 217));
+                font_draw_scaled(FONT_MEDIUM, vx + 1, ry + 1, v, 1.05f);
+            }
             font_color(armed ? C_MENU_ARMED : RGBA32(235, 235, 235, 255));
             font_draw_scaled(FONT_MEDIUM, vx, ry, v, 1.05f);
         }

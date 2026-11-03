@@ -36,6 +36,9 @@ for py in glob.glob(os.path.join(REPO, 'tools', '*.py')):
 shutil.copy2(os.path.join(REPO, 'src', 'npc.c'), os.path.join(STAGE, 'hl64', 'src'))
 for asset_f in glob.glob(os.path.join(REPO, 'assets', '*.*')):
     shutil.copy2(asset_f, os.path.join(STAGE, 'hl64', 'assets'))
+os.makedirs(os.path.join(STAGE, 'hl64', 'assets', 'buttons'), exist_ok=True)
+for asset_f in glob.glob(os.path.join(REPO, 'assets', 'buttons', '*.png')):
+    shutil.copy2(asset_f, os.path.join(STAGE, 'hl64', 'assets', 'buttons'))
 
 shutil.copy2(r'C:\msys64\home\dylan\libdragon\LICENSE.md', os.path.join(STAGE, 'licenses', 'libdragon-LICENSE.md'))
 shutil.copy2(os.path.join(REPO, 'valve_sdk', 'LICENSE'), os.path.join(STAGE, 'licenses', 'valve-sdk-LICENSE'))

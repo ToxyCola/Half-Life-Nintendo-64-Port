@@ -91,6 +91,34 @@ def ps2_valid(d):
         return False
 
 
+# Steam's languages (the API names), each with its own valve_<language> folder of speech and text
+STEAM_LANGS = ['brazilian', 'bulgarian', 'czech', 'danish', 'dutch', 'finnish', 'french', 'german', 'greek',
+               'hungarian', 'italian', 'japanese', 'koreana', 'latam', 'norwegian', 'polish', 'portuguese',
+               'romanian', 'russian', 'schinese', 'spanish', 'swedish', 'tchinese', 'thai', 'turkish',
+               'ukrainian', 'vietnamese']
+
+
+def game_languages(valve):
+    """the languages this Half-Life install has the files of (valve_<language> next to valve)"""
+    try:
+        names = os.listdir(os.path.dirname(valve))
+    except (OSError, TypeError):
+        return []
+    have = {n.lower()[6:] for n in names if n.lower().startswith('valve_')}
+    return [l for l in STEAM_LANGS if l in have]
+
+
+def steam_language(valve):
+    """the language Steam is set to for Half-Life (appmanifest_70.acf), or None"""
+    try:
+        common = os.path.dirname(os.path.dirname(valve))   # steamapps/common
+        acf = os.path.join(os.path.dirname(common), 'appmanifest_70.acf')
+        m = re.search(r'"language"\s+"([^"]*)"', open(acf, encoding='utf-8', errors='replace').read())
+        return m.group(1).lower() if m and m.group(1) else 'english'
+    except (OSError, TypeError):
+        return None
+
+
 def find_steam_halflife():
     if IS_MAC:
         steams = ['~/Library/Application Support/Steam']
@@ -118,10 +146,11 @@ def find_steam_halflife():
 
 # ---------------------------------------------------------------- the build (a worker thread)
 class Build(threading.Thread):
-    def __init__(self, valve, outdir, tempdir, clean, events, ps2=None):
+    def __init__(self, valve, outdir, tempdir, clean, events, ps2=None, lang=None):
         super().__init__(daemon=True)
         self.valve, self.outdir, self.tempdir, self.clean, self.ev = valve, outdir, tempdir, clean, events
         self.ps2 = ps2   # the PS2 disc's files (Head-To-Head), or None
+        self.lang = lang if lang and lang != 'english' else None   # the game language (spanish ...), None: English
         self.rom = None
         self.proc = None
         self.stop = False
@@ -179,7 +208,7 @@ class Build(threading.Thread):
 
         fsdir = os.path.join(work, 'filesystem')
         stamp = os.path.join(work, 'converted.txt')
-        want = '%s\n%s\n%s\n' % (VERSION, self.valve, self.ps2 or '')
+        want = '%s\n%s\n%s\n%s\n' % (VERSION, self.valve, self.ps2 or '', self.lang or '')
         have = ''
         try:
             have = open(stamp).read()
@@ -195,6 +224,9 @@ class Build(threading.Thread):
             self.log('[1/3] Converting maps, textures, models, sprites, sounds and music.\n'
                      '      This takes a while (about 30-90 minutes, most of it compressing the maps).\n\n')
             cmd = [sys.executable, os.path.join(ROOT, 'hl64', 'tools', 'build_assets.py'), self.valve, fsdir, '-j', str(jobs)]
+            if self.lang:
+                cmd += ['--lang', self.lang]
+                self.log('      Speech and text in %s\n\n' % self.lang.capitalize())
             if self.ps2:
                 cmd += ['--ps2', self.ps2]
                 self.log('      With Head-To-Head from the PS2 files in %s\n\n' % self.ps2)
@@ -236,6 +268,9 @@ class Build(threading.Thread):
         self.rom = rom
         mb = os.path.getsize(rom) / 1048576.0
         self.log('\nDone: %s (%.1f MB)\n' % (rom, mb))
+        if os.path.getsize(rom) > 64 * 1048576:
+            self.log('\nWARNING: the ROM is larger than 64 MB, the most an N64 cartridge (and a flashcart) can hold.\n'
+                     'Build it again with English chosen as the language, or without Head-To-Head, to make it fit.\n')
         self.log('Play it in ares, gopher64 or simple64 with the Expansion Pak on and the save type set to SRAM,\n'
                  "or copy it to a 64 MB-capable flashcart. Keep it to yourself: it contains Half-Life's game data.\n")
         self.status('Done: the ROM is ready.', 100)
@@ -261,7 +296,7 @@ def main():
     root = tk.Tk()
     root.title('Half-Life 64 ROM builder (%s)' % VERSION)
     root.minsize(640, 460)
-    root.geometry('780x660')
+    root.geometry('780x720')
     try:
         style = ttk.Style()
         style.theme_use('aqua' if IS_MAC else 'clam')
@@ -278,6 +313,7 @@ def main():
     v_ps2_on = tk.BooleanVar(value=c.get('ps2_on', '0') == '1')
     v_ps2 = tk.StringVar(value=c.get('ps2', ''))
     v_status = tk.StringVar(value='Ready.')
+    v_lang = tk.StringVar()
 
     hl = given or c.get('halflife', '')
     if not resolve_valve(hl):
@@ -336,8 +372,33 @@ def main():
     ps2_btn = ttk.Button(frm, text='Browse...', command=pick_ps2)
     ps2_btn.grid(row=8, column=1, sticky='e', padx=(8, 0), pady=(2, 8))
 
+    # the game's language: speech and on-screen text from the language Half-Life is set to in Steam
+    # (Steam keeps that language's files in valve_<language>)
+    ttk.Label(frm, text='Language (speech and on-screen text), from the languages your Half-Life install has:').grid(
+        row=9, column=0, columnspan=2, sticky='w')
+    lang_box = ttk.Combobox(frm, textvariable=v_lang, state='readonly', width=30)
+    lang_box.grid(row=10, column=0, sticky='w', pady=(2, 8))
+    lang_codes = {}
+
+    def refresh_langs(*a):
+        valve = resolve_valve(v_valve.get())
+        langs = game_languages(valve) if valve else []
+        st = steam_language(valve) if valve else None
+        lang_codes.clear()
+        names = []
+        for l in ['english'] + langs:
+            n = l.capitalize() + (" (Steam's setting)" if l == st else '')
+            lang_codes[n] = l
+            names.append(n)
+        lang_box.configure(values=names)
+        want = c.get('language') if c.get('language') in ['english'] + langs and not a else None
+        want = want or (st if st in ['english'] + langs else 'english')
+        v_lang.set(next(n for n, l in lang_codes.items() if l == want))
+    refresh_langs()
+    v_valve.trace_add('write', refresh_langs)
+
     bar = ttk.Frame(frm)
-    bar.grid(row=9, column=0, columnspan=2, sticky='ew')
+    bar.grid(row=11, column=0, columnspan=2, sticky='ew')
     bar.columnconfigure(0, weight=1)
     cb_clean = ttk.Checkbutton(bar, text="Convert everything again (don't reuse the last run's game data)", variable=v_clean)
     cb_clean.grid(row=0, column=0, sticky='w')
@@ -346,12 +407,12 @@ def main():
     btn_build.grid(row=0, column=2, sticky='e')
 
     prog = ttk.Progressbar(frm, mode='determinate', maximum=100)
-    prog.grid(row=10, column=0, columnspan=2, sticky='ew', pady=(10, 2))
-    ttk.Label(frm, textvariable=v_status).grid(row=11, column=0, columnspan=2, sticky='w')
+    prog.grid(row=12, column=0, columnspan=2, sticky='ew', pady=(10, 2))
+    ttk.Label(frm, textvariable=v_status).grid(row=13, column=0, columnspan=2, sticky='w')
 
     logf = ttk.Frame(frm)
-    logf.grid(row=12, column=0, columnspan=2, sticky='nsew', pady=(6, 0))
-    frm.rowconfigure(12, weight=1)
+    logf.grid(row=14, column=0, columnspan=2, sticky='nsew', pady=(6, 0))
+    frm.rowconfigure(14, weight=1)
     logf.columnconfigure(0, weight=1)
     logf.rowconfigure(0, weight=1)
     log = tk.Text(logf, wrap='none', height=12, font=('Menlo' if IS_MAC else 'DejaVu Sans Mono', 10), state='disabled',
@@ -378,6 +439,7 @@ def main():
         c['custom_temp'] = '1' if v_temp_on.get() else '0'
         c['ps2'] = v_ps2.get()
         c['ps2_on'] = '1' if v_ps2_on.get() else '0'
+        c['language'] = lang_codes.get(v_lang.get(), 'english')
         try:
             with open(ini, 'w') as f:
                 cfg.write(f)
@@ -389,6 +451,7 @@ def main():
     def set_busy(busy):
         for w in controls + [cb_temp, cb_ps2, cb_clean, btn_build]:
             w.state(['disabled'] if busy else ['!disabled'])
+        lang_box.state(['disabled'] if busy else ['!disabled', 'readonly'])
         custom = v_temp_on.get() and not busy
         temp_entry.state(['!disabled'] if custom else ['disabled'])
         temp_btn.state(['!disabled'] if custom else ['disabled'])
@@ -428,7 +491,8 @@ def main():
         btn_show.grid_remove()
         set_busy(True)
         prog.configure(mode='determinate', value=10)
-        b = Build(valve, outdir, tempdir, v_clean.get(), events, ps2)
+        lang = lang_codes.get(v_lang.get(), 'english')
+        b = Build(valve, outdir, tempdir, v_clean.get(), events, ps2, lang)
         state['build'] = b
         b.start()
 

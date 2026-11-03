@@ -10,6 +10,11 @@ typedef struct { uint16_t x, y; uint8_t w, h; uint16_t adv16; } glyph_t;
 typedef struct { image_t img; int height, first, count, pad; glyph_t *g; bool ok; } hlfont_t;
 
 static hlfont_t fonts[FONT_COUNT];
+// the pad's button icons (ui/btn_*.sprite, from assets/buttons), in PAD_* order then Start
+static const char *icon_names[FONT_NUM_ICONS] = {"a", "b", "z", "l", "r", "du", "dd", "dl", "dr", "cu", "cd", "cl", "cr",
+                                                 "su", "sd", "sl", "sr", "start"};
+static sprite_t *icons[FONT_NUM_ICONS];
+static color_t last_color;
 static const char *names[FONT_COUNT] = {"small", "medium", "large", "medium_glow"};
 
 static uint16_t be16(const uint8_t *p) { return (p[0] << 8) | p[1]; }
@@ -53,13 +58,25 @@ void font_init(void)
         free(d);
         fn->ok = true;
     }
+    for (int i = 0; i < FONT_NUM_ICONS; i++) {
+        char p[48];
+        snprintf(p, sizeof(p), "rom:/ui/btn_%s.sprite", icon_names[i]);
+        FILE *f = fopen(p, "rb");
+        if (f) { fclose(f); icons[i] = sprite_load(p); }
+    }
 }
+
+// an icon is drawn as tall as the font's capital letters and a little more, with a gap after it
+static int icon_px(hlfont_t *fn) { int h = fn->height - 2 * fn->pad; return h < 8 ? 8 : h + 2; }
+static int icon_adv16(hlfont_t *fn) { return (icon_px(fn) + 2) << 4; }
+static bool has_icon(int ch) { return FONT_IS_ICON(ch) && icons[ch - 0x0E]; }
 
 int font_height(int f) { return fonts[f].ok ? fonts[f].height : 8; }
 
 static glyph_t *glyph(hlfont_t *fn, int ch)
 {
     if (ch < fn->first || ch >= fn->first + fn->count) ch = '?';
+    if (fn->g[ch - fn->first].adv16 == 0 && ch != ' ') ch = '?';   // a letter the font doesn't have
     return &fn->g[ch - fn->first];
 }
 
@@ -68,7 +85,7 @@ int font_width(int f, const char *s)
     hlfont_t *fn = &fonts[f];
     if (!fn->ok) return strlen(s) * 8;
     int w16 = 0;
-    for (; *s && *s != '\n'; s++) w16 += glyph(fn, (unsigned char)*s)->adv16;
+    for (; *s && *s != '\n'; s++) w16 += has_icon((unsigned char)*s) ? icon_adv16(fn) : glyph(fn, (unsigned char)*s)->adv16;
     return (w16 + 8) >> 4;
 }
 
@@ -87,6 +104,7 @@ void font_begin(int blend)
 
 void font_color(color_t c)
 {
+    last_color = c;
     if (cur_blend == BLEND_ADD) {
         int m = c.r > c.g ? c.r : c.g;
         if (c.b > m) m = c.b;
@@ -96,11 +114,37 @@ void font_color(color_t c)
     rdpq_set_prim_color(c);
 }
 
+// a button icon in its own colours; its opacity follows the text's (a fading message fades it)
+static void draw_icon(hlfont_t *fn, int x, int y, int ch, float scale)
+{
+    sprite_t *sp = icons[ch - 0x0E];
+    color_t c = last_color;
+    int m = c.r > c.g ? c.r : c.g;
+    if (c.b > m) m = c.b;
+    int a = cur_blend == BLEND_ADD ? (m * 2 > 255 ? 255 : m * 2) * c.a / 255 : c.a;
+    int px = (int)(icon_px(fn) * scale);
+    rdpq_set_mode_standard();
+    rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, TEX0), (TEX0, 0, PRIM, 0)));
+    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    rdpq_set_prim_color(RGBA32(255, 255, 255, a));
+    float sc = (float)px / sp->width;
+    int top = y + ((int)((fn->height - 2 * fn->pad) * scale) - px) / 2;
+    rdpq_sprite_blit(sp, x, top, &(rdpq_blitparms_t){.scale_x = sc, .scale_y = sc});
+    font_begin(cur_blend);
+    font_color(c);
+}
+
 static int draw16_scaled(int f, int x16, int y, const char *s, float scale)
 {
     hlfont_t *fn = &fonts[f];
     if (scale <= 0.0f) scale = 1.0f;
     for (; *s && *s != '\n'; s++) {
+        if (has_icon((unsigned char)*s)) {
+            draw_icon(fn, (x16 + 8) >> 4, y, (unsigned char)*s, scale);
+            x16 += (int)(icon_adv16(fn) * scale);
+            continue;
+        }
         glyph_t *g = glyph(fn, (unsigned char)*s);
         if (*s != ' ' && g->w >= 1) {
             rdpq_blitparms_t parms = {
@@ -137,7 +181,7 @@ int font_draw_char(int f, int x, int y, int ch)
     char s[2] = {(char)ch, 0};
     if (!fonts[f].ok) return 8;
     draw16(f, x << 4, y, s);
-    return (glyph(&fonts[f], ch)->adv16 + 8) >> 4;
+    return ((has_icon(ch) ? icon_adv16(&fonts[f]) : glyph(&fonts[f], ch)->adv16) + 8) >> 4;
 }
 
 int font_draw_centered(int f, int cx, int y, const char *s) { return font_draw(f, cx - font_width(f, s) / 2, y, s); }

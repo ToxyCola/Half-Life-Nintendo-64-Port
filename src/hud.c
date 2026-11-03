@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include "font.h"
 #include "hud.h"
+#include "menu.h"
 
 #define SCREEN_W 320
 #define SCREEN_H 240
@@ -25,7 +26,7 @@ static char *titles_buf;
 static const textmsg_t *messages[MAX_HUD_MESSAGES];
 static float start_time[MAX_HUD_MESSAGES];
 static textmsg_t custom_msgs[MAX_HUD_MESSAGES];
-static char custom_text[MAX_HUD_MESSAGES][128];
+static char custom_text[MAX_HUD_MESSAGES][384];
 static int custom_next;
 static float hud_time;
 static bool end_after_message, end_now;
@@ -153,6 +154,91 @@ static void message_add(const textmsg_t *m)
     }
 }
 
+// ---- the Hazard Course's instructions name the PC's keys ("PRESS YOUR USE KEY", "MOVE FORWARD BY
+// PRESSING FORWARD KEY"): each key becomes the icon of the button it's on here -- the player's own
+// mapping (Options -> Button Mapping) and control scheme
+static int move_pad(int dir)   // 0 forward, 1 backward, 2 left, 3 right
+{
+    static const uint8_t m[NUM_SCHEMES][4] = {
+        {PAD_SU, PAD_SD, PAD_SL, PAD_SR},   // stick moves, C looks
+        {PAD_CU, PAD_CD, PAD_CL, PAD_CR},   // stick looks, C moves
+        {PAD_SU, PAD_SD, PAD_CL, PAD_CR},   // stick moves + turns (GoldenEye): C strafes
+        {PAD_DU, PAD_DD, PAD_DL, PAD_DR},   // D-pad moves, stick looks
+        {PAD_DU, PAD_DD, PAD_DL, PAD_DR}};  // D-pad moves, C looks
+    int sc = settings.control_scheme;
+    if (sc < 0 || sc >= NUM_SCHEMES) sc = 0;
+    return m[sc][dir];
+}
+static int action_pad(const char *w, int n)
+{
+    static const struct { const char *word; int bind; } acts[] = {
+        {"USE", BIND_USE}, {"JUMP", BIND_JUMP}, {"DUCK", BIND_DUCK}, {"ATTACK1", BIND_FIRE}, {"ATTACK2", BIND_ALTFIRE},
+        {"RELOAD", BIND_RELOAD}, {"FLASHLIGHT", BIND_FLASHLIGHT},
+        {"FORWARD", -1}, {"BACKWARD", -2}, {"MOVELEFT", -3}, {"MOVERIGHT", -4}};
+    for (unsigned k = 0; k < sizeof(acts) / sizeof(acts[0]); k++) {
+        if ((int)strlen(acts[k].word) != n || strncasecmp(w, acts[k].word, n)) continue;
+        return acts[k].bind >= 0 ? settings.bind[acts[k].bind] : move_pad(-acts[k].bind - 1);
+    }
+    return -1;
+}
+static bool word_is(const char *w, int n, const char *x) { return (int)strlen(x) == n && !strncasecmp(w, x, n); }
+// the next / previous word (letters and digits) around position i, as start + length
+static int next_word(const char *s, int i, int *len)
+{
+    while (s[i] == ' ') i++;
+    int j = i;
+    while (isalnum((unsigned char)s[j])) j++;
+    *len = j - i;
+    return i;
+}
+static bool bind_text(const char *in, char *out, int max)
+{
+    int o = 0, i = 0;
+    bool changed = false;
+    char prev[16] = "";      // the last word written, upper case
+    char prevc = 0;          // the last non-space character written
+    while (in[i] && o < max - 4) {
+        if (!isalnum((unsigned char)in[i])) {
+            if (in[i] != ' ') prevc = in[i];
+            out[o++] = in[i++];
+            continue;
+        }
+        int j = i;
+        while (isalnum((unsigned char)in[j])) j++;
+        int n = j - i;
+        int pad = action_pad(in + i, n);
+        if (pad >= 0) {
+            int nl, ni = next_word(in, j, &nl);
+            int k = j; while (in[k] == ' ') k++;
+            bool key = word_is(in + ni, nl, "KEY") || word_is(in + ni, nl, "KEYS");
+            bool pressed = !strcasecmp(prev, "PRESS") || !strcasecmp(prev, "PRESSING") || prevc == '+' || in[k] == '+';
+            if (key || pressed) {
+                // drop "YOUR" / "THE" just before it ("PRESS YOUR USE KEY" -> "PRESS (B)")
+                if (!strcasecmp(prev, "YOUR") || !strcasecmp(prev, "THE")) {
+                    int b = o;
+                    while (b > 0 && out[b - 1] == ' ') b--;
+                    b -= strlen(prev);
+                    if (b >= 0) o = b;
+                }
+                if (pad < PAD_X) out[o++] = FONT_ICON(pad);
+                else { const char *t = pad == PAD_X ? "X" : "Y"; while (*t && o < max - 4) out[o++] = *t++; }
+                i = key ? ni + nl : j;
+                changed = true;
+                prev[0] = 0; prevc = 0;
+                continue;
+            }
+        }
+        for (int q = 0; q < n && o < max - 4; q++) out[o++] = in[i + q];
+        int pl = n < 15 ? n : 15;
+        for (int q = 0; q < pl; q++) prev[q] = toupper((unsigned char)in[i + q]);
+        prev[pl] = 0;
+        prevc = in[j - 1];
+        i = j;
+    }
+    out[o] = 0;
+    return changed;
+}
+
 void hud_show_message(const char *name)
 {
     if (!name || !name[0]) return;
@@ -171,6 +257,16 @@ void hud_show_message(const char *name)
         c->text = txt;
         c->name = "custom";
         m = c;
+    } else {
+        // instructions naming the PC's keys show this player's buttons instead
+        textmsg_t *c = &custom_msgs[custom_next];
+        char *txt = custom_text[custom_next];
+        if (m->text && bind_text(m->text, txt, sizeof(custom_text[0]))) {
+            custom_next = (custom_next + 1) % MAX_HUD_MESSAGES;
+            *c = *m;
+            c->text = txt;
+            m = c;
+        }
     }
     message_add(m);
 }

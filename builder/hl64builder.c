@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <zlib.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #ifndef HL64_VERSION
 #define HL64_VERSION "dev"
@@ -306,6 +307,7 @@ static int read_text(const char *path, char *buf, int max)
 // ------------------------------------------------------------------ the build (a worker thread)
 static char g_valve[MAX_PATH], g_outdir[MAX_PATH], g_tempdir[MAX_PATH], g_rom[MAX_PATH];
 static char g_ps2[MAX_PATH];   // the PS2 disc's files for Head-To-Head (optional, "" = none)
+static char g_lang[32];        // the game language (spanish ...), "" = English
 static int g_clean;
 
 static void set_status(const char *s) { SetWindowTextA(g_status, s); }
@@ -340,7 +342,7 @@ static DWORD WINAPI build_thread(LPVOID unused)
     char fsdir[MAX_PATH], stamp[MAX_PATH], want[MAX_PATH * 2], have[MAX_PATH * 2] = "";
     snprintf(fsdir, sizeof fsdir, "%s\\filesystem", g_work);
     snprintf(stamp, sizeof stamp, "%s\\converted.txt", g_work);
-    snprintf(want, sizeof want, "%s\n%s\n%s\n", HL64_VERSION, g_valve, g_ps2);
+    snprintf(want, sizeof want, "%s\n%s\n%s\n%s\n", HL64_VERSION, g_valve, g_ps2, g_lang);
     int reuse = !g_clean && read_text(stamp, have, sizeof have) && !strcmp(have, want) && dir_exists(fsdir);
     if (reuse) {
         logf_("[1/3] Game data already converted by a previous run (tick \"Convert everything again\" to redo it).\r\n");
@@ -366,6 +368,11 @@ static DWORD WINAPI build_thread(LPVOID unused)
         char cmd[MAX_PATH * 6];
         snprintf(cmd, sizeof cmd, "\"%s\\python\\python.exe\" \"%s\\hl64\\tools\\build_assets.py\" \"%s\" \"%s\" -j %d",
                  g_root, g_root, g_valve, fsdir, jobs);
+        if (g_lang[0]) {   // speech and text in the language Steam has the game in
+            size_t l = strlen(cmd);
+            snprintf(cmd + l, sizeof cmd - l, " --lang %s", g_lang);
+            logf_("      Speech and text in %c%s\r\n\r\n", toupper((unsigned char)g_lang[0]), g_lang + 1);
+        }
         if (g_ps2[0]) {   // Head-To-Head from the PS2 version (only when chosen)
             size_t l = strlen(cmd);
             snprintf(cmd + l, sizeof cmd - l, " --ps2 \"%s\"", g_ps2);
@@ -405,6 +412,9 @@ static DWORD WINAPI build_thread(LPVOID unused)
     WIN32_FILE_ATTRIBUTE_DATA fa;
     double mb = GetFileAttributesExA(g_rom, GetFileExInfoStandard, &fa) ? (fa.nFileSizeLow + (double)fa.nFileSizeHigh * 4294967296.0) / 1048576.0 : 0;
     logf_("\r\nDone: %s (%.1f MB)\r\n", g_rom, mb);
+    if (mb > 64.0)
+        logf_("\r\nWARNING: the ROM is larger than 64 MB, the most an N64 cartridge (and a flashcart) can hold.\r\n"
+              "Build it again with English chosen as the language, or without Head-To-Head, to make it fit.\r\n");
     logf_("Play it in ares, gopher64 or simple64 with the Expansion Pak on and the save type set to SRAM,\r\n"
           "or copy it to a 64 MB-capable flashcart. Keep it to yourself: it contains Half-Life's game data.\r\n");
     set_progress(100, 0);
@@ -413,8 +423,68 @@ static DWORD WINAPI build_thread(LPVOID unused)
 }
 
 // ------------------------------------------------------------------ the window
-enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG, ID_PS2_ON, ID_PS2, ID_PS2_BR };
-static HWND h_valve, h_out, h_temp_on, h_temp, h_temp_br, h_clean, h_build, h_open, h_valve_br, h_out_br, h_ps2_on, h_ps2, h_ps2_br;
+enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG, ID_PS2_ON, ID_PS2, ID_PS2_BR, ID_LANG };
+static HWND h_valve, h_out, h_temp_on, h_temp, h_temp_br, h_clean, h_build, h_open, h_valve_br, h_out_br, h_ps2_on, h_ps2, h_ps2_br, h_lang, h_lang_lbl;
+
+// ---- the game's language: Steam keeps each language's speech and text in valve_<language>
+static const char *const steam_langs[] = {"brazilian", "bulgarian", "czech", "danish", "dutch", "finnish", "french", "german", "greek",
+    "hungarian", "italian", "japanese", "koreana", "latam", "norwegian", "polish", "portuguese", "romanian", "russian", "schinese",
+    "spanish", "swedish", "tchinese", "thai", "turkish", "ukrainian", "vietnamese"};
+#define NUM_LANGS ((int)(sizeof steam_langs / sizeof steam_langs[0]))
+static int lang_list[NUM_LANGS + 1], lang_count;
+static void get_text(HWND h, char *out, int n);   // the combo's entries: -1 English, else steam_langs[]
+
+// the language Steam is set to for Half-Life (steamapps/appmanifest_70.acf next to common\Half-Life), "" unknown
+static void steam_language(const char *valve, char *out, int max)
+{
+    char acf[MAX_PATH], buf[16384];
+    out[0] = 0;
+    snprintf(acf, sizeof acf, "%s\\..\\..\\..\\appmanifest_70.acf", valve);
+    if (!read_text(acf, buf, sizeof buf)) return;
+    char *p = strstr(buf, "\"language\"");
+    if (!p) { snprintf(out, max, "english"); return; }
+    p = strchr(p + 10, '"');
+    if (!p) return;
+    char *e = strchr(++p, '"');
+    if (!e) return;
+    int n = (int)(e - p) < max - 1 ? (int)(e - p) : max - 1;
+    memcpy(out, p, n); out[n] = 0;
+    for (char *c = out; *c; c++) *c = (char)tolower((unsigned char)*c);
+    if (!out[0]) snprintf(out, max, "english");
+}
+
+// fill the language list from the install in the Half-Life box; prefer `want`, else Steam's setting
+static void refresh_langs(const char *want)
+{
+    char v[MAX_PATH], valve[MAX_PATH], st[32] = "", path[MAX_PATH];
+    get_text(h_valve, v, sizeof v);
+    int ok = resolve_valve(v, valve);
+    if (ok) steam_language(valve, st, sizeof st);
+    SendMessageA(h_lang, CB_RESETCONTENT, 0, 0);
+    lang_count = 0;
+    int sel = 0, want_sel = -1, st_sel = -1;
+    for (int i = -1; i < NUM_LANGS; i++) {
+        const char *l = i < 0 ? "english" : steam_langs[i];
+        if (i >= 0) {
+            snprintf(path, sizeof path, "%s\\..\\valve_%s", valve, l);
+            if (!ok || !dir_exists(path)) continue;
+        }
+        char name[64];
+        snprintf(name, sizeof name, "%c%s%s", toupper((unsigned char)l[0]), l + 1, !strcmp(l, st) ? " (Steam's setting)" : "");
+        SendMessageA(h_lang, CB_ADDSTRING, 0, (LPARAM)name);
+        if (want && !strcmp(want, l)) want_sel = lang_count;
+        if (!strcmp(st, l)) st_sel = lang_count;
+        lang_list[lang_count++] = i;
+    }
+    sel = want_sel >= 0 ? want_sel : st_sel >= 0 ? st_sel : 0;
+    SendMessageA(h_lang, CB_SETCURSEL, sel, 0);
+}
+
+static const char *chosen_lang(void)
+{
+    int s = (int)SendMessageA(h_lang, CB_GETCURSEL, 0, 0);
+    return s >= 0 && s < lang_count && lang_list[s] >= 0 ? steam_langs[lang_list[s]] : "english";
+}
 static HFONT g_font, g_mono;
 static char g_default_temp[MAX_PATH], g_settings[MAX_PATH];
 static HANDLE g_thread;
@@ -473,6 +543,7 @@ static void save_settings(void)
     get_text(h_ps2, t, sizeof t);
     WritePrivateProfileStringA("builder", "ps2", t, g_settings);
     WritePrivateProfileStringA("builder", "ps2_on", SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_settings);
+    WritePrivateProfileStringA("builder", "language", chosen_lang(), g_settings);
 }
 
 static void set_busy(int busy)
@@ -486,6 +557,7 @@ static void set_busy(int busy)
     int ps2 = SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(h_ps2_on, !busy);
     EnableWindow(h_ps2, !busy && ps2); EnableWindow(h_ps2_br, !busy && ps2);
+    EnableWindow(h_lang, !busy);
     SetWindowTextA(h_build, busy ? "Building..." : "Build ROM");
 }
 
@@ -507,6 +579,7 @@ static void start_build(void)
     else g_tempdir[0] = 0;
     if (!g_tempdir[0]) snprintf(g_tempdir, sizeof g_tempdir, "%s", g_default_temp);
     g_clean = SendMessageA(h_clean, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    snprintf(g_lang, sizeof g_lang, "%s", strcmp(chosen_lang(), "english") ? chosen_lang() : "");
     g_ps2[0] = 0;
     if (SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED) {
         get_text(h_ps2, g_ps2, sizeof g_ps2);
@@ -537,12 +610,14 @@ static HWND mk(const char *cls, const char *text, DWORD style, int x, int y, int
 
 static void layout(int W, int H)
 {
-    int bw = 90, m = 12, ew = W - 2 * m - bw - 8, d = 54;   // d: the Head-To-Head rows
+    int bw = 90, m = 12, ew = W - 2 * m - bw - 8, d = 54 + 52;   // d: the Head-To-Head and language rows
     MoveWindow(h_valve, m, 54, ew, 24, TRUE);   MoveWindow(h_valve_br, W - m - bw, 53, bw, 26, TRUE);
     MoveWindow(h_out, m, 108, ew, 24, TRUE);    MoveWindow(h_out_br, W - m - bw, 107, bw, 26, TRUE);
     MoveWindow(h_temp, m, 162, ew, 24, TRUE);   MoveWindow(h_temp_br, W - m - bw, 161, bw, 26, TRUE);
     MoveWindow(h_ps2_on, m, 192, W - 2 * m, 22, TRUE);
     MoveWindow(h_ps2, m, 216, ew, 24, TRUE);    MoveWindow(h_ps2_br, W - m - bw, 215, bw, 26, TRUE);
+    MoveWindow(h_lang_lbl, m, 248, W - 2 * m, 18, TRUE);
+    MoveWindow(h_lang, m, 268, 260, 300, TRUE);
     MoveWindow(h_clean, m, 194 + d, W - 2 * m - 300, 22, TRUE);
     MoveWindow(h_open, W - m - 280, 192 + d, 140, 28, TRUE);
     MoveWindow(h_build, W - m - 130, 192 + d, 130, 28, TRUE);
@@ -569,6 +644,8 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         h_ps2_on = mk("BUTTON", "Add Head-To-Head from the PlayStation 2 version (optional): the folder with its disc's files:", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_PS2_ON);
         h_ps2 = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_PS2);
         h_ps2_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_PS2_BR);
+        h_lang_lbl = mk("STATIC", "Language (speech and on-screen text), from the languages your Half-Life install has:", SS_LEFT, 0, 0, 10, 10, 0);
+        h_lang = mk("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0, 0, 10, 10, ID_LANG);
         h_clean = mk("BUTTON", "Convert everything again (don't reuse the last run's game data)", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_CLEAN);
         h_open = mk("BUTTON", "Show the ROM", BS_PUSHBUTTON, 0, 0, 10, 10, ID_OPEN);
         ShowWindow(h_open, SW_HIDE);
@@ -593,6 +670,9 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_TEMP_BR: browse(h_temp, "Choose where to keep the temporary files"); return 0;
         case ID_TEMP_ON: set_busy(0); return 0;
         case ID_PS2_ON: set_busy(0); return 0;
+        case ID_VALVE:
+            if (HIWORD(wp) == EN_CHANGE && h_lang) { char cur[32]; snprintf(cur, sizeof cur, "%s", chosen_lang()); refresh_langs(lang_count > 1 ? cur : NULL); }
+            return 0;
         case ID_PS2_BR: browse(h_ps2, "Choose the folder with the PS2 disc's files (SLUS_200.66, VALVE ...)"); return 0;
         case ID_BUILD: start_build(); return 0;
         case ID_OPEN: {
@@ -661,7 +741,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     RegisterClassA(&wc);
     char title[96];
     snprintf(title, sizeof title, "Half-Life 64 ROM builder (%s)", HL64_VERSION);
-    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 660, NULL, NULL, inst, NULL);
+    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 720, NULL, NULL, inst, NULL);
 
     // what was chosen last time; a folder on the command line (or dropped on the .exe) wins
     char v[MAX_PATH] = "", o[MAX_PATH] = "", t[MAX_PATH] = "", on[8] = "0";
@@ -691,6 +771,11 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         GetPrivateProfileStringA("builder", "ps2_on", "0", p2on, sizeof p2on, g_settings);
         SetWindowTextA(h_ps2, p2);
         SendMessageA(h_ps2_on, BM_SETCHECK, p2on[0] == '1' ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    {   // the language: the one chosen last time if this install has it, else Steam's setting
+        char lg[32] = "";
+        GetPrivateProfileStringA("builder", "language", "", lg, sizeof lg, g_settings);
+        refresh_langs(lg[0] ? lg : NULL);
     }
     set_busy(0);
     logf_("Choose your Half-Life folder and where the ROM goes, then press Build ROM.\r\n");

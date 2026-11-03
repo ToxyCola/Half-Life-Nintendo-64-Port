@@ -1241,7 +1241,14 @@ static void npc_relight(npc_t *n, float now)
     bsp_light_at(n->origin, n->light);
 }
 
-static int klass(npc_t *n) { const mdef_t *d = D(n); return d ? d->klass : C_NONE; }
+static int klass(npc_t *n)
+{
+    // CBaseTurret::Classify: a turret that's off and won't switch itself on is nobody's enemy (the
+    // Hazard Course's guards leave the ceiling turrets alone until the test switches them on)
+    if (n->bkind == 7 && n->bstate == 0 && !n->bi[0]) return C_NONE;
+    const mdef_t *d = D(n);
+    return d ? d->klass : C_NONE;
+}
 
 // relationship table (monsters.cpp IRelationship, simplified): true = attack
 static bool hates(npc_t *n, int target)

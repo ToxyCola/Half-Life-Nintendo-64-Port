@@ -17,6 +17,13 @@ int  font_draw_char(int f, int x, int y, int ch);  // returns the advance (pixel
 int  font_draw_centered(int f, int cx, int y, const char *s);
 int  font_draw_right(int f, int rx, int y, const char *s);
 
+// button icons inside text: one byte, FONT_ICON(i) (0x0E..0x1F), for icon i = a PAD_* value
+// (menu.h: A, B, Z, L, R, D-pad, C buttons, stick directions) or ICON_START
+#define ICON_START 17
+#define FONT_NUM_ICONS 18
+#define FONT_ICON(i) ((char)(0x0E + (i)))
+#define FONT_IS_ICON(c) ((unsigned char)(c) >= 0x0E && (unsigned char)(c) < 0x0E + FONT_NUM_ICONS)
+
 // I4 images tinted by the current font colour
 typedef struct { sprite_t *spr; surface_t surf; } image_t;
 bool image_load(image_t *im, const char *path);

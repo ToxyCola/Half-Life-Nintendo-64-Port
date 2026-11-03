@@ -407,6 +407,43 @@ static void mover_sound_stop(entity_t *e)
     if (st) snd_emit(e - entities, is_door(e) ? CHAN_STATIC : CHAN_WEAPON, st, 1.0f, ATTN_NORM, PITCH_NORM, NULL);
 }
 
+// ---- func_guntarget (plats.cpp CGunTarget): the Hazard Course's shooting range targets. Used,
+// it travels from path_track to path_track (firing each one's "message", waiting its "wait"); shot
+// down to no health it stops and fires its own "message"
+static void guntarget_place(entity_t *e, entity_t *t, float *o)
+{
+    bmodel_t *bm = &world.bmodels[e->model];
+    for (int k = 0; k < 3; k++) o[k] = t->origin[k] - (bm->mins[k] + bm->maxs[k]) * 0.5f;
+}
+static void guntarget_stop(entity_t *e)
+{
+    e->active = false;
+    e->nextthink = 0;
+    e->state = 0;   // (takedamage = DAMAGE_NO)
+}
+static void guntarget_next(entity_t *e)
+{
+    int t = e->target[0] ? ents_find_targetname(e->target, 1) : -1;
+    if (t < 0) { guntarget_stop(e); return; }
+    e->path = t;
+    float o[3];
+    guntarget_place(e, &entities[t], o);
+    e->nextthink = 0;
+    move_linear(e, o);
+}
+// CGunTarget::Wait, on reaching a path_track
+static void guntarget_wait(entity_t *e)
+{
+    if (e->path < 0) { guntarget_stop(e); return; }
+    entity_t *t = &entities[e->path];
+    const char *msg = ent_value(t, "message");
+    if (msg && msg[0]) ents_fire_targets(msg);
+    float w = ent_float(t, "wait", 0);
+    str_copy(e->target, t->target, sizeof(e->target));
+    if (w != 0) e->nextthink = g_time + w;
+    else guntarget_next(e);
+}
+
 static void door_go_up(entity_t *e, bool by_player)
 {
     if (e->state == MS_GOING_UP) return;
@@ -449,6 +486,7 @@ static void door_go_down(entity_t *e)
 
 static void mover_reached(entity_t *e)
 {
+    if (e->type == ENT_GUNTARGET) { if (e->state) guntarget_wait(e); return; }
     if (is_door(e) || e->type == ENT_PLAT) mover_sound_stop(e);
     if (e->state == MS_GOING_UP) {
         e->state = MS_AT_TOP;
@@ -903,6 +941,20 @@ static void breakable_die(entity_t *e)
     fire_entity_target(e);
 }
 
+// the shooting range's live targets (CGunTarget: FL_MONSTER, DAMAGE_AIM), for the autoaim
+int ents_aim_targets(float (*c)[3], int *idx, int max)
+{
+    int n = 0;
+    for (int i = 1; i < num_entities && n < max; i++) {
+        entity_t *e = &entities[i];
+        if (e->type != ENT_GUNTARGET || e->removed || !e->state || e->model <= 0) continue;
+        bmodel_t *bm = &world.bmodels[e->model];
+        for (int k = 0; k < 3; k++) c[n][k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f;
+        idx[n++] = i;
+    }
+    return n;
+}
+
 bool ents_brush_is_breakable(int ent)
 {
     entity_t *e = &entities[ent];
@@ -915,6 +967,18 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
 {
     if (ent <= 0 || ent >= num_entities) return;
     entity_t *e = &entities[ent];
+    if (e->type == ENT_GUNTARGET) {   // CGunTarget::TakeDamage: only while it's on
+        if (e->state && e->health > 0) {
+            e->health -= dmg;
+            if (e->health <= 0) {
+                e->health = 0;
+                guntarget_stop(e);
+                const char *msg = ent_value(e, "message");
+                if (msg && msg[0]) ents_fire_targets(msg);
+            }
+        }
+        return;
+    }
     if (!ents_brush_is_breakable(ent)) {
         // a hit on unbreakable glass/metal still makes its impact sound
         return;
@@ -1140,6 +1204,16 @@ static void momentary_set(entity_t *b, float pos, bool first)
     b->mpos = fminf(fmaxf(pos, 0), 1);
     for (int k = 0; k < 3; k++) b->angles[k] = b->ang1[k] + b->movedir[k] * b->dist * b->mpos;
     momentary_update_targets(b, first);
+    // CMomentaryRotButton::UpdateAllButtons: every momentary_rot_button with the same target turns
+    // with it (the Hazard Course's spinning bridge follows its wheel)
+    if (b->target[0])
+        for (int i = 1; i < num_entities; i++) {
+            entity_t *o = &entities[i];
+            if (o == b || o->type != ENT_MOMENTARY_BUTTON || o->removed || strcasecmp(o->target, b->target)) continue;
+            o->mpos = b->mpos;
+            o->mlast = b->mlast;
+            for (int k = 0; k < 3; k++) o->angles[k] = o->ang1[k] + o->movedir[k] * o->dist * o->mpos;
+        }
 }
 
 // CMonsterMaker::MakeMonster: one of "monstertype" at the maker, named "netname", if there is room
@@ -1327,6 +1401,18 @@ static void ent_use(entity_t *e)
     case ENT_PUSHABLE:
         if (e->type == ENT_BREAKABLE || e->maxhealth > 0) breakable_die(e);
         break;
+    case ENT_GUNTARGET: {   // CGunTarget::Use: on -> stop; off -> takes hits and sets off along its path
+        extern int g_use_type;
+        bool on = e->state != 0;
+        if (g_use_type == 0 && !on) break;      // (ShouldToggle)
+        if (g_use_type == 1 && on) break;
+        if (on) { guntarget_stop(e); break; }
+        if (!e->target[0] || ents_find_targetname(e->target, 1) < 0) break;
+        e->state = 1;
+        e->health = e->maxhealth;
+        guntarget_next(e);
+        break;
+    }
     case ENT_TRIGGER_HURT:
         e->active = !e->active;          // CBaseTrigger::ToggleUse
         break;
@@ -1442,7 +1528,7 @@ static enttype_t classify(const char *cn)
         {"path_track", ENT_PATH_TRACK}, {"multisource", ENT_MULTISOURCE}, {"env_fade", ENT_ENV_FADE},
         {"env_message", ENT_ENV_MESSAGE}, {"game_text", ENT_GAME_TEXT}, {"trigger_camera", ENT_CAMERA},
         {"scripted_sentence", ENT_SENTENCE}, {"env_render", ENT_ENV_RENDER}, {"trigger_endsection", ENT_ENDSECTION},
-        {"func_guntarget", ENT_WALL}, {"func_mortar_field", ENT_MORTAR_FIELD},
+        {"func_guntarget", ENT_GUNTARGET}, {"func_mortar_field", ENT_MORTAR_FIELD},
         {"func_tank", ENT_TANK}, {"func_tankcontrols", ENT_TANKCONTROLS}, {"func_recharge", ENT_RECHARGE},
         {"func_healthcharger", ENT_HEALTHCHARGER}, {"momentary_rot_button", ENT_MOMENTARY_BUTTON}, {"func_friction", ENT_FRICTION},
         {"trigger_autosave", ENT_AUTOSAVE}, {"trigger_cdaudio", ENT_CDAUDIO}, {"target_cdaudio", ENT_TARGET_CDAUDIO},
@@ -1631,6 +1717,15 @@ static void spawn_entity(entity_t *e)
         // func_breakable.cpp: health 0 = unbreakable by damage (SF_BREAK_TRIGGER_ONLY is 1)
         e->maxhealth = e->health;
         break;
+    case ENT_GUNTARGET:
+        // CGunTarget::Spawn: off (no damage) until used; it sits at its first path_track
+        if (e->speed == 0) e->speed = 100;
+        e->maxhealth = e->health;
+        e->state = 0;
+        e->charge_on = 0;   // not placed yet (CGunTarget::Activate, once every entity exists)
+        e->path = -1;
+        e->nextthink = (e->spawnflags & 1) ? 0.3f : 0;   // FGUNTARGET_START_ON
+        break;
     case ENT_WALL_TOGGLE:
         if (e->spawnflags & 1) { e->visible = false; e->solid = SOLID_NOT; } // starts invisible
         break;
@@ -1776,7 +1871,9 @@ static void spawn_entity(entity_t *e)
         memcpy(e->ang1, e->angles, 12);
         if (e->speed == 0) e->speed = e->type == ENT_PENDULUM ? 100 : 100;
         e->mpos = 0; e->mdir = -1; e->mlast = -10;
-        if (e->type == ENT_MOMENTARY_BUTTON && (e->spawnflags & 16)) e->solid = SOLID_NOT;
+        // SF_MOMENTARY_DOOR (1): a solid thing turned by another button (the spinning bridge);
+        // the others are wheels and valves, not solid
+        if (e->type == ENT_MOMENTARY_BUTTON && !(e->spawnflags & 1)) e->solid = SOLID_NOT;
         if (e->type == ENT_PENDULUM) e->active = (e->spawnflags & 1) || !e->targetname[0];
         break;
     case ENT_TANK:
@@ -2044,6 +2141,38 @@ static void pushable_move(entity_t *p, const float *d)
     if (!tf.startsolid && tf.fraction < 1) p->origin[2] = tf.endpos[2];
     else if (!tf.startsolid) p->origin[2] = best[2] - 1;   // nothing close below: let it drop a bit (falls over frames)
     p->solid = sol;
+}
+
+// MOVETYPE_PUSHSTEP gravity: a pushable with nothing under it falls (the Hazard Course's crate,
+// pushed over the edge into its pit), and floats where it reaches water, partly sunk
+static float pushable_vz[MAX_ENTITIES];
+static void pushable_fall(entity_t *p, float dt)
+{
+    bmodel_t *pb = &world.bmodels[p->model];
+    int i = p - entities;
+    float o[3] = {p->origin[0], p->origin[1], p->origin[2]};
+    float v = pushable_vz[i] + 800 * dt;   // sv_gravity
+    if (v > 2000) v = 2000;
+    float drop = v * dt + 0.25f;
+    float to[3] = {o[0], o[1], o[2] - drop};
+    int sol = p->solid;
+    p->solid = SOLID_NOT;
+    gtrace_t tr;
+    game_trace(o, to, pb->mins, pb->maxs, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+    p->solid = sol;
+    if (tr.startsolid) { pushable_vz[i] = 0; return; }
+    if (tr.fraction >= 1 || tr.endpos[2] < o[2] - 0.2f) {
+        // water: stop with about 40 % of it under the surface (as settle_pushables)
+        float hgt = pb->maxs[2] - pb->mins[2];
+        float c[3] = {o[0] + (pb->mins[0] + pb->maxs[0]) * 0.5f, o[1] + (pb->mins[1] + pb->maxs[1]) * 0.5f, tr.endpos[2] + pb->mins[2] + hgt * 0.4f};
+        int ct = bsp_point_contents(c);
+        if (ct <= -3 && ct >= -5) { pushable_vz[i] = 0; return; }
+#ifdef PUSHDEBUG
+        debugf("pushable %d falls: z %.1f v %.0f frac %.2f\n", i, p->origin[2], v, tr.fraction);
+#endif
+        if (tr.fraction >= 1) { p->origin[2] = to[2]; pushable_vz[i] = v; }
+        else { p->origin[2] = tr.endpos[2]; pushable_vz[i] = 0; }
+    } else pushable_vz[i] = 0;   // resting on something
 }
 
 // pushables come to rest on whatever is below them -- the world or a brush entity such as the
@@ -2922,7 +3051,7 @@ void ents_think(float dt)
             switch (entities[i].type) {
             case ENT_AMBIENT: case ENT_BUTTON: case ENT_CAMERA: case ENT_CDAUDIO: case ENT_DOOR: case ENT_DOOR_ROTATING:
             case ENT_ENDSECTION: case ENT_ENV_SPARK: case ENT_GLOBAL_BEAM: case ENT_HEALTHCHARGER: case ENT_MONSTERMAKER:
-            case ENT_PLAT: case ENT_PUSHABLE: case ENT_RECHARGE: case ENT_ROTATING: case ENT_ROT_BUTTON: case ENT_SENTENCE:
+            case ENT_PLAT: case ENT_PUSHABLE: case ENT_RECHARGE: case ENT_ROTATING: case ENT_ROT_BUTTON: case ENT_SENTENCE: case ENT_GUNTARGET:
             case ENT_SPEAKER: case ENT_TARGET_CDAUDIO: case ENT_TRACKAUTO: case ENT_TRACKTRAIN: case ENT_TRAIN:
             case ENT_TRIGGER_AUTO: case ENT_TRIGGER_CHANGELEVEL: case ENT_TRIGGER_HURT: case ENT_TRIGGER_MULTIPLE:
             case ENT_TRIGGER_ONCE: case ENT_TRIGGER_PUSH: case ENT_TRIGGER_TELEPORT:
@@ -2944,6 +3073,19 @@ void ents_think(float dt)
         if (e->removed) continue;
         PROFX_STEP(i);
         switch (e->type) {
+        case ENT_GUNTARGET:
+            if (!e->charge_on) {   // CGunTarget::Activate: onto its first path_track
+                e->charge_on = 1;
+                int t = e->target[0] ? ents_find_targetname(e->target, 1) : -1;
+                if (t >= 0) guntarget_place(e, &entities[t], e->origin);
+            }
+            if (e->active) mover_step(e, i, dt);
+            if (e->nextthink > 0 && g_time >= e->nextthink) {
+                e->nextthink = 0;
+                if (!e->state) { extern int g_use_type; int u = g_use_type; g_use_type = 1; ent_use(e); g_use_type = u; }   // FGUNTARGET_START_ON
+                else guntarget_next(e);
+            }
+            break;
         case ENT_DOOR:
         case ENT_DOOR_ROTATING:
         case ENT_BUTTON:
@@ -3062,7 +3204,7 @@ void ents_think(float dt)
             break;
         }
         case ENT_PUSHABLE:
-            if (e->model > 0) push_pushable(e, porg, pmins, pmaxs, dt);   // (SF_PUSH_BREAKABLE 128 only makes it breakable too)
+            if (e->model > 0) { push_pushable(e, porg, pmins, pmaxs, dt); pushable_fall(e, dt); }   // (SF_PUSH_BREAKABLE 128 only makes it breakable too)
             break;
         case ENT_GLOBAL_BEAM:
             // env_beam / env_laser (effects.cpp): drawn while on (StartOn = 1, or toggled by use)
@@ -3162,7 +3304,7 @@ void ents_think(float dt)
         case ENT_MOMENTARY_BUTTON: {
             // let go: turn back at "returnspeed" (CMomentaryRotButton::Return)
             float rs = ent_float(e, "returnspeed", 0);
-            if (g_time - e->mlast > 0.15f && rs > 0 && e->mpos > 0) momentary_set(e, e->mpos - rs * dt / (e->dist > 0 ? e->dist : 90), false);
+            if ((e->spawnflags & 16) && g_time - e->mlast > 0.15f && rs > 0 && e->mpos > 0) momentary_set(e, e->mpos - rs * dt / (e->dist > 0 ? e->dist : 90), false);
             break;
         }
         case ENT_TANK:
@@ -3374,7 +3516,8 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
     for (int i = 1; i < num_entities; i++) {
         entity_t *e = &entities[i];
         if (e->removed || e->model <= 0) continue;
-        bool usable = e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_RECHARGE || e->type == ENT_MOMENTARY_BUTTON ||
+        bool usable = e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_RECHARGE ||
+                      (e->type == ENT_MOMENTARY_BUTTON && !(e->spawnflags & 1)) ||   // (a "door" only turns with its button)
                       e->type == ENT_TANKCONTROLS ||
                       e->type == ENT_HEALTHCHARGER ||
                       ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !e->targetname[0]) ||
@@ -3612,6 +3755,13 @@ int ents_snapshot(uint8_t *b, int max, int base)
         }
         b[cpos] = c & 255; b[cpos + 1] = c >> 8;
     }
+    // the switchable lights (light styles 32..63) that are on
+    if (pos + 5 <= max) {
+        extern uint32_t lights_get_state(void);
+        uint32_t m = lights_get_state();
+        b[pos++] = 'L';
+        memcpy(b + pos, &m, 4); pos += 4;
+    }
     return pos;
 }
 void ents_apply_snapshot(const uint8_t *b, int len, int base)
@@ -3652,6 +3802,11 @@ void ents_apply_snapshot(const uint8_t *b, int len, int base)
                 entities[idx].maker_count = cnt;
                 entities[idx].maker_live = 0;   // its monsters are restored as plain map characters
                 if (cnt == 0) entities[idx].active = false;
+            }
+            if (pos + 5 <= len && b[pos] == 'L') {
+                extern void lights_set_state(uint32_t m);
+                uint32_t m; memcpy(&m, b + pos + 1, 4);
+                lights_set_state(m);
             }
         }
     }

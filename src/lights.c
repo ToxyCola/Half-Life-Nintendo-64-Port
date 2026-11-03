@@ -94,7 +94,13 @@ bool lights_use(entity_t *e)
     const char *st = ent_value(e, "style");
     if (!st) return true;
     int s = atoi(st);
-    if (s >= 32 && s < 64) on[s] = !on[s];
+    // each light keeps its own on/off (SF_LIGHT_START_OFF flipped) and sets the style to it: two
+    // lights sharing a name and a style (the hologram's spotlights in the Hazard Course) both turn
+    // it on, instead of toggling it twice back to off
+    if (s >= 32 && s < 64) {
+        e->spawnflags ^= 1;
+        on[s] = !(e->spawnflags & 1);
+    }
     return true;
 }
 
@@ -151,4 +157,24 @@ void lights_think(float dt)
     (void)nupd;
 #endif
     for (int s = 0; s < 64; s++) applied[s] = val[s];
+}
+
+// saved games: which switchable styles are on (bit s-32); restoring also sets each named light's own
+// on/off to its style's, so the next switch turns it the right way
+uint32_t lights_get_state(void)
+{
+    uint32_t m = 0;
+    for (int s = 32; s < 64; s++) if (on[s]) m |= 1u << (s - 32);
+    return m;
+}
+void lights_set_state(uint32_t m)
+{
+    for (int s = 32; s < 64; s++) on[s] = (m >> (s - 32)) & 1;
+    for (int i = 1; i < num_entities; i++) {
+        entity_t *e = &entities[i];
+        if (strncmp(e->classname, "light", 5)) continue;
+        const char *st = ent_value(e, "style");
+        int s = st ? atoi(st) : 0;
+        if (s >= 32 && s < 64) { if (on[s]) e->spawnflags &= ~1; else e->spawnflags |= 1; }
+    }
 }

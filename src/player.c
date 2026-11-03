@@ -395,9 +395,17 @@ void player_draw_hud(float dt)
     int full = (int)(20 * player.armor / 100);
     if (full > 0) hud_icon2(ax, y - 3 + (20 - full), 20, 52 + (20 - full), 20, full);
     hud_number(ax + 20, y, (int)player.armor, 3, true);
-    // flashlight (CHudFlashlight)
-    font_color(col(player.flashlight ? 255 : 120, false));
-    hud_icon2(320 - 18 - 12 - HUD_SAFE_X, hud_y0 + 10 + (hud_y0 ? 0 : HUD_SAFE_Y), player.flashlight ? 16 : 34, 72, 18, 16);
-    if (player.flashlight) hud_icon2(320 - 12 - HUD_SAFE_X, hud_y0 + 10 + (hud_y0 ? 0 : HUD_SAFE_Y), 52, 72, 6, 16);   // the beam ahead of the lamp (CHudFlashlight::Draw)
+    // flashlight (CHudFlashlight::Draw): the empty casing, the beam while it's on, and the full
+    // casing over it as wide as the battery's charge -- red below 20 %
+    {
+        bool low = player.flashbattery < 20;
+        font_color(col(player.flashlight ? 225 : 100, low));
+        int fx = 320 - 18 - 12 - HUD_SAFE_X, fy = hud_y0 + 10 + (hud_y0 ? 0 : HUD_SAFE_Y);
+        hud_icon2(fx, fy, 34, 72, 18, 16);
+        if (player.flashlight) hud_icon2(320 - 12 - HUD_SAFE_X, fy, 52, 72, 6, 16);   // the beam ahead of the lamp
+        int off = (int)(18 * (1.0f - player.flashbattery / 100.0f));
+        if (off < 0) off = 0;
+        if (off < 18) hud_icon2(fx + off, fy, 16 + off, 72, 18 - off, 16);
+    }
     rdpq_set_mode_standard();
 }

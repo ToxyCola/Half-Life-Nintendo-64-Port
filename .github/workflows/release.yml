@@ -154,6 +154,8 @@ jobs:
           2. Run the builder. It finds Half-Life through Steam; if it can't, use **Browse...** to pick your Half-Life folder. Choose where the ROM goes (and, if you like, where the temporary files are kept), then press **Build ROM**.
           3. Wait for it to convert the game (30-90 minutes the first time).
 
+          **Language (optional):** the builder's Language list offers the languages your Half-Life install has (set the language in Steam: Properties -> General -> Language); the ROM gets that language's speech and on-screen text.
+
           **Head-To-Head (optional):** extract your PlayStation 2 Half-Life disc image (the `.bin`) into a folder with a disc-image tool such as 7-Zip; the folder should contain `SLUS_200.66` and a `VALVE` folder. In the builder, tick **Add Head-To-Head from the PlayStation 2 version** and choose that extracted folder before pressing **Build ROM**.
 
           Play it in ares, gopher64 or simple64 (Expansion Pak on, save type SRAM 256k), or on a 64 MB-capable flashcart.

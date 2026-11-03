@@ -1023,6 +1023,24 @@ static void autoaim(const float *eye, float *dir)
         best = dot; bi = i;
         for (int k = 0; k < 3; k++) bv[k] = d[k] / l;
     }
+    {   // the Hazard Course's shooting range targets
+        extern int ents_aim_targets(float (*c)[3], int *idx, int max);
+        float tc[8][3];
+        int ti[8];
+        int nt = ents_aim_targets(tc, ti, 8);
+        for (int i = 0; i < nt; i++) {
+            float d[3] = {tc[i][0] - eye[0], tc[i][1] - eye[1], tc[i][2] - eye[2]};
+            float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (l > 2048 || l < 1) continue;
+            float dot = (d[0] * dir[0] + d[1] * dir[1] + d[2] * dir[2]) / l;
+            if (dot <= best) continue;
+            gtrace_t tr;   // (the target itself is in the way of its own middle)
+            game_trace(eye, tc[i], NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER | TR_IGNORE_GLASS, -1, &tr);
+            if (tr.startsolid || (tr.fraction < 1 && tr.ent != ti[i])) continue;
+            best = dot; bi = 1000 + i;
+            for (int k = 0; k < 3; k++) bv[k] = d[k] / l;
+        }
+    }
     if (bi >= 0) memcpy(dir, bv, 12);
 }
 

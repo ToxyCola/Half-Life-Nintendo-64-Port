@@ -1,44 +1,35 @@
-## Patch notes: 1.3
+## Patch notes: 1.3.1
 
 **New**
 
-* **Head-To-Head:** the PlayStation 2 version's two-player split-screen deathmatch. Player 1 is
-  on the top half with controller 1, player 2 on the bottom half with controller 2. It has the
-  PS2 version's ten maps (Basement, Debris, Water Canal, Skirmish, Waypoint, Signal, Office,
-  Snark Pit, Datacore and Stalkyard) plus **Crimson**, a new map by UnhealthyGrapejuice, and its
-  six characters (Gordon Freeman, Security Guard, Gina, Colette, Scientist and Soldier). The rules
-  are the PC's deathmatch rules: frag and time limits, respawning with a crowbar and a pistol,
-  weapons and items coming back after a while, and a dead player's gun dropped where they fell.
-  Each player sees the other holding their gun, and players fall over when killed. It needs the
-  PS2 game's files when you build the ROM (see
-  [Adding Head-To-Head](https://github.com/ToxyCola/Half-Life-Nintendo-64-Port#adding-head-to-head-from-the-playstation-2-version) in the README).
-* **Head-To-Head menus:** a character select screen for both players, then a match screen with
-  the map (with a preview of each), the frag limit (5–50) and the time limit (none, or up to 30
-  minutes).
+* **Language option in the builder:** speech and on-screen text in the language Half-Life is set
+  to in Steam (Steam keeps each language in a `valve_<language>` folder next to `valve`). The
+  builder lists the languages your install has, starts on Steam's setting, and remembers your
+  choice. The text font now has accented letters (Latin-1). For Japanese, Korean, Chinese, Thai
+  and Vietnamese only the speech changes, as the N64 font can't show those scripts. If a
+  translation's speech would make the ROM larger than 64 MB, the builder compresses that speech
+  harder until it fits (and warns at the end if it still doesn't).
+* **Button icons:** the Hazard Course's instructions show the icon of the button each action is
+  on, following your button mapping and control scheme ("PRESS (B) TO PUSH A BUTTON" instead of
+  "PRESS YOUR USE KEY"). The Button Mapping screen shows the icons too.
+* **Flashlight battery on the HUD,** as on PC: the flashlight icon empties as its battery runs
+  down (it turns red below 20 %) and refills while it's off.
 * **A new lambda** on the loading screen.
-* **The builder** has an optional field for the PS2 files, and now checks the Half-Life folder
-  before starting, naming any files that are missing.
 
 **Fixed**
 
-* Characters no longer disappear in large maps, or after loading a save of one.
-* A band from the shotgun (and other weapons) no longer covers the lower part of the screen while
-  you walk.
-* Lasers, electricity, beams and particles no longer show through walls, objects and see-through
-  textures. They are hidden by what's in front of them, and seen through glass and grates as they
-  should be.
-* Electric beams look like lightning again instead of plain blue lines, and the tripmine laser is
-  its textured beam again instead of a thin red line.
-* Crates can be pushed straight forward, not only from the side.
-* The muzzle flash sits just in front of the barrel and the gun hides the part of it behind the
-  barrel, like the beams.
-* The elevator in Anomalous Materials (c1a0b and c1a0c) only moves when you press its button.
-* The scientist at the console in Anomalous Materials no longer stays hunched over the console
-  while he talks to you.
-* The scientists who fall down the elevator shaft at the start of Unforeseen Consequences now die
-  at the bottom and burst into gibs. Damage areas (`trigger_hurt`) hurt characters as well as the
-  player, as on PC.
-* Going back from some maps to the one before (Questionable Ethics' c2a1b to c2a1a) no longer runs
-  out of memory.
-* The builder no longer stops with an error when the Half-Life folder has no
-  `resource/logo.tga`.
+* **EverDrive 64 X5/X7:** release ROMs no longer write a debug log. On an EverDrive with no PC
+  connected, every log line could stall the game for up to a tenth of a second.
+* **Hazard Course:**
+  * The light-up progress displays light up, the flashlight room's lights go out, and the
+    shooting range's lights work. Lights sharing a name were each toggling the same light style,
+    so an even number of them cancelled out.
+  * The spinning bridge turns with its wheel and swings back when you let go.
+  * Pushed crates fall, so the crate drops into its pit and you can cross on it.
+  * The shooting range works: the targets rise and fall, take hits, light up and score, and
+    autoaim helps with them as on PC.
+  * The guards at the end no longer shoot the switched-off turrets.
+* Light switches keep their state when you save and load.
+* Momentary wheels and valves are no longer solid (as on PC).
+
+For everything new in 1.3 (Head-To-Head and more), see [What's new in 1.3](https://github.com/ToxyCola/Half-Life-Nintendo-64-Port#whats-new-in-13) in the README.

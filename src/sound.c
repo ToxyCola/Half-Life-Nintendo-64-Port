@@ -214,7 +214,8 @@ static int sentence_words(const char *text, word_t *out, int max)
         int pi = dp, vo = dv, st = ds, en = de;
         if (*p == '(') parse_params(&p, &pi, &vo, &st, &en);
         word_t *w = &out[n++];
-        snprintf(w->file, sizeof(w->file), "%s%s.wav", dir, word);
+        // a later word with its own folder (the translations' "C2A4_ster bizwarn sentences/C2A4_ster")
+        snprintf(w->file, sizeof(w->file), "%s%s.wav", strchr(word, '/') ? "" : dir, word);
         w->pitch = pi > 255 ? 255 : pi; w->vol = vo > 255 ? 255 : vo; w->start = st; w->end = en;
     }
     return n;

@@ -520,7 +520,16 @@ def convert(bsp_path, out_path, wads, grid, maxtexels, verbose=True, lm_toleranc
                     contrib = [lm_sample(job['lmraw'][k:k + 1], lw, lh, 1, ls_, lt_) for k in range(len(job['dyn']))]
                     on = sum(contrib[k] * style_on.get(job['dyn'][k][1], 1.0) for k in range(len(job['dyn'])))
                     base = c - on
-                    dl = (base, [(job['dyn'][k][1], contrib[k]) for k in range(len(job['dyn']))])
+                    eff = list(contrib)
+                    if lw <= 5 and lh <= 5:
+                        # a small face lit by a switchable light (the Hazard Course's progress panels:
+                        # a lamp just in front of each): its corners miss the bright spot in its
+                        # middle, so it lights up evenly with the light it gets on the whole
+                        for k in range(len(job['dyn'])):
+                            if job['dyn'][k][1] >= 32:
+                                L = job['lmraw'][k].reshape(-1, 3)
+                                eff[k] = np.maximum(contrib[k], (L.mean(0) + L.max(0)) * 0.5)
+                    dl = (base, [(job['dyn'][k][1], eff[k]) for k in range(len(job['dyn']))])
             return p, s * su, t * tvs, col, dl
 
         # greedy chunking

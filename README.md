@@ -7,7 +7,7 @@ lighting, played with Valve's own player-movement code, running on stock N64 har
 Expansion Pak. It also has the PlayStation 2 version's two-player split-screen **Head-To-Head**
 mode, built from your own copy of the PS2 game.
 
-**Current release: 1.3** ([what's new](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
+**Current release: 1.3.1** ([what's new](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
 [Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)). Notes for
 earlier versions are on their release pages.
@@ -24,6 +24,40 @@ It is built from:
 * **A new N64 engine** written for this port, because the GoldSrc engine (`hw.dll`) has never
   been released as source. It uses [libdragon](https://github.com/DragonMinded/libdragon) and
   [tiny3d](https://github.com/HailToDodongo/tiny3d).
+
+## What's new in 1.3.1
+
+**New**
+
+* **Language option in the builder:** speech and on-screen text in the language Half-Life is set
+  to in Steam (Steam keeps each language in a `valve_<language>` folder next to `valve`). The
+  builder lists the languages your install has, starts on Steam's setting, and remembers your
+  choice. The text font now has accented letters (Latin-1). For Japanese, Korean, Chinese, Thai
+  and Vietnamese only the speech changes, as the N64 font can't show those scripts. If a
+  translation's speech would make the ROM larger than 64 MB, the builder compresses that speech
+  harder until it fits (and warns at the end if it still doesn't).
+* **Button icons:** the Hazard Course's instructions show the icon of the button each action is
+  on, following your button mapping and control scheme ("PRESS (B) TO PUSH A BUTTON" instead of
+  "PRESS YOUR USE KEY"). The Button Mapping screen shows the icons too.
+* **Flashlight battery on the HUD,** as on PC: the flashlight icon empties as its battery runs
+  down (it turns red below 20 %) and refills while it's off.
+* **A new lambda** on the loading screen.
+
+**Fixed**
+
+* **EverDrive 64 X5/X7:** release ROMs no longer write a debug log. On an EverDrive with no PC
+  connected, every log line could stall the game for up to a tenth of a second.
+* **Hazard Course:**
+  * The light-up progress displays light up, the flashlight room's lights go out, and the
+    shooting range's lights work. Lights sharing a name were each toggling the same light style,
+    so an even number of them cancelled out.
+  * The spinning bridge turns with its wheel and swings back when you let go.
+  * Pushed crates fall, so the crate drops into its pit and you can cross on it.
+  * The shooting range works: the targets rise and fall, take hits, light up and score, and
+    autoaim helps with them as on PC.
+  * The guards at the end no longer shoot the switched-off turrets.
+* Light switches keep their state when you save and load.
+* Momentary wheels and valves are no longer solid (as on PC).
 
 ## What's new in 1.3
 
@@ -177,6 +211,12 @@ private copy of Python are inside it, and no Valve game data is.
 3. Build again later and it reuses the converted data, so only the ROM is rebuilt; tick
    "Convert everything again" to redo it.
 
+**Language:** the builder's Language list shows English and every language your Half-Life install
+has the files for, starting on the one Half-Life is set to in Steam (Properties → General →
+Language; Steam then downloads that language's `valve_<language>` folder). The ROM gets that
+language's speech and, for languages the font can show, its on-screen text. Changing the language
+makes the next build convert everything again.
+
 ### Adding Head-To-Head from the PlayStation 2 version
 
 Head-To-Head's maps, characters and menu art come from the PS2 version of Half-Life, so you need
@@ -229,12 +269,13 @@ git clone https://github.com/HailToDodongo/tiny3d && (cd tiny3d && ./build.sh)
 # 2. Convert your game data (maps, node graphs, textures, skies, models, fonts, sounds, music) into filesystem/
 python3 tools/build_assets.py "/path/to/Half-Life/valve" filesystem
 #    Head-To-Head: add --ps2 "/path/to/extracted PS2 disc" (the folder with SLUS_200.66 and VALVE/)
+#    another language: add --lang spanish (or french, german ...: its valve_<language> folder next to valve)
 #    --models-only / --ui-only rebuild just the characters or the fonts, HUD/effect sprites and titles
 #    options: --maps c1a0 c1a1 ...   (subset)   --grid 64 --tol 12 (lighting detail vs triangles)
 
 # 3. Build the ROM
 make T3D_INST=/path/to/tiny3d
-#    -> hl64.z64
+#    -> hl64.z64   (HL64_DEBUG=1 adds the debug log over IS-Viewer/USB, for emulator tests)
 ```
 
 The asset build takes about 45 minutes, most of it Shrinkler compression of the maps
@@ -278,6 +319,7 @@ Building needs a host C compiler (`cc`) for `tools/navgen.c`.
 ## Source layout
 
 ```
+src/lights.c      light styles: switchable and flickering lights relight the baked vertex colours
 src/main.c        main loop, input, view, trigger_camera, level changes, saves, the Head-To-Head frame
 src/h2h.c         Head-To-Head: the two players' contexts, deathmatch rules, respawns, the split screen
 src/render.c      tiny3d renderer: PVS, batching, CI8 textures, skybox, characters
@@ -297,7 +339,7 @@ src/skill.c       skill.cfg
 valve_sdk/        files from Valve's Half-Life SDK (see valve_sdk/LICENSE)
 tools/            bsp2n64.py, mdl2n64.py, ui2n64.py, spr2n64.py, sky2n64.py, spr.py, navgen.c, build_assets.py,
                   ps2h2h.py + bs2bsp.py (the PS2 version's Head-To-Head maps and characters)
-assets/           title screen and menu art, menu sounds and music, Head-To-Head menu art, Crimson (crimson.bsp)
+assets/           title screen and menu art, the pad's button icons (buttons/), menu sounds and music, Head-To-Head menu art, Crimson (crimson.bsp)
 builder/          the ROM builders: Windows (hl64builder.c, packer, build_windows.sh), Linux/macOS (build_unix.sh + tools/builder_gui.py)
 test/             PC test harness: runs the same game code on a converted map
 ```

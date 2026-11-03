@@ -24,7 +24,7 @@ import numpy as np, sys, struct, subprocess, shutil
 from PIL import Image, ImageFilter
 
 SIZES = [('small', 0.65), ('medium', 0.8), ('large', 1.0)]
-FIRST, LAST = 32, 126
+FIRST, LAST = 32, 255   # Latin-1: the translations (valve_<language>) use its accented letters
 
 
 def read_qfont(wad_path, lump='CREDITSFONT'):
@@ -82,11 +82,15 @@ def mksprite(png, outdir, fmt='I4', compress=None):
         raise RuntimeError(r.stderr)
 
 
-def build(valve, out, tmp, h2h=False):
+def build(valve, out, tmp, h2h=False, lang=None):
+    """lang: a language folder (valve_spanish ...) whose gfx.wad font and titles.txt replace valve's"""
+    def lf(name):
+        p = find_ci(lang, name) if lang else None
+        return p or os.path.join(valve, name)
     ui = os.path.join(out, 'ui')
     os.makedirs(ui, exist_ok=True)
     os.makedirs(tmp, exist_ok=True)
-    rowh, glyphs, src = read_qfont(os.path.join(valve, 'gfx.wad'))
+    rowh, glyphs, src = read_qfont(lf('gfx.wad'))
     for name, scale in SIZES:
         h = max(1, round(rowh * scale))
         # each glyph on its own canvas (no bleed from neighbours), one spare column on the right
@@ -165,7 +169,7 @@ def build(valve, out, tmp, h2h=False):
     if h2h:
         build_h2h_menu(ui, tmp)
 
-    shutil.copy(os.path.join(valve, 'titles.txt'), os.path.join(out, 'titles.txt'))
+    shutil.copy(lf('titles.txt'), os.path.join(out, 'titles.txt'))
     print('ui: fonts %s, hud sprites, logo, titles.txt' % ', '.join(n for n, _ in SIZES))
 
 
@@ -441,10 +445,24 @@ def build_title(valve, ui, tmp):
         if not os.path.exists(src):
             continue
         im = Image.open(src).convert('RGBA')
+        if name == 'lambda':   # drawn at this size beside "LOADING"
+            im = im.resize((24, 24), Image.LANCZOS)
         png = os.path.join(tmp, name + '.png')
         im.save(png)
-        fmt = 'RGBA16' if name in ('title', 'lambda') else 'RGBA32'
+        fmt = 'RGBA16' if name == 'title' else 'RGBA32'
         mksprite(png, ui, fmt)
+
+    # the N64 pad's button icons (assets/buttons: A, B, Z, L, R, Start, the D-pad, C buttons and
+    # stick directions), shown in place of the bindings' names in the menus and the Hazard Course
+    bdir = os.path.join(here, '..', 'assets', 'buttons')
+    if os.path.isdir(bdir):
+        for f in sorted(os.listdir(bdir)):
+            if not f.lower().endswith('.png'):
+                continue
+            im = Image.open(os.path.join(bdir, f)).convert('RGBA').resize((32, 32), Image.LANCZOS)
+            png = os.path.join(tmp, 'btn_' + f.lower())
+            im.save(png)
+            mksprite(png, ui, 'RGBA32', 2)
 
     ctrl_src = os.path.join(here, '..', 'assets', 'ctrl.png')
     if os.path.exists(ctrl_src):

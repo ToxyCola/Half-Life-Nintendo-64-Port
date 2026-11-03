@@ -18,7 +18,7 @@ import sky2n64
 import mdl2n64
 import ui2n64
 import spr2n64
-import re
+import re, struct
 
 CAMPAIGN = """c0a0 c0a0a c0a0b c0a0c c0a0d c0a0e c1a0 c1a0d c1a0a c1a0b c1a0e c1a0c c1a1 c1a1a c1a1f c1a1b c1a1c
 c1a1d c1a2 c1a2a c1a2b c1a2c c1a2d c1a3 c1a3a c1a3b c1a3c c1a3d c1a4 c1a4k c1a4b c1a4f c1a4d c1a4e c1a4i
@@ -248,7 +248,7 @@ def build_arrivals(a, maps):
 
 def build_chapters(a, maps):
     """maps/chapters.txt: '<map> <chapter title>' for maps that start a chapter (worldspawn chaptertitle)"""
-    titles = ui2n64.parse_titles(os.path.join(a.valve, 'titles.txt'))
+    titles = ui2n64.parse_titles(ui2n64.find_ci(a.lang_text_dir, 'titles.txt') if a.lang_text_dir else os.path.join(a.valve, 'titles.txt'))
     out = []
     for m in maps:
         b = bsp2n64.BSP(open(bsp2n64.map_path(a.valve, m), 'rb').read())
@@ -290,9 +290,17 @@ def main():
     ap.add_argument('--maps-only', action='store_true', help='only rebuild maps + texture pack')
     ap.add_argument('--sounds-only', action='store_true', help='only rebuild sounds and music')
     ap.add_argument('--compress-level', type=int, default=3, choices=(1, 2, 3))
+    ap.add_argument('--lang', help='the game language to take speech and text from: a Steam language '
+                    '(spanish, french, german ...) whose valve_<language> folder is next to valve, or that folder')
     ap.add_argument('--ps2', help='a copy of the PS2 disc\'s files: adds the Head-To-Head maps and characters')
     a = ap.parse_args()
     preflight(a.valve)
+    a.lang_dir = language_dir(a.valve, a.lang)
+    # the on-screen text too, except for the languages the one-byte font can't show
+    a.lang_text_dir = a.lang_dir if a.lang_dir and not any(
+        k in os.path.basename(a.lang_dir).lower() for k in NONLATIN) else None
+    if a.lang_dir:
+        print('language: %s (%s)' % (a.lang_dir, 'speech and text' if a.lang_text_dir else 'speech; the text stays English'))
     maps = a.maps or [m for m in CAMPAIGN if os.path.exists(bsp2n64.map_path(a.valve, m))]
     # the PS2 version's Head-To-Head maps (converted to .bsp in a temporary folder) go through
     # the same conversion as the campaign's, sharing its texture pack
@@ -312,7 +320,7 @@ def main():
         build_sounds(a)
         return
     if a.ui_only:
-        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2))
+        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2), lang=a.lang_text_dir)
         spr2n64.build(a.valve, a.out, allmaps)
         build_chapters(a, maps)
         build_arrivals(a, maps)
@@ -367,7 +375,7 @@ def main():
 
     build_models(a, allmaps)
     build_players(a, h2h_players)
-    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2))
+    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2), lang=a.lang_text_dir)
     spr2n64.build(a.valve, a.out, allmaps)
     build_chapters(a, maps)
     build_arrivals(a, maps)
@@ -379,8 +387,10 @@ def main():
 # Everything is converted to libdragon's ULC codec (an RSP-decoded transform codec): it is the
 # only one small enough for ~85 minutes of speech and effects plus ~55 minutes of music on a
 # 64 MB cartridge. Voices keep their original 11 kHz rate; music is mono 22 kHz.
-VOICE_DIRS = {'scientist', 'barney', 'vox', 'fvox', 'hgrunt', 'holo', 'gman', 'tride', 'nihilanth'}
+VOICE_DIRS = {'scientist', 'barney', 'vox', 'fvox', 'hgrunt', 'holo', 'gman', 'tride', 'nihilanth', 'sentences'}
 Q_VOICE, Q_SFX, Q_MUSIC = 55, 65, 50
+Q_SENTENCE = 45
+ROM_OVERHEAD = 1280 * 1024   # the engine, symbols and filesystem headers on top of the converted files, with a margin
 
 
 def wav_loop_start(path):
@@ -424,6 +434,71 @@ def _conv_one(job):
     return src, r.returncode, r.stderr.strip()[:300]
 
 
+# Steam languages written with more than one byte a letter: the HUD font (one byte a letter, from the
+# language's own gfx.wad) can't show them, so their text stays English. The others' titles.txt use
+# their own code page, which their own font matches
+NONLATIN = ('japanese', 'koreana', 'schinese', 'tchinese', 'thai', 'vietnamese')
+
+
+def language_dir(valve, lang):
+    """the folder of a Steam game language (valve_spanish ...), or None for English"""
+    if not lang or lang.lower() in ('english', 'none', ''):
+        return None
+    if os.path.isdir(lang):
+        return lang
+    d = ui2n64.find_ci(os.path.dirname(os.path.abspath(valve)), 'valve_' + lang.lower())
+    if not d:
+        raise FileNotFoundError('no valve_%s folder next to %s: set Half-Life to that language in Steam '
+                                '(Properties -> General -> Language) so Steam downloads it' % (lang.lower(), valve))
+    return d
+
+
+def lang_file(a, *parts):
+    """a file of the game, from the language folder when it has its own copy"""
+    p = ui2n64.find_ci(a.lang_dir, *parts) if getattr(a, 'lang_dir', None) else None
+    return p or os.path.join(a.valve, *parts)
+
+
+def sentence_files(path):
+    """the sound files (lower case, relative to sound/) a sentences.txt uses (sound.c sentence_words)"""
+    used = set()
+    for line in open(path, encoding='latin-1', errors='replace'):
+        line = line.split('//')[0].strip()
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            continue
+        text = re.sub(r'\([^)]*\)', ' ', parts[1])
+        first = text.split()[0] if text.split() else ''
+        d = 'vox/'
+        if '/' in first:
+            d = first[:first.rfind('/') + 1]
+            text = text[text.find(first) + len(d):]
+        for w in re.split(r'[\s,.]+', text):
+            if w:
+                used.add(((w if '/' in w else d + w) + '.wav').lower())
+    return used
+
+
+# the word libraries the English sentences are built from; a translation records whole sentences
+# (sound/sentences/), so with a language only the words still used are kept
+WORD_DIRS = ('vox', 'fvox', 'hgrunt')
+CODE_SOUNDS = ('hgrunt/gr_',)   # played by the engine itself (npc.c: the soldiers' pain, death, gun)
+
+
+def map_sounds(valve):
+    """every .wav the maps' entities name (ambient_generic messages, button and door sounds ...)"""
+    used = set()
+    for f in glob.glob(os.path.join(valve, 'maps', '*.bsp')):
+        try:
+            d = open(f, 'rb').read()
+            o, l = struct.unpack_from('<ii', d, 4)
+            for m in re.findall(r'"([^"]+\.wav)"', d[o:o + l].decode('latin-1')):
+                used.add(m.replace('\\', '/').lower().lstrip('*!'))
+        except (OSError, struct.error):
+            pass
+    return used
+
+
 def build_sounds(a):
     import wave
     snd_in = os.path.join(a.valve, 'sound')
@@ -431,11 +506,30 @@ def build_sounds(a):
     conv = shutil.which('audioconv64') or os.path.join(os.environ.get('N64_INST', '/opt/libdragon'), 'bin', 'audioconv64')
     os.makedirs(outdir, exist_ok=True)
     for t in ('materials.txt', 'sentences.txt'):
-        if os.path.exists(os.path.join(snd_in, t)):
-            shutil.copy(os.path.join(snd_in, t), os.path.join(outdir, t))
+        src = lang_file(a, 'sound', t)
+        if os.path.exists(src):
+            shutil.copy(src, os.path.join(outdir, t))
+    # the sounds: valve's, with the language folder's in place of (and besides) them. With a
+    # language, the announcer's and the suit's word libraries (vox/, fvox/) keep only the words its
+    # sentences.txt still uses: the translations record whole sentences instead (sound/sentences/)
+    files = {}
+    for f in glob.glob(os.path.join(snd_in, '**', '*.wav'), recursive=True):
+        files[os.path.relpath(f, snd_in).replace(os.sep, '/').lower()] = f
+    lang_snd = ui2n64.find_ci(a.lang_dir, 'sound') if getattr(a, 'lang_dir', None) else None
+    if lang_snd:
+        n = 0
+        for f in glob.glob(os.path.join(lang_snd, '**', '*.wav'), recursive=True):
+            files[os.path.relpath(f, lang_snd).replace(os.sep, '/').lower()] = f
+            n += 1
+        used = sentence_files(os.path.join(outdir, 'sentences.txt')) | map_sounds(a.valve)
+        drop = [k for k in files if k.split('/')[0] in WORD_DIRS and k not in used
+                and not any(k.startswith(c) for c in CODE_SOUNDS)]
+        for k in drop:
+            del files[k]
+        print('language: %d sounds of its own, %d unused announcer/suit words left out' % (n, len(drop)))
     jobs = []
-    for f in sorted(glob.glob(os.path.join(snd_in, '**', '*.wav'), recursive=True)):
-        rel = os.path.relpath(f, snd_in)
+    for rel_l, f in sorted(files.items()):
+        rel = rel_l.replace('/', os.sep)
         top = rel.split(os.sep)[0].lower()
         try:
             w = wave.open(f)
@@ -445,6 +539,8 @@ def build_sounds(a):
             print('skipping unreadable', rel)
             continue
         q = Q_VOICE if top in VOICE_DIRS else Q_SFX
+        if top == 'sentences':
+            q = Q_SENTENCE   # a translation's recorded announcements: the room they take decides if it fits
         opts = ['--wav-mono', '--wav-compress', 'ulc,quality=%d' % q]
         if rate > 22050:
             opts += ['--wav-resample', '22050']
@@ -478,6 +574,27 @@ def build_sounds(a):
         return sum(os.path.getsize(os.path.join(r, x)) for r, _, fs in os.walk(d) for x in fs)
     print('sounds: %d/%d converted; sound %.1f MB, music %.1f MB' % (
         ok, len(jobs), du(outdir) / 1048576, du(os.path.join(a.out, 'music')) / 1048576 if os.path.isdir(os.path.join(a.out, 'music')) else 0))
+    # A translation's speech can take more room than the English it replaces: if everything no
+    # longer fits on a 64 MB cartridge, compress the language's voice recordings harder, step by
+    # step, until it does (the ROM is the converted files plus about 1 MB of engine)
+    if getattr(a, 'lang_dir', None) and lang_snd:
+        budget = int(os.environ.get('HL64_FS_BUDGET', 64 * 1048576 - ROM_OVERHEAD))   # (the variable: tests)
+        lang_jobs = [j for j in jobs if os.path.abspath(j[1]).startswith(os.path.abspath(lang_snd))
+                     and os.path.relpath(j[1], lang_snd).replace(os.sep, '/').split('/')[0].lower() in VOICE_DIRS]
+        for q in (40, 30, 22, 15):
+            total = du(a.out)
+            if total <= budget:
+                break
+            print('language: the game data is %.2f MB, over the %.2f MB that fit: compressing its speech harder (quality %d)' % (
+                total / 1048576, budget / 1048576, q))
+            redo = [(c, src, d, [o if not o.startswith('ulc,') else 'ulc,quality=%d' % q for o in opts]) for c, src, d, opts in lang_jobs]
+            with Pool(a.j) as pool:
+                for src, rc, err in pool.imap_unordered(_conv_one, redo, chunksize=8):
+                    if rc != 0:
+                        print('audioconv64 failed for', src, err)
+        total = du(a.out)
+        print('language: game data %.2f MB of %.2f MB%s' % (total / 1048576, budget / 1048576,
+              '' if total <= budget else ' -- STILL TOO BIG: build without Head-To-Head, or in English'))
 
 
 if __name__ == '__main__':
