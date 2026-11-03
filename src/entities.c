@@ -3341,6 +3341,23 @@ void ents_think(float dt)
             }
             break;
         case ENT_TRIGGER_HURT:
+            if (e->model > 0 && e->active) {
+                // CTriggerHurt::RadiationThink: a radiation trigger tells the player how far away it
+                // is, for the Geiger counter (from the middle of its box to the eye)
+                static uint8_t rad[MAX_ENTITIES];   // 0 not known yet, 1 no, 2 radiation
+                static int rad_gen = -1;
+                if (rad_gen != ents_gen) { memset(rad, 0, sizeof(rad)); rad_gen = ents_gen; }
+                if (!rad[i]) rad[i] = ((int)ent_float(e, "damagetype", 0) & DMG_RADIATION) ? 2 : 1;
+                if (rad[i] == 2) {
+                    extern void player_geiger_range(float r);
+                    bmodel_t *bm = &world.bmodels[e->model];
+                    float eye[3];
+                    player_get_eye(eye);
+                    float d2 = 0;
+                    for (int k = 0; k < 3; k++) { float c = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f - eye[k]; d2 += c * c; }
+                    player_geiger_range(sqrtf(d2));
+                }
+            }
             if (e->model > 0 && !(e->spawnflags & 8 /* SF_TRIGGER_HURT_NO_CLIENTS */) && e->active &&
                 g_time >= e->nextthink && player_touches(e, porg, pmins, pmaxs)) {
                 // CTriggerHurt::HurtTouch: dmg is per second, applied every half second

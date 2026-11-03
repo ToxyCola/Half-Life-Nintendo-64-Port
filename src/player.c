@@ -34,6 +34,15 @@ static PCTX float pain_alpha[4];   // front, right, back, left
 static PCTX float dead_time;
 static PCTX float flash_time;
 static PCTX float lastdmg_time;
+// CHudHealth's hazard icons (320hud4: dmg_poison, dmg_chem, dmg_cold, dmg_drown, dmg_heat, dmg_gas,
+// dmg_rad, dmg_shock): each shows, pulsing, for DMG_IMAGE_LIFE (2 s) after a hit of its kind
+static const int dmg_bits[8] = {DMG_POISON, DMG_ACID, DMG_FREEZE | DMG_SLOWFREEZE, DMG_DROWN,
+                                DMG_BURN | DMG_SLOWBURN, DMG_NERVEGAS, DMG_RADIATION, DMG_SHOCK};
+static PCTX float dmg_expire[8];
+static PCTX float drown_taken, drown_restore_next;   // drowning damage given back on surfacing
+static PCTX float geiger_range = 1000, geiger_next, geiger_tick;
+// a radiation trigger_hurt reports how far the player is from it (CTriggerHurt::RadiationThink)
+void player_geiger_range(float r) { if (r < geiger_range) geiger_range = r; }
 
 float player_max_health(void) { return 100; }
 bool player_alive(void) { return player.health > 0 && !player.dead; }
@@ -160,6 +169,8 @@ void player_take_damage(float dmg, int type, const float *from, int attacker_ent
     }
     player.health -= (int)dmg;
     lastdmg_time = game_time();
+    for (int k = 0; k < 8; k++) if (type & dmg_bits[k]) dmg_expire[k] = lastdmg_time + 2.0f;
+    if (type & DMG_DROWN) drown_taken += (int)dmg;
     // view kick and the pain indicator for the direction it came from
     float p[3];
     pm_get_punch(p);
@@ -321,6 +332,38 @@ void player_think(float dt)
         if (air_finished && now > air_finished) snd_emit(0, CHAN_VOICE, "player/pl_wade1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
         air_finished = 0;
         drown_dmg = 0;
+        // DMG_DROWNRECOVER: out of the water, the health drowning took comes back, up to 10 every
+        // 2 seconds (CBasePlayer::CheckTimeBasedDamage, itbd_DrownRecover)
+        if (drown_taken > 0 && now > drown_restore_next) {
+            float g = drown_taken < 10 ? drown_taken : 10;
+            if (drown_restore_next > 0) { player_take_health(g, DMG_GENERIC); drown_taken -= g; }
+            drown_restore_next = now + 2;
+        }
+    }
+    if (pm_get_waterlevel() == 3) drown_restore_next = 0;
+    // the Geiger counter (cl_dll/geiger.cpp): clicks, faster and louder the nearer a radiation
+    // source (PC: checked every frame at 60+ fps; here at a steady 60 a second)
+    if (now > geiger_next) { geiger_next = now + 0.25f; geiger_tick = geiger_range; geiger_range = 1000; }
+    {
+        static PCTX float acc;
+        acc += dt;
+        while (acc > 1.0f / 60) {
+            acc -= 1.0f / 60;
+            float r = geiger_tick;
+            if (r >= 1000 || r <= 0 || r > 800) continue;
+            static const struct { float r; int pct; float vol; } gt[] = {{600, 2, 0.4f}, {500, 4, 0.5f}, {400, 8, 0.6f}, {300, 8, 0.7f},
+                {200, 28, 0.78f}, {150, 40, 0.8f}, {100, 60, 0.85f}, {75, 80, 0.9f}, {50, 90, 0.95f}, {0, 95, 1.0f}};
+            int k = 0;
+            while (k < 9 && !(r > gt[k].r)) k++;
+            int pct = gt[k].pct; float vol = gt[k].vol;
+            if ((rand() & 127) < pct || (rand() & 127) < pct) {
+                vol = vol * (rand() & 127) / 255.0f + 0.25f;
+                char snd[32];
+                int j = (r > 400 ? rand() % 3 : 2 + rand() % 4) + 1;   // the slower clicks far away, all six near
+                snprintf(snd, sizeof(snd), "player/geiger%d.wav", j > 6 ? 6 : j);
+                snd_emit(0, CHAN_STATIC, snd, vol, ATTN_NORM, PITCH_NORM, NULL);
+            }
+        }
     }
     // flashlight battery (FLASH_DRAIN_TIME 1.2, FLASH_CHARGE_TIME 0.2)
     if (now > flash_time) {
@@ -395,6 +438,20 @@ void player_draw_hud(float dt)
     int full = (int)(20 * player.armor / 100);
     if (full > 0) hud_icon2(ax, y - 3 + (20 - full), 20, 52 + (20 - full), 20, full);
     hud_number(ax + 20, y, (int)player.armor, 3, true);
+    // hazard icons (CHudHealth::DrawDamage): the active ones up the left side above the health,
+    // pulsing in the HUD colour
+    {
+        float t = game_time();
+        int yb = y - 38;
+        float a = fabsf(sinf(t * 2)) * 255;
+        for (int k = 0; k < 8; k++) {
+            if (dmg_expire[k] <= t) continue;
+            extern void hud_icon4(int x, int y, int sx, int sy, int w, int h);
+            font_color(col(a, false));
+            hud_icon4(HUD_SAFE_X + 4, yb, k * 32, 0, 32, 32);
+            yb -= 32;
+        }
+    }
     // flashlight (CHudFlashlight::Draw): the empty casing, the beam while it's on, and the full
     // casing over it as wide as the battery's charge -- red below 20 %
     {

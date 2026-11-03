@@ -2802,7 +2802,7 @@ void weapons_draw_effects(void)
 }
 
 // ------------------------------------------------------------------ HUD (cl_dll/ammo.cpp)
-static image_t hud1, hud2, xhair;
+static image_t hud1, hud2, hud4, xhair;
 static bool hud_loaded;
 static void hud_load(void);
 void player_hud_init(void);
@@ -2834,6 +2834,7 @@ static void hud_load(void)
     hud_loaded = true;
     image_load(&hud1, "rom:/ui/hud1.sprite");
     image_load(&hud2, "rom:/ui/hud2.sprite");
+    image_load(&hud4, "rom:/ui/hud4.sprite");
     image_load(&xhair, "rom:/ui/crosshairs.sprite");
 }
 
@@ -2855,6 +2856,7 @@ int hud_number(int x, int y, int value, int digits, bool draw_zero)
 }
 
 void hud_icon2(int x, int y, int sx, int sy, int w, int h) { hud_load(); image_draw(&hud2, x, y, sx, sy, w, h); }
+void hud_icon4(int x, int y, int sx, int sy, int w, int h) { hud_load(); image_draw(&hud4, x, y, sx, sy, w, h); }
 
 static color_t hud_color(float a)
 {

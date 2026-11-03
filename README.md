@@ -7,7 +7,7 @@ lighting, played with Valve's own player-movement code, running on stock N64 har
 Expansion Pak. It also has the PlayStation 2 version's two-player split-screen **Head-To-Head**
 mode, built from your own copy of the PS2 game.
 
-**Current release: 1.3.1** ([what's new](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
+**Current release: 1.3.2** ([what's new](#whats-new-in-132), [1.3.1](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
 [Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)). Notes for
 earlier versions are on their release pages.
@@ -24,6 +24,14 @@ It is built from:
 * **A new N64 engine** written for this port, because the GoldSrc engine (`hw.dll`) has never
   been released as source. It uses [libdragon](https://github.com/DragonMinded/libdragon) and
   [tiny3d](https://github.com/HailToDodongo/tiny3d).
+
+## What's new in 1.3.2
+
+* **Hazard icons on the HUD,** as on PC: heat, cold, drowning (O2), radiation, chemicals,
+  poison, nerve gas and shock each show their pulsing icon above the health while they hurt you.
+* **Drowning, as on PC:** 12 seconds of air under water, then damage that grows every second;
+  once you surface, the health drowning took comes back (up to 10 every 2 seconds).
+* **The Geiger counter:** radiation clicks faster and louder the closer you are to it.
 
 ## What's new in 1.3.1
 
@@ -113,7 +121,7 @@ It is built from:
 | Scripted sequences | `dlls/scripted.cpp`: a scene waits (retrying every second) until its character is free, the character walks or runs to its mark along the node graph, turns, plays its animation and fires its events; the scene's target fires when the animation ends |
 | Talking characters | `talkmonster.cpp`: +use makes a scientist or Barney follow you (or wait), pre-disaster staff decline, greetings, idle chatter, questions and answers between characters, remarks about your health, scientists heal you when you're below half health, getting shot makes them angry |
 | Speech and music | All of `sentences.txt` (the engine's VOX system: word lists, per-word pitch/volume/start/end, groups), scripted_sentence, speaker announcements, ambient_generic, env_message sounds, the HEV suit voice, and the CD-audio music (trigger_cdaudio / target_cdaudio) from the game's MP3s. 3D panning and distance falloff follow the engine's `S_Spatialize`. Audio is compressed with libdragon's ULC codec |
-| HEV suit | Picking up the suit starts the HEV logon (with its music in Anomalous Materials), turns on the HUD, and unlocks the map logic that waits for it. Health, armour, batteries, medkits, wall health and HEV chargers, fall damage, drowning, trigger_hurt, the suit's damage reports, death and restart |
+| HEV suit | Picking up the suit starts the HEV logon (with its music in Anomalous Materials), turns on the HUD, and unlocks the map logic that waits for it. Health, armour, batteries, medkits, wall health and HEV chargers, fall damage, drowning (with the health coming back after you surface), trigger_hurt, the hazard icons (heat, cold, O2, radiation, chemicals...), the Geiger counter, the flashlight battery, the suit's damage reports, death and restart |
 | Weapons | All 14 weapons with their first-person models and animations, ammo, reloads and alternate fire: crowbar, glock, .357, MP5 + grenades, shotgun, crossbow, RPG (laser-guided), gauss (charged shot), egon, hivehand, hand grenades, satchels, trip mines, snarks. Placed where the maps put them, in crates (`func_breakable` spawn objects) and dropped by soldiers. Autoaim as in single player. HUD ammo counters, weapon selection, crosshairs, damage indicators |
 | Combat | Monsters see, hear and chase you along the node graph, and use their own attack animations: zombie claws, headcrab leaps, houndeye blasts, vortigaunt zaps, soldiers' MP5s, shotguns and grenades (they take cover when hurt), alien grunt hornets, bullsquid spit, gargantua flames, turrets, barnacles, tentacles. Monstermakers bring in reinforcements. Barney fights alongside you, scientists flee. Damage, pain, deaths. Bodies (killed monsters and the maps' placed corpses) take hits like on PC: bullets draw blood, the crowbar and explosions gib them (`DeadTakeDamage`). Values come from the game's `skill.cfg` (difficulty from the New Game dialog) |
 | Bosses | Nihilanth (arenas, teleport balls, crystal recharging, opening head), Gonarch (node path with per-node health, mortar, baby headcrabs), Apache (path, strafing, rockets), Osprey (drops soldiers) |

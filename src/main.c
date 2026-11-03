@@ -1666,6 +1666,10 @@ int main(void)
         { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 0.5f; int k = ents_find_targetname(TESTENTLOG, 0);
             if (k >= 0) debugf("ENT %s %.0f %.0f %.0f state %d ang %.0f %.0f %.0f\n", TESTENTLOG, entities[k].origin[0], entities[k].origin[1], entities[k].origin[2], entities[k].state, entities[k].angles[0], entities[k].angles[1], entities[k].angles[2]); } }
 #endif
+#ifdef TESTHP
+        { static float nx; if (in_game && game_clock > nx) { nx = game_clock + 1; extern int pm_get_waterlevel(void);
+            debugf("HP %.0f armor %.0f water %d\n", player.health, player.armor, pm_get_waterlevel()); } }
+#endif
 #ifdef TESTDMGENT
         { static bool done; if (!done && in_game && game_clock > 10) { done = true; int k = ents_find_targetname(TESTDMGENT, 0);
             extern void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir);

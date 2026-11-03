@@ -133,7 +133,10 @@ def build(valve, out, tmp, h2h=False, lang=None):
     hud.save(png)
     mksprite(png, ui)
     # health / armour / ammo numbers and icons, weapon icons, weapon selection
-    for n, out_name in (('320hud1', 'hud1'), ('320hud2', 'hud2')):
+    # (320hud4: the hazard icons -- poison, chemical, cold, drowning, heat, gas, radiation, shock)
+    for n, out_name in (('320hud1', 'hud1'), ('320hud2', 'hud2'), ('320hud4', 'hud4')):
+        if not os.path.exists(os.path.join(valve, 'sprites', n + '.spr')):
+            continue
         _, frames = spr.read_spr(os.path.join(valve, 'sprites', n + '.spr'))
         png = os.path.join(tmp, out_name + '.png')
         frames[0].convert('L').save(png)
