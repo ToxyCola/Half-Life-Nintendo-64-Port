@@ -7,7 +7,7 @@ lighting, played with Valve's own player-movement code, running on stock N64 har
 Expansion Pak. It also has the PlayStation 2 version's two-player split-screen **Head-To-Head**
 mode, built from your own copy of the PS2 game.
 
-**Current release: 1.3.2** ([what's new](#whats-new-in-132), [1.3.1](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
+**Current release: 1.3.3** ([what's new](#whats-new-in-133), [1.3.2](#whats-new-in-132), [1.3.1](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
 [Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)). Notes for
 earlier versions are on their release pages.
@@ -24,6 +24,10 @@ It is built from:
 * **A new N64 engine** written for this port, because the GoldSrc engine (`hw.dll`) has never
   been released as source. It uses [libdragon](https://github.com/DragonMinded/libdragon) and
   [tiny3d](https://github.com/HailToDodongo/tiny3d).
+
+## What's new in 1.3.3
+
+- The Builder now compiles ROMs under 64 MB.
 
 ## What's new in 1.3.2
 

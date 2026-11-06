@@ -347,6 +347,14 @@ def main():
     ap.add_argument('--ps2', help='a copy of the PS2 disc\'s files: adds the Head-To-Head maps and characters')
     a = ap.parse_args()
     preflight(a.valve)
+    if not (a.models_only or a.ui_only or a.maps_only or a.sounds_only) and os.path.isdir(a.out):
+        # a full conversion starts from an empty folder: files an earlier build left there (its
+        # Head-To-Head maps, another language's speech ...) would otherwise go into this ROM too
+        import stat
+        def _force(func, path, exc):
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        shutil.rmtree(a.out, onerror=_force)
     a.lang_dir = language_dir(a.valve, a.lang)
     # the on-screen text too, except for the languages the one-byte font can't show
     a.lang_text_dir = a.lang_dir if a.lang_dir and not any(
@@ -620,27 +628,51 @@ def build_sounds(a):
         return sum(os.path.getsize(os.path.join(r, x)) for r, _, fs in os.walk(d) for x in fs)
     print('sounds: %d/%d converted; sound %.1f MB, music %.1f MB' % (
         ok, len(jobs), du(outdir) / 1048576, du(os.path.join(a.out, 'music')) / 1048576 if os.path.isdir(os.path.join(a.out, 'music')) else 0))
-    # A translation's speech can take more room than the English it replaces: if everything no
-    # longer fits on a 64 MB cartridge, compress the language's voice recordings harder, step by
-    # step, until it does (the ROM is the converted files plus about 1 MB of engine)
-    if getattr(a, 'lang_dir', None) and lang_snd:
-        budget = int(os.environ.get('HL64_FS_BUDGET', 64 * 1048576 - ROM_OVERHEAD))   # (the variable: tests)
-        lang_jobs = [j for j in jobs if os.path.abspath(j[1]).startswith(os.path.abspath(lang_snd))
-                     and os.path.relpath(j[1], lang_snd).replace(os.sep, '/').split('/')[0].lower() in VOICE_DIRS]
-        for q in (40, 30, 22, 15):
-            total = du(a.out)
-            if total <= budget:
-                break
-            print('language: the game data is %.2f MB, over the %.2f MB that fit: compressing its speech harder (quality %d)' % (
-                total / 1048576, budget / 1048576, q))
-            redo = [(c, src, d, [o if not o.startswith('ulc,') else 'ulc,quality=%d' % q for o in opts]) for c, src, d, opts in lang_jobs]
-            with Pool(a.j) as pool:
-                for src, rc, err in pool.imap_unordered(_conv_one, redo, chunksize=8):
-                    if rc != 0:
-                        print('audioconv64 failed for', src, err)
+    fit_budget(a, jobs, lang_snd, du)
+
+
+def fit_budget(a, jobs, lang_snd, du):
+    """Everything has to fit a 64 MB cartridge (the ROM is the converted files plus about 1 MB of
+    engine). A translation, a mod or custom maps can take more room than the game alone: while the
+    data is over, re-encode sounds harder, step by step: a translation's speech first, then all
+    speech, effects and music, lower each round"""
+    budget = int(os.environ.get('HL64_FS_BUDGET', 64 * 1048576 - ROM_OVERHEAD))   # (the variable: tests)
+    if du(a.out) <= budget:
+        return
+
+    def group(j):
+        src = os.path.abspath(j[1])
+        if src.lower().endswith('.mp3') or os.path.basename(j[2]).lower() == 'music':
+            return 'music'
+        if lang_snd and src.startswith(os.path.abspath(lang_snd)):
+            top = os.path.relpath(src, lang_snd).replace(os.sep, '/').split('/')[0].lower()
+            return 'lang' if top in VOICE_DIRS else 'sfx'
+        top = os.path.relpath(src, os.path.join(a.valve, 'sound')).replace(os.sep, '/').split('/')[0].lower()
+        return 'voice' if top in VOICE_DIRS else 'sfx'
+    groups = {}
+    for jb in jobs:
+        groups.setdefault(group(jb), []).append(jb)
+    steps = [('lang', 40), ('lang', 30), ('voice', 40), ('sfx', 50), ('music', 38), ('lang', 22), ('voice', 30),
+             ('sfx', 38), ('music', 28), ('lang', 15), ('voice', 22), ('sfx', 28), ('music', 20), ('voice', 15), ('sfx', 18),
+             ('music', 12), ('lang', 10), ('voice', 10), ('sfx', 10)]
+    for g, q in steps:
         total = du(a.out)
-        print('language: game data %.2f MB of %.2f MB%s' % (total / 1048576, budget / 1048576,
-              '' if total <= budget else ' -- STILL TOO BIG: build without Head-To-Head, or in English'))
+        if total <= budget:
+            break
+        if not groups.get(g):
+            continue
+        print('size: the game data is %.2f MB, over the %.2f MB that fit: compressing %s harder (quality %d)' % (
+            total / 1048576, budget / 1048576, {'lang': 'the translation\'s speech', 'voice': 'speech', 'sfx': 'sound effects', 'music': 'music'}[g], q))
+        redo = [(c, src, d, [o if not o.startswith('ulc,') else 'ulc,quality=%d' % q for o in opts]) for c, src, d, opts in groups[g]]
+        with Pool(a.j) as pool:
+            for src, rc, err in pool.imap_unordered(_conv_one, redo, chunksize=8):
+                if rc != 0:
+                    print('audioconv64 failed for', src, err)
+    total = du(a.out)
+    print('size: game data %.2f MB of %.2f MB' % (total / 1048576, budget / 1048576))
+    if total > budget:   # never make a ROM bigger than a cartridge
+        sys.exit('The game data doesn\'t fit a 64 MB cartridge even with the sounds compressed as far as they go: '
+                 'build it without Head-To-Head.')
 
 
 if __name__ == '__main__':
