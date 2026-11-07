@@ -308,6 +308,9 @@ static int read_text(const char *path, char *buf, int max)
 static char g_valve[MAX_PATH], g_outdir[MAX_PATH], g_tempdir[MAX_PATH], g_rom[MAX_PATH];
 static char g_ps2[MAX_PATH];   // the PS2 disc's files for Head-To-Head (optional, "" = none)
 static char g_lang[32];        // the game language (spanish ...), "" = English
+static char g_mod[MAX_PATH];   // a mod's folder (liblist.gam), "" = Half-Life itself
+static char g_exp[16];         // an expansion: "bshift" (Blue Shift), "gearbox" (Opposing Force), "" = none
+static char g_custom[MAX_PATH];   // a folder of custom .bsp maps, "" = none
 static int g_clean;
 
 static void set_status(const char *s) { SetWindowTextA(g_status, s); }
@@ -342,7 +345,7 @@ static DWORD WINAPI build_thread(LPVOID unused)
     char fsdir[MAX_PATH], stamp[MAX_PATH], want[MAX_PATH * 2], have[MAX_PATH * 2] = "";
     snprintf(fsdir, sizeof fsdir, "%s\\filesystem", g_work);
     snprintf(stamp, sizeof stamp, "%s\\converted.txt", g_work);
-    snprintf(want, sizeof want, "%s\n%s\n%s\n%s\n", HL64_VERSION, g_valve, g_ps2, g_lang);
+    snprintf(want, sizeof want, "%s\n%s\n%s\n%s\n%s\n%s\n%s\n", HL64_VERSION, g_valve, g_ps2, g_lang, g_mod, g_custom, g_exp);
     int reuse = !g_clean && read_text(stamp, have, sizeof have) && !strcmp(have, want) && dir_exists(fsdir);
     if (reuse) {
         logf_("[1/3] Game data already converted by a previous run (tick \"Convert everything again\" to redo it).\r\n");
@@ -377,6 +380,21 @@ static DWORD WINAPI build_thread(LPVOID unused)
             size_t l = strlen(cmd);
             snprintf(cmd + l, sizeof cmd - l, " --ps2 \"%s\"", g_ps2);
             logf_("      With Head-To-Head from the PS2 files in %s\r\n\r\n", g_ps2);
+        }
+        if (g_mod[0]) {   // the mod's files over the game's, as on PC
+            size_t l = strlen(cmd);
+            snprintf(cmd + l, sizeof cmd - l, " --mod \"%s\"", g_mod);
+            logf_("      Experimental: building the mod in %s, with the PC version's menu\r\n\r\n", g_mod);
+        }
+        if (g_exp[0]) {   // Blue Shift or Opposing Force, from its folder next to valve
+            size_t l = strlen(cmd);
+            snprintf(cmd + l, sizeof cmd - l, " --expansion %s", g_exp);
+            logf_("      Experimental: building %s, with its own menu\r\n\r\n", !strcmp(g_exp, "bshift") ? "Blue Shift" : "Opposing Force");
+        }
+        if (g_custom[0]) {
+            size_t l = strlen(cmd);
+            snprintf(cmd + l, sizeof cmd - l, " --custom \"%s\"", g_custom);
+            logf_("      Experimental: with the map loader's maps in %s\r\n\r\n", g_custom);
         }
         if (run(cmd) != 0) fail("converting the game data failed (see the messages above).%s", "");
         write_text(stamp, want);
@@ -414,7 +432,7 @@ static DWORD WINAPI build_thread(LPVOID unused)
     logf_("\r\nDone: %s (%.1f MB)\r\n", g_rom, mb);
     if (mb > 64.0)
         logf_("\r\nWARNING: the ROM is larger than 64 MB, the most an N64 cartridge (and a flashcart) can hold.\r\n"
-              "Build it again with English chosen as the language, or without Head-To-Head, to make it fit.\r\n");
+              "Build it again with English chosen as the language, or without Head-To-Head or the map loader, to make it fit.\r\n");
     logf_("Play it in ares, gopher64 or simple64 with the Expansion Pak on and the save type set to SRAM,\r\n"
           "or copy it to a 64 MB-capable flashcart. Keep it to yourself: it contains Half-Life's game data.\r\n");
     set_progress(100, 0);
@@ -423,7 +441,13 @@ static DWORD WINAPI build_thread(LPVOID unused)
 }
 
 // ------------------------------------------------------------------ the window
-enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG, ID_PS2_ON, ID_PS2, ID_PS2_BR, ID_LANG };
+enum { ID_VALVE = 101, ID_VALVE_BR, ID_OUT, ID_OUT_BR, ID_TEMP_ON, ID_TEMP, ID_TEMP_BR, ID_CLEAN, ID_BUILD, ID_OPEN, ID_LOG, ID_PS2_ON, ID_PS2, ID_PS2_BR, ID_LANG,
+       ID_MOD, ID_MOD_BR, ID_CUST_ON, ID_CUST, ID_CUST_BR, ID_TAB, ID_GAME_HL, ID_GAME_MOD, ID_GAME_BS, ID_GAME_OF };
+// the Experimental tab: the map loader's maps, and one of: a mod, Blue Shift or Opposing Force
+static HWND h_tab, h_mod, h_mod_br, h_cust_on, h_cust, h_cust_br, h_exp_note, h_game_lbl, h_game[4];
+static HWND h_lbl_valve, h_lbl_out;
+static const char *const game_keys[4] = {"halflife", "mod", "bshift", "gearbox"};
+static int g_page;
 static HWND h_valve, h_out, h_temp_on, h_temp, h_temp_br, h_clean, h_build, h_open, h_valve_br, h_out_br, h_ps2_on, h_ps2, h_ps2_br, h_lang, h_lang_lbl;
 
 // ---- the game's language: Steam keeps each language's speech and text in valve_<language>
@@ -532,6 +556,31 @@ static void browse(HWND edit, const char *title)
     CoTaskMemFree(pidl);
 }
 
+// the Experimental tab's choice of game: 0 Half-Life, 1 a mod, 2 Blue Shift, 3 Opposing Force
+static int chosen_game(void)
+{
+    for (int i = 1; i < 4; i++) if (SendMessageA(h_game[i], BM_GETCHECK, 0, 0) == BST_CHECKED) return i;
+    return 0;
+}
+static void set_game(int g)
+{
+    for (int i = 0; i < 4; i++) SendMessageA(h_game[i], BM_SETCHECK, i == g ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+// Blue Shift (bshift) and Opposing Force (gearbox) are installed next to valve
+static int expansion_installed(const char *key)
+{
+    char v[MAX_PATH], valve[MAX_PATH], path[MAX_PATH];
+    get_text(h_valve, v, sizeof v);
+    if (!resolve_valve(v, valve)) return 0;
+    snprintf(path, sizeof path, "%s\\..\\%s\\liblist.gam", valve, key);
+    return file_exists(path);
+}
+static void refresh_expansions(void)
+{
+    SetWindowTextA(h_game[2], expansion_installed("bshift") ? "Blue Shift" : "Blue Shift (not installed in this Half-Life folder)");
+    SetWindowTextA(h_game[3], expansion_installed("gearbox") ? "Opposing Force" : "Opposing Force (not installed in this Half-Life folder)");
+}
+
 static void save_settings(void)
 {
     char v[MAX_PATH], o[MAX_PATH], t[MAX_PATH];
@@ -544,6 +593,12 @@ static void save_settings(void)
     WritePrivateProfileStringA("builder", "ps2", t, g_settings);
     WritePrivateProfileStringA("builder", "ps2_on", SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_settings);
     WritePrivateProfileStringA("builder", "language", chosen_lang(), g_settings);
+    get_text(h_mod, t, sizeof t);
+    WritePrivateProfileStringA("builder", "mod", t, g_settings);
+    WritePrivateProfileStringA("builder", "game", game_keys[chosen_game()], g_settings);
+    get_text(h_cust, t, sizeof t);
+    WritePrivateProfileStringA("builder", "custom_maps", t, g_settings);
+    WritePrivateProfileStringA("builder", "custom_on", SendMessageA(h_cust_on, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_settings);
 }
 
 static void set_busy(int busy)
@@ -554,10 +609,17 @@ static void set_busy(int busy)
     EnableWindow(h_temp_on, !busy); EnableWindow(h_clean, !busy);
     int custom = SendMessageA(h_temp_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(h_temp, !busy && custom); EnableWindow(h_temp_br, !busy && custom);
-    int ps2 = SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    EnableWindow(h_ps2_on, !busy);
+    // a mod, Blue Shift or Opposing Force is built on its own: no Head-To-Head, map loader or language
+    int game = chosen_game(), alone = game != 0;
+    for (int i = 0; i < 4; i++) EnableWindow(h_game[i], !busy);
+    EnableWindow(h_mod, !busy && game == 1); EnableWindow(h_mod_br, !busy && game == 1);
+    int cust = !alone && SendMessageA(h_cust_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(h_cust_on, !busy && !alone);
+    EnableWindow(h_cust, !busy && cust); EnableWindow(h_cust_br, !busy && cust);
+    int ps2 = !alone && SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(h_ps2_on, !busy && !alone);
     EnableWindow(h_ps2, !busy && ps2); EnableWindow(h_ps2_br, !busy && ps2);
-    EnableWindow(h_lang, !busy);
+    EnableWindow(h_lang, !busy && !alone); EnableWindow(h_lang_lbl, !alone);
     SetWindowTextA(h_build, busy ? "Building..." : "Build ROM");
 }
 
@@ -580,8 +642,42 @@ static void start_build(void)
     if (!g_tempdir[0]) snprintf(g_tempdir, sizeof g_tempdir, "%s", g_default_temp);
     g_clean = SendMessageA(h_clean, BM_GETCHECK, 0, 0) == BST_CHECKED;
     snprintf(g_lang, sizeof g_lang, "%s", strcmp(chosen_lang(), "english") ? chosen_lang() : "");
+    g_mod[0] = g_custom[0] = g_exp[0] = 0;
+    int game = chosen_game();
+    if (game) g_lang[0] = 0;   // (the Build tab's language isn't used with a mod or an expansion)
+    if (game >= 2) {
+        snprintf(g_exp, sizeof g_exp, "%s", game_keys[game]);
+        if (!expansion_installed(g_exp)) {
+            char msg[400];
+            snprintf(msg, sizeof msg, "%s isn't in this Half-Life folder: there's no \"%s\" folder next to \"valve\".\n\n"
+                     "Install it from Steam (it goes in the same Half-Life folder), or choose Half-Life on the Experimental tab.",
+                     game == 2 ? "Blue Shift" : "Opposing Force", g_exp);
+            MessageBoxA(g_wnd, msg, "Half-Life 64 ROM builder", MB_ICONWARNING);
+            g_exp[0] = 0;
+            return;
+        }
+    }
+    if (game == 1) {
+        get_text(h_mod, g_mod, sizeof g_mod);
+        char lib[MAX_PATH];
+        snprintf(lib, sizeof lib, "%s\\liblist.gam", g_mod);
+        if (!g_mod[0] || !file_exists(lib)) {
+            MessageBoxA(g_wnd, "That folder isn't a Half-Life mod: it needs a liblist.gam.\n\n"
+                        "Choose the mod's own folder (the one next to \"valve\" with liblist.gam in it), or choose Half-Life on the Experimental tab.", "Half-Life 64 ROM builder", MB_ICONWARNING);
+            g_mod[0] = 0;
+            return;
+        }
+    }
+    if (!game && SendMessageA(h_cust_on, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+        get_text(h_cust, g_custom, sizeof g_custom);
+        if (!g_custom[0] || !dir_exists(g_custom)) {
+            MessageBoxA(g_wnd, "Choose the folder with the map loader's maps (.bsp files), or untick the map loader.", "Half-Life 64 ROM builder", MB_ICONWARNING);
+            g_custom[0] = 0;
+            return;
+        }
+    }
     g_ps2[0] = 0;
-    if (SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    if (!game && SendMessageA(h_ps2_on, BM_GETCHECK, 0, 0) == BST_CHECKED) {
         get_text(h_ps2, g_ps2, sizeof g_ps2);
         char pak[MAX_PATH];
         snprintf(pak, sizeof pak, "%s\\VALVE\\PAK0.PAK", g_ps2);   // (Windows paths ignore case)
@@ -608,22 +704,53 @@ static HWND mk(const char *cls, const char *text, DWORD style, int x, int y, int
     return c;
 }
 
+// the two tabs' controls (shown on their own tab only)
+static void show_page(int p)
+{
+    g_page = p;
+    HWND build[] = {h_lbl_valve, h_valve, h_valve_br, h_lbl_out, h_out, h_out_br, h_temp_on, h_temp, h_temp_br,
+                    h_ps2_on, h_ps2, h_ps2_br, h_lang_lbl, h_lang};
+    HWND exp[] = {h_exp_note, h_cust_on, h_cust, h_cust_br, h_game_lbl, h_game[0], h_game[1], h_mod, h_mod_br, h_game[2], h_game[3]};
+    for (int i = 0; i < (int)(sizeof build / sizeof build[0]); i++) ShowWindow(build[i], p == 0 ? SW_SHOW : SW_HIDE);
+    for (int i = 0; i < (int)(sizeof exp / sizeof exp[0]); i++) ShowWindow(exp[i], p == 1 ? SW_SHOW : SW_HIDE);
+    if (TabCtrl_GetCurSel(h_tab) != p) TabCtrl_SetCurSel(h_tab, p);
+}
+
+#define TAB_TOP 32
+#define PAGE_H 276   // (the tab control is only its row of tabs: the pages sit on the window under it)
 static void layout(int W, int H)
 {
-    int bw = 90, m = 12, ew = W - 2 * m - bw - 8, d = 54 + 52;   // d: the Head-To-Head and language rows
-    MoveWindow(h_valve, m, 54, ew, 24, TRUE);   MoveWindow(h_valve_br, W - m - bw, 53, bw, 26, TRUE);
-    MoveWindow(h_out, m, 108, ew, 24, TRUE);    MoveWindow(h_out_br, W - m - bw, 107, bw, 26, TRUE);
-    MoveWindow(h_temp, m, 162, ew, 24, TRUE);   MoveWindow(h_temp_br, W - m - bw, 161, bw, 26, TRUE);
-    MoveWindow(h_ps2_on, m, 192, W - 2 * m, 22, TRUE);
-    MoveWindow(h_ps2, m, 216, ew, 24, TRUE);    MoveWindow(h_ps2_br, W - m - bw, 215, bw, 26, TRUE);
-    MoveWindow(h_lang_lbl, m, 248, W - 2 * m, 18, TRUE);
-    MoveWindow(h_lang, m, 268, 260, 300, TRUE);
-    MoveWindow(h_clean, m, 194 + d, W - 2 * m - 300, 22, TRUE);
-    MoveWindow(h_open, W - m - 280, 192 + d, 140, 28, TRUE);
-    MoveWindow(h_build, W - m - 130, 192 + d, 130, 28, TRUE);
-    MoveWindow(g_prog, m, 230 + d, W - 2 * m, 18, TRUE);
-    MoveWindow(g_status, m, 252 + d, W - 2 * m, 20, TRUE);
-    MoveWindow(g_log, m, 276 + d, W - 2 * m, H - 276 - d - m, TRUE);
+    int bw = 90, m = 12, x = m, iw = W - 2 * m, ew = iw - bw - 8, bx = x + iw - bw, y = TAB_TOP + 34;
+    MoveWindow(h_tab, m, TAB_TOP, W - 2 * m, 26, TRUE);
+    // Build
+    MoveWindow(h_lbl_valve, x, y, iw, 18, TRUE);
+    MoveWindow(h_valve, x, y + 20, ew, 24, TRUE);       MoveWindow(h_valve_br, bx, y + 19, bw, 26, TRUE);
+    MoveWindow(h_lbl_out, x, y + 54, iw, 18, TRUE);
+    MoveWindow(h_out, x, y + 74, ew, 24, TRUE);         MoveWindow(h_out_br, bx, y + 73, bw, 26, TRUE);
+    MoveWindow(h_temp_on, x, y + 106, iw, 22, TRUE);
+    MoveWindow(h_temp, x, y + 130, ew, 24, TRUE);       MoveWindow(h_temp_br, bx, y + 129, bw, 26, TRUE);
+    MoveWindow(h_ps2_on, x, y + 164, iw, 22, TRUE);
+    MoveWindow(h_ps2, x, y + 188, ew, 24, TRUE);        MoveWindow(h_ps2_br, bx, y + 187, bw, 26, TRUE);
+    MoveWindow(h_lang_lbl, x, y + 222, iw, 18, TRUE);
+    MoveWindow(h_lang, x, y + 242, 260, 300, TRUE);
+    // Experimental
+    MoveWindow(h_exp_note, x, y, iw, 36, TRUE);
+    MoveWindow(h_cust_on, x, y + 42, iw, 22, TRUE);
+    MoveWindow(h_cust, x, y + 66, ew, 24, TRUE);        MoveWindow(h_cust_br, bx, y + 65, bw, 26, TRUE);
+    MoveWindow(h_game_lbl, x, y + 102, iw, 18, TRUE);
+    MoveWindow(h_game[0], x + 8, y + 122, iw - 8, 22, TRUE);
+    MoveWindow(h_game[1], x + 8, y + 146, iw - 8, 22, TRUE);
+    MoveWindow(h_mod, x + 26, y + 170, ew - 26, 24, TRUE); MoveWindow(h_mod_br, bx, y + 169, bw, 26, TRUE);
+    MoveWindow(h_game[2], x + 8, y + 202, iw - 8, 22, TRUE);
+    MoveWindow(h_game[3], x + 8, y + 226, iw - 8, 22, TRUE);
+    // under the tabs
+    int d = y + PAGE_H;
+    MoveWindow(h_clean, m, d + 2, W - 2 * m - 300, 22, TRUE);
+    MoveWindow(h_open, W - m - 280, d, 140, 28, TRUE);
+    MoveWindow(h_build, W - m - 130, d, 130, 28, TRUE);
+    MoveWindow(g_prog, m, d + 38, W - 2 * m, 18, TRUE);
+    MoveWindow(g_status, m, d + 60, W - 2 * m, 20, TRUE);
+    MoveWindow(g_log, m, d + 84, W - 2 * m, H - d - 84 - m, TRUE);
 }
 
 static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -632,13 +759,19 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CREATE: {
         g_wnd = hwnd;
         mk("STATIC", "Builds hl64.z64 from your own copy of Half-Life. No game data is included in this program.", SS_LEFT, 12, 10, 600, 18, 0);
-        mk("STATIC", "Half-Life folder (the one that contains \"valve\"):", SS_LEFT, 12, 34, 500, 18, 0);
+        h_tab = CreateWindowExA(0, WC_TABCONTROLA, "", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP, 0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)ID_TAB, GetModuleHandleA(NULL), NULL);
+        SendMessageA(h_tab, WM_SETFONT, (WPARAM)g_font, TRUE);
+        TCITEMA ti = {TCIF_TEXT};
+        ti.pszText = "Build"; TabCtrl_InsertItem(h_tab, 0, &ti);
+        ti.pszText = "Experimental"; TabCtrl_InsertItem(h_tab, 1, &ti);
+        // Build
+        h_lbl_valve = mk("STATIC", "Half-Life folder (the one that contains \"valve\"):", SS_LEFT, 0, 0, 10, 10, 0);
         h_valve = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_VALVE);
         h_valve_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_VALVE_BR);
-        mk("STATIC", "Save the ROM in:", SS_LEFT, 12, 88, 500, 18, 0);
+        h_lbl_out = mk("STATIC", "Save the ROM in:", SS_LEFT, 0, 0, 10, 10, 0);
         h_out = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_OUT);
         h_out_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_OUT_BR);
-        h_temp_on = mk("BUTTON", "Keep the temporary files somewhere else (optional; they take about 1.5 GB):", BS_AUTOCHECKBOX, 12, 138, 600, 22, ID_TEMP_ON);
+        h_temp_on = mk("BUTTON", "Keep the temporary files somewhere else (optional; they take about 1.5 GB):", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_TEMP_ON);
         h_temp = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_TEMP);
         h_temp_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_TEMP_BR);
         h_ps2_on = mk("BUTTON", "Add Head-To-Head from the PlayStation 2 version (optional): the folder with its disc's files:", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_PS2_ON);
@@ -646,6 +779,20 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         h_ps2_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_PS2_BR);
         h_lang_lbl = mk("STATIC", "Language (speech and on-screen text), from the languages your Half-Life install has:", SS_LEFT, 0, 0, 10, 10, 0);
         h_lang = mk("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0, 0, 10, 10, ID_LANG);
+        // Experimental
+        h_exp_note = mk("STATIC", "Experimental: these work, but not everything in them does yet. Building a mod, Blue Shift or "
+                        "Opposing Force leaves out Head-To-Head, the map loader and the language choice.", SS_LEFT, 0, 0, 10, 10, 0);
+        h_cust_on = mk("BUTTON", "Map loader: add custom maps (a folder of .bsp maps) to play from the menu and in Head-To-Head:", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_CUST_ON);
+        h_cust = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_CUST);
+        h_cust_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_CUST_BR);
+        h_game_lbl = mk("STATIC", "Game (one at a time):", SS_LEFT, 0, 0, 10, 10, 0);
+        h_game[0] = mk("BUTTON", "Half-Life", BS_RADIOBUTTON | WS_GROUP | WS_TABSTOP, 0, 0, 10, 10, ID_GAME_HL);
+        h_game[1] = mk("BUTTON", "A mod: its folder (the one with liblist.gam), with the PC version's menu:", BS_RADIOBUTTON, 0, 0, 10, 10, ID_GAME_MOD);
+        h_mod = mk("EDIT", "", ES_AUTOHSCROLL, 0, 0, 10, 10, ID_MOD);
+        h_mod_br = mk("BUTTON", "Browse...", BS_PUSHBUTTON, 0, 0, 10, 10, ID_MOD_BR);
+        h_game[2] = mk("BUTTON", "Blue Shift", BS_RADIOBUTTON, 0, 0, 10, 10, ID_GAME_BS);
+        h_game[3] = mk("BUTTON", "Opposing Force", BS_RADIOBUTTON, 0, 0, 10, 10, ID_GAME_OF);
+        SetWindowPos(h_tab, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);   // (the pages' controls draw over it)
         h_clean = mk("BUTTON", "Convert everything again (don't reuse the last run's game data)", BS_AUTOCHECKBOX, 0, 0, 10, 10, ID_CLEAN);
         h_open = mk("BUTTON", "Show the ROM", BS_PUSHBUTTON, 0, 0, 10, 10, ID_OPEN);
         ShowWindow(h_open, SW_HIDE);
@@ -659,7 +806,10 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     }
     case WM_SIZE: layout(LOWORD(lp), HIWORD(lp)); return 0;
-    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 640; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 500; return 0;
+    case WM_NOTIFY:
+        if (((NMHDR *)lp)->hwndFrom == h_tab && ((NMHDR *)lp)->code == TCN_SELCHANGE) show_page(TabCtrl_GetCurSel(h_tab));
+        break;
+    case WM_GETMINMAXINFO: ((MINMAXINFO *)lp)->ptMinTrackSize.x = 660; ((MINMAXINFO *)lp)->ptMinTrackSize.y = 600; return 0;
     case WM_CTLCOLORSTATIC:
         if ((HWND)lp == g_log) { SetBkColor((HDC)wp, GetSysColor(COLOR_WINDOW)); return (LRESULT)GetSysColorBrush(COLOR_WINDOW); }
         break;
@@ -670,8 +820,13 @@ static LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case ID_TEMP_BR: browse(h_temp, "Choose where to keep the temporary files"); return 0;
         case ID_TEMP_ON: set_busy(0); return 0;
         case ID_PS2_ON: set_busy(0); return 0;
+        case ID_CUST_ON: set_busy(0); return 0;
+        case ID_GAME_HL: case ID_GAME_MOD: case ID_GAME_BS: case ID_GAME_OF: set_game(LOWORD(wp) - ID_GAME_HL); set_busy(0); return 0;
+        case ID_MOD_BR: browse(h_mod, "Choose the mod's folder (the one with liblist.gam)"); return 0;
+        case ID_CUST_BR: browse(h_cust, "Choose the folder with your custom maps (.bsp files)"); return 0;
         case ID_VALVE:
             if (HIWORD(wp) == EN_CHANGE && h_lang) { char cur[32]; snprintf(cur, sizeof cur, "%s", chosen_lang()); refresh_langs(lang_count > 1 ? cur : NULL); }
+            if (HIWORD(wp) == EN_CHANGE && h_game[3]) refresh_expansions();
             return 0;
         case ID_PS2_BR: browse(h_ps2, "Choose the folder with the PS2 disc's files (SLUS_200.66, VALVE ...)"); return 0;
         case ID_BUILD: start_build(); return 0;
@@ -712,7 +867,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 {
     (void)prev; (void)cmd;
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES | ICC_TAB_CLASSES};
     InitCommonControlsEx(&icc);
     SetProcessDPIAware();
 
@@ -741,7 +896,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     RegisterClassA(&wc);
     char title[96];
     snprintf(title, sizeof title, "Half-Life 64 ROM builder (%s)", HL64_VERSION);
-    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 760, 720, NULL, NULL, inst, NULL);
+    HWND w = CreateWindowExA(0, "HL64Builder", title, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 780, 760, NULL, NULL, inst, NULL);
 
     // what was chosen last time; a folder on the command line (or dropped on the .exe) wins
     char v[MAX_PATH] = "", o[MAX_PATH] = "", t[MAX_PATH] = "", on[8] = "0";
@@ -772,11 +927,26 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         SetWindowTextA(h_ps2, p2);
         SendMessageA(h_ps2_on, BM_SETCHECK, p2on[0] == '1' ? BST_CHECKED : BST_UNCHECKED, 0);
     }
+    {   // the Experimental tab: Half-Life and no map loader unless chosen last time
+        char p[MAX_PATH] = "", on2[8] = "0", gk[16] = "";
+        GetPrivateProfileStringA("builder", "mod", "", p, sizeof p, g_settings);
+        GetPrivateProfileStringA("builder", "game", "halflife", gk, sizeof gk, g_settings);
+        SetWindowTextA(h_mod, p);
+        int g = 0;
+        for (int i = 0; i < 4; i++) if (!strcmp(gk, game_keys[i])) g = i;
+        set_game(g);
+        GetPrivateProfileStringA("builder", "custom_maps", "", p, sizeof p, g_settings);
+        GetPrivateProfileStringA("builder", "custom_on", "0", on2, sizeof on2, g_settings);
+        SetWindowTextA(h_cust, p);
+        SendMessageA(h_cust_on, BM_SETCHECK, on2[0] == '1' ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
     {   // the language: the one chosen last time if this install has it, else Steam's setting
         char lg[32] = "";
         GetPrivateProfileStringA("builder", "language", "", lg, sizeof lg, g_settings);
         refresh_langs(lg[0] ? lg : NULL);
     }
+    refresh_expansions();
+    show_page(0);
     set_busy(0);
     logf_("Choose your Half-Life folder and where the ROM goes, then press Build ROM.\r\n");
     if (v[0]) logf_("Half-Life found: %s\r\n", v);

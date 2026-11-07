@@ -3350,12 +3350,15 @@ void ents_think(float dt)
                 if (!rad[i]) rad[i] = ((int)ent_float(e, "damagetype", 0) & DMG_RADIATION) ? 2 : 1;
                 if (rad[i] == 2) {
                     extern void player_geiger_range(float r);
+                    extern bool render_leaf_visible(int leaf);
                     bmodel_t *bm = &world.bmodels[e->model];
-                    float eye[3];
+                    float eye[3], mid[3];
                     player_get_eye(eye);
                     float d2 = 0;
-                    for (int k = 0; k < 3; k++) { float c = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f - eye[k]; d2 += c * c; }
-                    player_geiger_range(sqrtf(d2));
+                    for (int k = 0; k < 3; k++) { mid[k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f; float c = mid[k] - eye[k]; d2 += c * c; }
+                    // only when the player is in its PVS (FIND_CLIENT_IN_PVS): not through walls from the next room
+                    int lf = bsp_leaf_for_point(mid);
+                    if (lf <= 0 || render_leaf_visible(lf)) player_geiger_range(sqrtf(d2));
                 }
             }
             if (e->model > 0 && !(e->spawnflags & 8 /* SF_TRIGGER_HURT_NO_CLIENTS */) && e->active &&

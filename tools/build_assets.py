@@ -29,12 +29,42 @@ c4a1b c4a1c c4a1d c4a1e c4a1f c4a3 c5a1 t0a0 t0a0a t0a0b t0a0b1 t0a0b2 t0a0c t0a
 
 
 
+MAX_TRIS = 28000   # a mod's or custom map: past this, it won't fit the N64's memory with its lighting detail
+
+
 def work(args):
-    bsp, wads, grid, tol = args
-    return bsp2n64.convert(bsp, None, wads, grid, 2048, verbose=False, lm_tolerance=tol)
+    bsp, wads, grid, tol, limit, aliases = args
+    res = bsp2n64.convert(bsp, None, wads, grid, 2048, verbose=False, lm_tolerance=tol, aliases=aliases)
+    # maps lit in fine detail turn into too many triangles: coarser lighting subdivision until it fits
+    while limit and res['stats']['tris'] > MAX_TRIS and grid:
+        grid, tol = (grid * 2, tol * 2) if grid < 256 else (0, tol)
+        res = bsp2n64.convert(bsp, None, wads, grid, 2048, verbose=False, lm_tolerance=tol, aliases=aliases)
+    return res
 
 
-GENERIC_MODEL_CLASSES = ('monster_generic', 'cycler', 'monster_furniture', 'env_model', 'cycler_sprite')
+# ---------------------------------------------------------------- the expansions
+# Their own monsters are in src/npc.c (with the behaviour of the nearest Half-Life one); their own
+# weapons, ammo and items become the nearest Half-Life ones here, in the maps' entities.
+EXPANSIONS = {
+    'bshift': {'name': 'Blue Shift', 'aliases': {
+        'monster_rosenberg': 'monster_scientist',
+    }},
+    'gearbox': {'name': 'Opposing Force', 'aliases': {
+        'weapon_pipewrench': 'weapon_crowbar', 'weapon_knife': 'weapon_crowbar',
+        'weapon_eagle': 'weapon_357',
+        'weapon_m249': 'weapon_9mmAR', 'ammo_556': 'ammo_9mmAR',
+        'weapon_sniperrifle': 'weapon_crossbow', 'ammo_762': 'ammo_crossbow',
+        'weapon_shockrifle': 'weapon_hornetgun',
+        'weapon_sporelauncher': 'weapon_handgrenade', 'ammo_spore': 'weapon_handgrenade',
+        'weapon_displacer': 'weapon_egon',
+        'weapon_penguin': 'weapon_snark',
+        'item_generic': 'monster_furniture',
+        'monster_blkop_osprey': 'monster_osprey',
+    }},
+}
+
+
+GENERIC_MODEL_CLASSES = ('monster_generic', 'cycler', 'monster_furniture', 'env_model', 'cycler_sprite', 'item_generic')
 EXTRA_SEQS = ['retract', 'delpoy', 'hide', 'spin', 'lying_on_back', 'lying_on_stomach', 'lying_on_side', 'dead_sitting', 'dead_hang', 'dead_table1',
               'dead_table2', 'dead_table3', 'deadstomach', 'deadside', 'deadsitting', 'deadback', 'deadtable',
               'sitting2', 'sitlookleft']
@@ -147,7 +177,8 @@ def build_models(a, maps):
     # everything the player can pick up, throw or see in first person (crates and soldiers drop
     # items, so all of them go in, not only the ones the maps place)
     for cls, mdl in table.items():
-        if cls.startswith(('weapon_', 'ammo_', 'item_')) or cls == 'weaponbox':
+        if (cls.startswith(('weapon_', 'ammo_', 'item_')) or cls == 'weaponbox') and \
+                os.path.exists(os.path.join(a.valve, 'models', mdl + '.mdl')):   # (an expansion's items: only in its ROM)
             used.setdefault(mdl, set())
     for mdl in ('v_crowbar', 'v_9mmhandgun', 'v_357', 'v_9mmar', 'v_shotgun', 'v_crossbow', 'v_rpg', 'v_gauss', 'v_egon',
                 'v_hgun', 'v_grenade', 'v_tripmine', 'v_satchel', 'v_satchel_radio', 'v_squeak'):
@@ -329,6 +360,152 @@ def preflight(valve):
                  % ('\n  '.join(missing), valve))
 
 
+# ---------------------------------------------------------------- mods and custom maps
+MOD_SKIP = {'save', 'dlls', 'cl_dlls', 'logos'}
+
+
+def read_liblist(mod):
+    """liblist.gam's keys (game, startmap, trainmap ...)"""
+    p = ui2n64.find_ci(mod, 'liblist.gam')
+    out = {}
+    if p:
+        for line in open(p, encoding='latin1'):
+            m = re.match(r'\s*(\w+)\s+"([^"]*)"', line)
+            if m:
+                out[m.group(1).lower()] = m.group(2).strip()
+    return out
+
+
+def force_remove(func, path, exc):
+    """remove a file Windows marks read-only (Steam's files are, and the overlay's hard links
+    share that attribute)"""
+    import stat
+    try:
+        os.remove(path)
+    except PermissionError:
+        os.chmod(path, stat.S_IWRITE)
+        (func or os.remove)(path)
+
+
+def make_overlay(valve, mod, dest):
+    """the game as the engine sees it running the mod: valve's files with the mod's (its loose
+    files, then its .pak files) on top, in one folder. valve's files are hard links where the
+    drive allows it, so this costs next to no space."""
+    import ps2h2h
+    if os.path.isdir(dest):
+        shutil.rmtree(dest, onerror=force_remove)
+    os.makedirs(dest)
+    dirs = {'': dest}   # lowercased relative dir -> the real path in dest
+
+    def dir_for(rel):
+        key = ''
+        for part in [x for x in rel.split('/') if x]:
+            nk = (key + '/' + part.lower()).lstrip('/')
+            if nk not in dirs:
+                d = os.path.join(dirs[key], part)
+                os.makedirs(d, exist_ok=True)
+                dirs[nk] = d
+            key = nk
+        return dirs[key]
+
+    names = {}   # lowercased relative path -> the real path in dest
+
+    def target(rel):
+        rel = rel.replace('\\', '/')
+        d, _, f = rel.rpartition('/')
+        old = names.get(rel.lower())
+        if old:
+            force_remove(None, old, None)
+            return old
+        p = os.path.join(dir_for(d), f)
+        names[rel.lower()] = p
+        return p
+
+    linked = copied = 0
+    for root, ds, fs in os.walk(valve):
+        rel = os.path.relpath(root, valve).replace('\\', '/')
+        rel = '' if rel == '.' else rel
+        if not rel:
+            ds[:] = [d for d in ds if d.lower() not in MOD_SKIP]
+        for f in fs:
+            src = os.path.join(root, f)
+            t = target((rel + '/' + f).lstrip('/'))
+            try:
+                os.link(src, t); linked += 1
+            except OSError:
+                shutil.copy2(src, t); copied += 1
+    nmod = 0
+    for root, ds, fs in os.walk(mod):
+        rel = os.path.relpath(root, mod).replace('\\', '/')
+        rel = '' if rel == '.' else rel
+        if not rel:
+            ds[:] = [d for d in ds if d.lower() not in MOD_SKIP]
+        for f in fs:
+            if not rel and f.lower().endswith('.pak'):
+                continue
+            shutil.copy2(os.path.join(root, f), target((rel + '/' + f).lstrip('/'))); nmod += 1
+    paks = sorted((f for f in os.listdir(mod) if re.match(r'pak\d+\.pak$', f.lower())), key=lambda f: int(re.sub(r'\D', '', f)))
+    for pk in paks:
+        pp = os.path.join(mod, pk)
+        with open(pp, 'rb') as fh:
+            for name, (off, ln) in ps2h2h.pack_entries(pp).items():
+                fh.seek(off)
+                open(target(name), 'wb').write(fh.read(ln)); nmod += 1
+    print('mod: %s, %d of its files over the game\'s (%d linked, %d copied)' % (mod, nmod, linked, copied))
+    return dest
+
+
+def changelevel_targets(path):
+    b = bsp2n64.BSP(open(path, 'rb').read())
+    ents = bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1'))
+    return [e['map'].lower() for e in ents if e.get('classname') == 'trigger_changelevel' and e.get('map')]
+
+
+def mod_campaign(game, mod, info, reachable_only=False):
+    """the mod's maps in play order: from its startmap along its level changes, then its
+    training map's, then the rest of its single player maps (not for an expansion: the ones its
+    campaign doesn't reach are its multiplayer maps)"""
+    have = lambda m: os.path.exists(bsp2n64.map_path(game, m))
+    order, queue = [], [m.lower() for m in (info.get('startmap'), info.get('trainmap')) if m]
+    while queue:
+        m = queue.pop(0)
+        if m in order or not have(m):
+            continue
+        order.append(m)
+        try:
+            queue[0:0] = [t for t in changelevel_targets(bsp2n64.map_path(game, m)) if t not in order]
+        except Exception:  # noqa
+            pass
+    own = set()
+    md = ui2n64.find_ci(mod, 'maps')
+    if md:
+        own |= {f[:-4].lower() for f in os.listdir(md) if f.lower().endswith('.bsp')}
+    for pk in (f for f in os.listdir(mod) if f.lower().endswith('.pak')):
+        import ps2h2h
+        own |= {n[5:-4].lower() for n in ps2h2h.pack_entries(os.path.join(mod, pk)) if n.lower().startswith('maps/') and n.lower().endswith('.bsp')}
+    def single_player(m):   # (a multiplayer map: deathmatch starts and no level changes)
+        try:
+            e = bsp2n64.BSP(open(bsp2n64.map_path(game, m), 'rb').read()).raw('ENTITIES')
+            return b'info_player_start' in e and (e.count(b'info_player_deathmatch') < 2 or b'trigger_changelevel' in e)
+        except Exception:  # noqa
+            return False
+    rest = [] if reachable_only else sorted(m for m in own if m not in order and have(m))
+    skipped = [m for m in rest if not single_player(m)]
+    order += [m for m in rest if m not in skipped]
+    if skipped:
+        print('mod: %d multiplayer maps left out (%s)' % (len(skipped), ' '.join(skipped[:12]) + (' ...' if len(skipped) > 12 else '')))
+    return order
+
+
+def custom_maps(folder):
+    """{name: path} of the .bsp maps in a folder"""
+    out = {}
+    for f in sorted(os.listdir(folder)):
+        if f.lower().endswith('.bsp'):
+            out[f[:-4].lower()] = os.path.join(folder, f)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('valve'); ap.add_argument('out')
@@ -345,8 +522,24 @@ def main():
     ap.add_argument('--lang', help='the game language to take speech and text from: a Steam language '
                     '(spanish, french, german ...) whose valve_<language> folder is next to valve, or that folder')
     ap.add_argument('--ps2', help='a copy of the PS2 disc\'s files: adds the Head-To-Head maps and characters')
+    ap.add_argument('--mod', help='a mod\'s folder (the one with liblist.gam): the ROM plays the mod, as on PC')
+    ap.add_argument('--custom', help='a folder of extra .bsp maps for the map loader and Head-To-Head')
+    ap.add_argument('--expansion', choices=sorted(EXPANSIONS), help='Blue Shift (bshift) or Opposing Force (gearbox), '
+                    'from its folder next to valve')
     a = ap.parse_args()
     preflight(a.valve)
+    if a.expansion:
+        a.mod = ui2n64.find_ci(os.path.dirname(os.path.abspath(a.valve)), a.expansion)
+        if not a.mod:
+            sys.exit('%s isn\'t installed: there is no %s folder next to %s (install it from Steam)'
+                     % (EXPANSIONS[a.expansion]['name'], a.expansion, a.valve))
+    if a.mod:
+        # a mod or an expansion is built on its own: no Head-To-Head, custom maps or other language
+        for opt, what in (('ps2', 'Head-To-Head'), ('custom', 'the map loader\'s maps'), ('lang', 'the language choice')):
+            if getattr(a, opt):
+                print('%s is left out: it isn\'t used with a mod or an expansion' % what)
+                setattr(a, opt, None)
+    a.valve_orig = a.valve
     if not (a.models_only or a.ui_only or a.maps_only or a.sounds_only) and os.path.isdir(a.out):
         # a full conversion starts from an empty folder: files an earlier build left there (its
         # Head-To-Head maps, another language's speech ...) would otherwise go into this ROM too
@@ -356,12 +549,33 @@ def main():
             func(path)
         shutil.rmtree(a.out, onerror=_force)
     a.lang_dir = language_dir(a.valve, a.lang)
+    info = {}
+    if a.mod:
+        if not os.path.isdir(a.mod):
+            sys.exit('no mod folder %s' % a.mod)
+        info = read_liblist(a.mod)
+        a.valve = make_overlay(a.valve, a.mod, os.path.join(os.path.dirname(os.path.abspath(a.out)), 'modgame'))
     # the on-screen text too, except for the languages the one-byte font can't show
     a.lang_text_dir = a.lang_dir if a.lang_dir and not any(
         k in os.path.basename(a.lang_dir).lower() for k in NONLATIN) else None
     if a.lang_dir:
         print('language: %s (%s)' % (a.lang_dir, 'speech and text' if a.lang_text_dir else 'speech; the text stays English'))
-    maps = a.maps or [m for m in CAMPAIGN if os.path.exists(bsp2n64.map_path(a.valve, m))]
+    if a.mod:
+        maps = a.maps or mod_campaign(a.valve, a.mod, info, reachable_only=bool(a.expansion))
+        if not maps:
+            sys.exit('the mod %s has no maps' % a.mod)
+        print('mod "%s": %d maps, starting at %s' % (info.get('game', os.path.basename(a.mod)), len(maps), maps[0]))
+    else:
+        maps = a.maps or [m for m in CAMPAIGN if os.path.exists(bsp2n64.map_path(a.valve, m))]
+    customs = {}
+    if a.custom:
+        for n, pth in custom_maps(a.custom).items():
+            if n in maps or os.path.exists(bsp2n64.map_path(a.valve, n)):
+                print('custom map %s: the game already has a map of that name, skipped' % n)
+                continue
+            customs[n] = pth
+        bsp2n64.EXTRA_MAPS.update(customs)
+        print('custom maps: %d' % len(customs))
     # the PS2 version's Head-To-Head maps (converted to .bsp in a temporary folder) go through
     # the same conversion as the campaign's, sharing its texture pack
     h2h_maps, h2h_players = {}, {}
@@ -369,8 +583,12 @@ def main():
         import ps2h2h
         h2h_maps, h2h_players = ps2h2h.prepare(a.ps2, a.valve, os.path.join(tempfile.gettempdir(), 'hl64_ps2'))
         bsp2n64.EXTRA_MAPS.update(h2h_maps)
-    allmaps = maps + [m for m in h2h_maps if m not in maps]
+    allmaps = maps + [m for m in h2h_maps if m not in maps] + [m for m in customs if m not in maps and m not in h2h_maps]
     wads = [os.path.join(a.valve, w) for w in ('halflife.wad', 'liquids.wad', 'xeno.wad', 'decals.wad')]
+    # every other .wad of the game (a mod's own textures) and of the custom maps' folder
+    for d in [a.valve] + ([a.custom] if a.custom else []):
+        wads += sorted(os.path.join(d, f) for f in os.listdir(d) if f.lower().endswith('.wad')
+                       and f.lower() not in ('halflife.wad', 'liquids.wad', 'xeno.wad', 'decals.wad', 'gfx.wad', 'fonts.wad', 'cached.wad', 'tempdecal.wad', 'pldecal.wad'))
     os.makedirs(os.path.join(a.out, 'maps'), exist_ok=True)
     if a.models_only:
         build_models(a, allmaps)
@@ -380,13 +598,16 @@ def main():
         build_sounds(a)
         return
     if a.ui_only:
-        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2), lang=a.lang_text_dir)
+        ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2), lang=a.lang_text_dir,
+                     pc_menu=(a.mod, a.valve_orig) if a.mod else None)
         spr2n64.build(a.valve, a.out, allmaps)
         build_chapters(a, maps)
         build_arrivals(a, maps)
         return
     pack = bsp2n64.TexturePack()
-    jobs = [(bsp2n64.map_path(a.valve, m), wads, a.grid, a.tol) for m in allmaps]
+    # an expansion's own weapons, ammo and items: the nearest of Half-Life's (see EXPANSIONS)
+    aliases = EXPANSIONS[a.expansion]['aliases'] if a.expansion else {}
+    jobs = [(bsp2n64.map_path(a.valve, m), wads, a.grid, a.tol, bool(a.mod) or m in customs, aliases) for m in allmaps]
     total = 0
     with Pool(a.j) as pool:
         for res in pool.imap(work, jobs):
@@ -403,10 +624,27 @@ def main():
         csize = sum(os.path.getsize(f) for f in files)
         print('compressed maps: %.1f MB' % (csize / 1048576))
     open(os.path.join(a.out, 'maps', 'maplist.txt'), 'w', newline='\n').write('\n'.join(maps) + '\n')
-    build_nav(a, maps)
+    open(os.path.join(a.out, 'maps', 'custom.txt'), 'w', newline='\n').write(''.join(m + '\n' for m in customs))
+    # the new game and training maps (a mod's from its liblist.gam)
+    g = ['start %s' % (maps[0] if a.mod else 'c0a0')]
+    tm = (info.get('trainmap') or '').lower() if a.mod else 't0a0'
+    if tm and tm in maps:
+        g.append('train %s' % tm)
+    if a.mod:
+        g.append('mod %s' % (info.get('game') or os.path.basename(os.path.normpath(a.mod))).strip())
+        g.append('menu pc')   # the PC version's main menu (with the mod's own background and title art)
+    if a.expansion:
+        g.append('expansion %s' % a.expansion)
+    open(os.path.join(a.out, 'maps', 'game.txt'), 'w', encoding='latin1', newline='\n').write('\n'.join(g) + '\n')
+    build_nav(a, maps + list(customs))
     shutil.copy(os.path.join(a.valve, 'skill.cfg'), os.path.join(a.out, 'skill.cfg'))
-    print('maps: %d (%d Head-To-Head), %.1f MB; texture pack: %d textures, %.1f MB' % (
-        len(allmaps), len(allmaps) - len(maps), total / 1048576, len(pack.index), len(pack.data) / 1048576))
+    if a.mod:   # a mod's own skill file for its own monsters and weapons (Opposing Force's skillopfor.cfg)
+        for f in sorted(os.listdir(a.mod)):
+            if re.match(r'skill.+\.cfg$', f.lower()):
+                with open(os.path.join(a.out, 'skill.cfg'), 'ab') as out:
+                    out.write(b'\n' + open(os.path.join(a.mod, f), 'rb').read())
+    print('maps: %d (%d Head-To-Head, %d custom), %.1f MB; texture pack: %d textures, %.1f MB' % (
+        len(allmaps), len(h2h_maps), len(customs), total / 1048576, len(pack.index), len(pack.data) / 1048576))
     if a.maps_only:
         return
 
@@ -429,7 +667,8 @@ def main():
 
     build_models(a, allmaps)
     build_players(a, h2h_players)
-    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2), lang=a.lang_text_dir)
+    ui2n64.build(a.valve, a.out, os.path.join(tempfile.gettempdir(), 'ui2n64'), h2h=bool(a.ps2), lang=a.lang_text_dir,
+                 pc_menu=(a.mod, a.valve_orig) if a.mod else None)
     spr2n64.build(a.valve, a.out, allmaps)
     build_chapters(a, maps)
     build_arrivals(a, maps)
@@ -611,7 +850,7 @@ def build_sounds(a):
             jobs.append((conv, src, os.path.join(outdir, 'ui'), ['--wav-mono', '--wav-compress', 'ulc,quality=%d' % Q_SFX]))
     # the title screen's music (this port's own, assets/FELOOP.mp3 -> music/feloop.wav64)
     fe = os.path.join(assets_dir, 'FELOOP.mp3')
-    if os.path.exists(fe):
+    if os.path.exists(fe) and not a.mod:   # (a mod has the PC version's menu, without music)
         jobs.append((conv, fe, os.path.join(a.out, 'music'), ['--wav-mono', '--wav-resample', '22050', '--wav-compress', 'ulc,quality=%d' % Q_MUSIC]))
     media = os.path.join(a.valve, 'media')
     for f in sorted(glob.glob(os.path.join(media, '*.mp3'))):
@@ -672,7 +911,7 @@ def fit_budget(a, jobs, lang_snd, du):
     print('size: game data %.2f MB of %.2f MB' % (total / 1048576, budget / 1048576))
     if total > budget:   # never make a ROM bigger than a cartridge
         sys.exit('The game data doesn\'t fit a 64 MB cartridge even with the sounds compressed as far as they go: '
-                 'build it without Head-To-Head.')
+                 'build it without Head-To-Head or the custom maps.')
 
 
 if __name__ == '__main__':

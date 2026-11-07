@@ -248,6 +248,11 @@ int main(int argc, char **argv)
     fread(bsp, 1, sz, f);
     fclose(f);
     int32_t *lump = (int32_t *)(bsp + 4);
+    // Blue Shift's maps have the planes lump first and the entities second: swap them back
+    if (bsp[lump[0]] != '{' && bsp[lump[2]] == '{') {
+        int32_t t0 = lump[0], t1 = lump[1];
+        lump[0] = lump[2]; lump[1] = lump[3]; lump[2] = t0; lump[3] = t1;
+    }
     ents = (char *)bsp + lump[0];
     bsp[lump[0] + lump[1] - 1] = 0;
     nplanes = lump[3] / 20;

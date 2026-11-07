@@ -137,10 +137,12 @@ bool dbg_god, dbg_noclip, dbg_give_all;
 static bool dbg_noclip_prev;
 int game_num_maps(void);
 const char *game_map_name(int i);
-static void load_maplist(void)
+static int num_campaign_maps;   // maplist[]: the game's maps, then the builder's custom maps
+static char start_map[16] = "c0a0", train_map[16] = "t0a0", mod_name[48], expansion[16];
+static bool pc_menu;   // a mod's ROM: the PC version's main menu
+static void read_map_names(const char *path)
 {
-    FILE *f = fopen("rom:/maps/maplist.txt", "r");
-    num_maps = 0;
+    FILE *f = fopen(path, "r");
     if (!f) return;
     char line[64];
     while (fgets(line, sizeof(line), f) && num_maps < 160) {
@@ -151,6 +153,34 @@ static void load_maplist(void)
     }
     fclose(f);
 }
+static void load_maplist(void)
+{
+    num_maps = 0;
+    read_map_names("rom:/maps/maplist.txt");
+    num_campaign_maps = num_maps;
+    read_map_names("rom:/maps/custom.txt");
+    FILE *f = fopen("rom:/maps/game.txt", "r");   // the new game and training maps (a mod's own)
+    if (f) {
+        char line[80];
+        train_map[0] = 0;
+        while (fgets(line, sizeof(line), f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (!strncmp(line, "start ", 6)) snprintf(start_map, sizeof start_map, "%s", line + 6);
+            else if (!strncmp(line, "train ", 6)) snprintf(train_map, sizeof train_map, "%s", line + 6);
+            else if (!strncmp(line, "mod ", 4)) snprintf(mod_name, sizeof mod_name, "%s", line + 4);
+            else if (!strcmp(line, "menu pc")) pc_menu = true;
+            else if (!strncmp(line, "expansion ", 10)) snprintf(expansion, sizeof expansion, "%s", line + 10);
+        }
+        fclose(f);
+    }
+}
+const char *game_start_map(void) { return start_map; }
+const char *game_train_map(void) { return train_map; }
+const char *game_mod_name(void) { return mod_name; }
+const char *game_expansion(void) { return expansion; }   // "bshift", "gearbox" or ""
+bool game_pc_menu(void) { return pc_menu; }
+int game_num_custom_maps(void) { return num_maps - num_campaign_maps; }
+const char *game_custom_map(int i) { return i >= 0 && i < num_maps - num_campaign_maps ? maplist[num_campaign_maps + i] : ""; }
 
 int game_num_maps(void) { return num_maps; }
 const char *game_map_name(int i) { return i >= 0 && i < num_maps ? maplist[i] : ""; }
@@ -766,6 +796,11 @@ static void leave_game(void)
 // autosaves start with Office Complex (c1a1): none in Hazard Course, the tram ride or Anomalous Materials
 static bool autosave_allowed(void)
 {
+    if (mod_name[0]) {   // a mod: all but its training maps (ofboot0 -> ofboot*, ba_hazard1 -> ba_hazard*)
+        int n = (int)strlen(train_map);
+        while (n > 1 && train_map[n - 1] >= '0' && train_map[n - 1] <= '9') n--;
+        return !train_map[0] || strncasecmp(cur_map, train_map, n);
+    }
     return strncasecmp(cur_map, "t0", 2) && strncasecmp(cur_map, "c0", 2) && strncasecmp(cur_map, "c1a0", 4);
 }
 void game_autosave_tick(void)
@@ -1423,6 +1458,9 @@ static void wd_cb(int ovfl)
 #define TR(x) do { if (trace_frames > 0) debugf("%s\n", x); } while (0)
 int main(void)
 {
+    // the game needs 8 MB: say so, instead of running out of memory at the menu
+    assertf(is_memory_expanded(), "Half-Life 64 needs the Expansion Pak (8 MB of memory).\n"
+            "Turn the Expansion Pak on in your emulator's settings for this ROM, or put one in your N64.");
 #ifdef HL64_DEBUG
     // the debug log (test builds only): on a flashcart with no PC listening, every line can stall
     // the game (an EverDrive's USB write waits up to 100 ms for a host that isn't there) and the
@@ -1456,8 +1494,8 @@ int main(void)
         for (int i = 0; i < 6; i++) { snprintf(tmp, sizeof(tmp), "%f %.1f %e %g", vals[i], vals[i], vals[i], vals[i]); (void)tmp; }
     }
     game_saves_scan();
-    menu_init();
     load_maplist();
+    menu_init();
     debugf("HL64 boot: %d maps, heap %d KB\n", num_maps, (int)(get_memory_size() / 1024));
 #ifdef RDPVALIDATE
     rdpq_debug_start();

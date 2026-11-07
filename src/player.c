@@ -43,6 +43,16 @@ static PCTX float drown_taken, drown_restore_next;   // drowning damage given ba
 static PCTX float geiger_range = 1000, geiger_next, geiger_tick;
 // a radiation trigger_hurt reports how far the player is from it (CTriggerHurt::RadiationThink)
 void player_geiger_range(float r) { if (r < geiger_range) geiger_range = r; }
+// the hazards' timers and the Geiger counter's last reading: a new map or a new game starts the
+// clock again from 0, so times kept from before it would hold the clicks (and the hazard icons) on
+static void hazards_reset(void)
+{
+    geiger_range = geiger_tick = 1000;
+    geiger_next = 0;
+    memset(dmg_expire, 0, sizeof(dmg_expire));
+    drown_next = drown_restore_next = 0;
+    drown_dmg = 0;
+}
 
 float player_max_health(void) { return 100; }
 bool player_alive(void) { return player.health > 0 && !player.dead; }
@@ -63,6 +73,8 @@ void player_new_game(void)
     player.flashbattery = 100;
     memset(suit_queue, 0, sizeof(suit_queue));
     memset(norepeat, 0, sizeof(norepeat));
+    hazards_reset();
+    drown_taken = 0;
     weapons_reset();
 }
 
@@ -79,6 +91,7 @@ void player_map_start(void)
     air_finished = 0;
     for (int i = 0; i < SUIT_NOREPEAT; i++) norepeat[i].until = 0;
     memset(pain_alpha, 0, sizeof(pain_alpha));
+    hazards_reset();
 }
 
 void player_restore_map_start(void)
@@ -105,9 +118,11 @@ bool player_take_armor(float amount)
     return true;
 }
 
+const char *game_expansion(void);
 void player_suit_update(const char *name, bool group, float nonrepeat)
 {
     if (!player.suit || !name || h2h_active) return;   // (no suit voice in Head-To-Head)
+    if (game_expansion()[0]) return;                   // (nor in the expansions: Barney's vest and the PCV don't talk)
     float now = game_time();
     if (nonrepeat > 0) {
         int freeslot = -1;
@@ -248,6 +263,10 @@ bool player_touch_item(const char *cls, int npc_index)
         // CItemSuit::MyTouch: the suit logs on
         player.suit = true;
         player.weapons |= 1u << WEAPON_SUIT;
+        if (game_expansion()[0]) {   // Blue Shift's HUD, Opposing Force's PCV: no logon speech
+            snd_emit(0, CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+            return true;
+        }
         suit_say((e->spawnflags & 1) ? "!HEV_A0" : "!HEV_AAx", false);
         suit_next = game_time() + 20;   // let the long logon play out
         return true;
@@ -262,6 +281,13 @@ bool player_touch_item(const char *cls, int npc_index)
         char s[24];
         snprintf(s, sizeof(s), "!HEV_%dP", pct);
         player_suit_update(s, false, 30);
+        return true;
+    }
+    if (!strcasecmp(cls, "item_armorvest") || !strcasecmp(cls, "item_helmet")) {   // Blue Shift's armour
+        if (player.armor >= 100) return false;
+        player.armor += !strcasecmp(cls, "item_armorvest") ? 60 : 40;
+        if (player.armor > 100) player.armor = 100;
+        snd_emit(0, CHAN_ITEM, "items/gunpickup2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
         return true;
     }
     if (!strcasecmp(cls, "item_healthkit")) {
@@ -343,7 +369,7 @@ void player_think(float dt)
     if (pm_get_waterlevel() == 3) drown_restore_next = 0;
     // the Geiger counter (cl_dll/geiger.cpp): clicks, faster and louder the nearer a radiation
     // source (PC: checked every frame at 60+ fps; here at a steady 60 a second)
-    if (now > geiger_next) { geiger_next = now + 0.25f; geiger_tick = geiger_range; geiger_range = 1000; }
+    if (now > geiger_next || geiger_next > now + 1) { geiger_next = now + 0.25f; geiger_tick = geiger_range; geiger_range = 1000; }
     {
         static PCTX float acc;
         acc += dt;

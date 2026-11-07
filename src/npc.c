@@ -102,6 +102,7 @@ typedef struct {
     float melee_range; const char *melee_dmg;
     uint8_t ranged; float rmin, rmax; const char *ranged_dmg; float rcool;
     const sndset_t *snd;
+    const char *vox;   // their sentences' prefix in place of SC_ / BA_ (an expansion's: OT_ Otis, FG_ soldiers ...)
 } mdef_t;
 
 // classname -> model, hull (UTIL_SetSize values from the SDK monsters) and behaviour
@@ -149,6 +150,37 @@ static const mdef_t defs[] = {
     {"xen_spore_large", "fungus(large)", {-88, -88, 0}, {88, 88, 256}, NF_NODROP | NF_STATIC | NF_INVULN, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"ammo_9mmARclip", "w_9mmarclip", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
     {"monster_flyer_flock", "boid", {-8, -8, 0}, {8, 8, 8}, NF_NODROP | NF_NOTSOLID | NF_NOAI, NULL, 1, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    // the expansions' people and creatures (Opposing Force, Blue Shift): their own models with the
+    // behaviour of the nearest Half-Life one (the build only includes them in an expansion's ROM)
+    {"monster_otis", "otis", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, "sk_otis_health", 35, C_ALLY, 0, NULL, R_BULLET, 0, 1024, "sk_9mm_bullet", 0.6f, &S_BARNEY, "OT"},
+    {"monster_otis_dead", "otis", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_human_grunt_ally", "hgrunt_opfor", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, "sk_hgrunt_ally_health", 50, C_ALLY, 0, NULL, R_BULLET, 0, 2048, "sk_9mmAR_bullet", 0.6f, &S_GRUNT, "FG"},
+    {"monster_human_grunt_ally_dead", "hgrunt_opfor", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_grunt_ally_repel", "hgrunt_opfor", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, "sk_hgrunt_ally_health", 50, C_ALLY, 0, NULL, R_BULLET, 0, 2048, "sk_9mmAR_bullet", 0.6f, &S_GRUNT, "FG"},
+    {"monster_human_medic_ally", "hgrunt_medic", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, "sk_medic_ally_health", 50, C_ALLY, 0, NULL, R_BULLET, 0, 1024, "sk_9mm_bullet", 0.6f, &S_GRUNT, "FG"},
+    {"monster_human_torch_ally", "hgrunt_torch", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, "sk_torch_ally_health", 50, C_ALLY, 0, NULL, R_BULLET, 0, 1024, "sk_9mm_bullet", 0.6f, &S_GRUNT, "FG"},
+    {"monster_recruit", "recruit", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, NULL, 50, C_ALLY, 0, NULL, R_NONE, 0, 0, NULL, 0, &S_GRUNT, "FG"},
+    {"monster_drillsergeant", "drill", {-16, -16, 0}, {16, 16, 72}, NF_TALKER | NF_INVULN, NULL, 100, C_ALLY, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL, "DR"},
+    {"monster_cleansuit_scientist", "cleansuit_scientist", {-16, -16, 0}, {16, 16, 72}, NF_TALKER | NF_SCI, "sk_scientist_health", 20, C_ALLY, 0, NULL, R_NONE, 0, 0, NULL, 0, &S_SCI},
+    {"monster_cleansuit_scientist_dead", "cleansuit_scientist", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_rosenberg", "scientist", {-16, -16, 0}, {16, 16, 72}, NF_TALKER | NF_SCI | NF_INVULN, "sk_scientist_health", 20, C_ALLY, 0, NULL, R_NONE, 0, 0, NULL, 0, &S_SCI, "RO"},
+    {"monster_male_assassin", "massn", {-16, -16, 0}, {16, 16, 72}, 0, "sk_massassin_health", 50, C_MILITARY, 64, "sk_massassin_kick", R_BULLET, 0, 2048, "sk_9mmAR_bullet", 0.9f, &S_GRUNT},
+    {"monster_assassin_repel", "massn", {-16, -16, 0}, {16, 16, 72}, 0, "sk_massassin_health", 50, C_MILITARY, 64, "sk_massassin_kick", R_BULLET, 0, 2048, "sk_9mmAR_bullet", 0.9f, &S_GRUNT},
+    {"monster_zombie_barney", "zombie_barney", {-16, -16, 0}, {16, 16, 72}, 0, "sk_zombie_barney_health", 65, C_ALIEN, 70, "sk_zombie_barney_dmg_one_slash", R_NONE, 0, 0, NULL, 0, &S_ZOMBIE},
+    {"monster_zombie_soldier", "zombie_soldier", {-16, -16, 0}, {16, 16, 72}, 0, "sk_zombie_soldier_health", 80, C_ALIEN, 70, "sk_zombie_soldier_dmg_one_slash", R_NONE, 0, 0, NULL, 0, &S_ZOMBIE},
+    {"monster_zombie_soldier_dead", "zombie_soldier", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_gonome", "gonome", {-16, -16, 0}, {16, 16, 72}, 0, "sk_gonome_health", 160, C_ALIEN, 70, "sk_gonome_dmg_one_slash", R_SPIT, 64, 784, "sk_gonome_dmg_guts", 3.0f, &S_ZOMBIE},
+    {"monster_pitdrone", "pit_drone", {-16, -16, 0}, {16, 16, 48}, 0, "sk_pitdrone_health", 40, C_ALIEN, 70, "sk_pitdrone_dmg_bite", R_SPIT, 64, 784, "sk_pitdrone_dmg_spit", 2.0f, &S_SQUID},
+    {"monster_shocktrooper", "strooper", {-24, -24, 0}, {24, 24, 72}, 0, "sk_shocktrooper_health", 200, C_ALIEN, 100, "sk_shocktrooper_kick", R_HORNET, 100, 1024, "sk_hornet_dmg", 1.2f, &S_AGRUNT},
+    {"monster_alien_voltigore", "voltigore", {-80, -80, 0}, {80, 80, 90}, 0, "sk_voltigore_health", 320, C_ALIEN, 120, "sk_voltigore_dmg_punch", R_ZAP, 128, 1024, "sk_voltigore_dmg_beam", 3.0f, &S_AGRUNT},
+    {"monster_alien_babyvoltigore", "baby_voltigore", {-32, -32, 0}, {32, 32, 64}, 0, "sk_babyvoltigore_health", 60, C_ALIEN, 70, "sk_babyvoltigore_dmg_punch", R_NONE, 0, 0, NULL, 0, &S_AGRUNT},
+    {"monster_blkop_apache", "blkop_apache", {-160, -160, -80}, {160, 160, 24}, NF_NODROP | NF_FLY, "sk_apache_health", 250, C_MILITARY, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_houndeye_dead", "houndeye_dead", {-16, -16, 0}, {16, 16, 36}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_alien_slave_dead", "islave", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_skeleton_dead", "skeleton", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"monster_op4loader", "loader", {-32, -32, 0}, {32, 32, 112}, NF_NOAI | NF_INVULN | NF_STATIC, NULL, 100, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
+    {"item_armorvest", "barney_vest", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
+    {"item_helmet", "barney_helmet", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
     // items (items.cpp / weapons.cpp / ammo): touched by the player to pick up
     {"item_suit", "w_suit", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
     {"item_battery", "w_battery", {-16, -16, 0}, {16, 16, 16}, NF_ITEM, NULL, 0, 0, 0, NULL, 0, 0, 0, NULL, 0, NULL},
@@ -383,6 +415,7 @@ static npc_t *new_npc(int ent, int def, studio_t *m)
     memset(n, 0, sizeof(*n));
     n->ent = ent;
     n->def = def;
+    n->flee_bad = -1;
     n->model = m;
     n->script = -1;
     n->seq = -1;
@@ -754,6 +787,25 @@ static bool local_walk(const float *a, const float *b, void *vctx)
     return ok;
 }
 
+// a monster placed in a scripted pose against furniture (c1a0's scientist leaning on the front desk)
+// can be left with its box in the desk: it can't take a step, and no route starts from there.
+// Move it to the nearest spot where it fits (within a couple of feet); false if it already fits
+static bool unstick(npc_t *n)
+{
+    int self = n - npcs;
+    gtrace_t tr;
+    game_trace(n->origin, n->origin, n->mins, n->maxs, 0, self, &tr);
+    if (!tr.startsolid && !tr.allsolid) return false;
+    for (int r = 4; r <= 32; r += 4)
+        for (int k = 0; k < 8; k++) {
+            float a = k * (float)M_PI / 4;
+            float p[3] = {n->origin[0] + cosf(a) * r, n->origin[1] + sinf(a) * r, n->origin[2] + 1};
+            game_trace(p, p, n->mins, n->maxs, 0, self, &tr);
+            if (!tr.startsolid && !tr.allsolid) { memcpy(n->origin, p, 12); return true; }
+        }
+    return false;
+}
+
 static void route_to(npc_t *n, const float *goal)
 {
     int self = n - npcs;
@@ -885,6 +937,7 @@ static void start_moving(npc_t *n, const float *goal, bool run)
     memcpy(n->last_pos, n->origin, 12);
     n->moved_check = 0;
     n->stuck_count = 0;
+    n->wait_player = 0;
 }
 
 static void gravity(npc_t *n, float dt)
@@ -993,7 +1046,16 @@ void npc_play_scripted_sentence(int i, const char *sentence, float duration, flo
 
 static const char *grp(npc_t *n, const char *sci, const char *ba)
 {
-    return (n->flags & NF_SCI) ? sci : ba;
+    const char *g = (n->flags & NF_SCI) ? sci : ba;
+    const mdef_t *d = D(n);
+    if (g && d && d->vox && (!strncmp(g, "SC_", 3) || !strncmp(g, "BA_", 3))) {   // SC_ / BA_ -> the def's own
+        static char buf[4][24];
+        static int k;
+        char *b = buf[k++ & 3];
+        snprintf(b, sizeof buf[0], "%s%s", d->vox, g + 2);
+        return b;
+    }
+    return g;
 }
 
 // ---------------------------------------------------------------- scripted sequences
@@ -1055,6 +1117,7 @@ static void script_start(int ni, int sci, bool idle_only)
     n->stuck_count = 0;
     // with an idle animation, the monster takes it while it waits (and at the mark, see below)
     if (moveto == 1 || moveto == 2) {
+        unstick(n);   // (out of the furniture an earlier pose left it in, before it sets off)
         if (dist2d(n->origin, n->dest) > 4 || fabsf(n->origin[2] - n->dest[2]) > 24) {
             start_moving(n, n->dest, moveto == 2);
             n->sstate = NS_MOVING;
@@ -1476,7 +1539,7 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
         if (++n->hits_by_player >= 2 && !(n->flags & NF_SCI)) {
             n->provoked = true;
             if (n->following) stop_following(n, false);
-            npc_say(n, "BA_MAD", 3, 1, ATTN_NORM);
+            npc_say(n, grp(n, "BA_MAD", "BA_MAD"), 3, 1, ATTN_NORM);
         } else if (n->health > 0) {
             npc_say(n, grp(n, "SC_PLFEAR", "BA_SHOT"), 3, 1, ATTN_NORM);
         }
@@ -2048,7 +2111,7 @@ static void ai_combat(npc_t *n, float dt)
     if (vis) memcpy(n->last_seen, tp, 12);
     float dist = target_dist(n, t);
     // scientists run from danger
-    if (klass(n) == C_ALLY && (n->flags & NF_SCI)) { n->ai = AI_FLEE; n->fear_time = now; n->next_plan = n->flee_look = 0; return; }
+    if (klass(n) == C_ALLY && (n->flags & NF_SCI)) { n->ai = AI_FLEE; n->fear_time = now; n->next_plan = n->flee_look = 0; n->flee_bad = -1; return; }
     if (n->weapons) {   // human grunts
         if (vis) n->bt[0] = now;
         if (now < n->cover_until && n->npath > 0) {   // running for cover
@@ -2101,19 +2164,25 @@ static void ai_flee(npc_t *n, float dt)
         if (n->look_hidden) { if (!set_activity(n, ACT_COWER)) set_activity(n, ACT_IDLE); return; }
         if ((n->npath == 0 || n->pathi >= n->npath || n->stuck_time > 1) && now >= n->next_plan) {
             n->next_plan = now + 0.5f + (rand() % 200) / 1000.0f;
+            // stuck on the way: that node is out of reach from here, pick another (it used to run
+            // in place, re-planning to the same blocked node for the whole 8 seconds)
+            static int16_t flee_goal[MAX_NPCS];
+            int self = n - npcs;
+            if (n->stuck_time > 1 && n->npath > 0) n->flee_bad = flee_goal[self];
             // run to the node furthest from the danger among the nearby ones (CoverRadius)
             int best = -1;
             float bd = 0;
             for (int k = 0; k < nav_num_nodes(); k++) {
                 const float *o = nav_node_origin(k);
                 float dn = dist3(o, n->origin);
-                if (dn > 800 || dn < 64) continue;
+                if (dn > 800 || dn < 64 || k == n->flee_bad) continue;
                 float de = dist3(o, tp);
                 if (de > bd) { bd = de; best = k; }
             }
             if (best < 0) { if (!set_activity(n, ACT_COWER)) set_activity(n, ACT_IDLE); return; }
             if (n->said & 32) {} else { n->said |= 32; npc_say(n, "SC_SCREAM", 2, 1, ATTN_NORM); }
             start_moving(n, nav_node_origin(best), true);
+            flee_goal[self] = best;
             if (!set_activity(n, ACT_RUN_SCARED)) set_activity(n, ACT_RUN);
         }
         if (follow_route(n, n->speed * 1.2f, dt, 16)) { n->npath = 0; if (!set_activity(n, ACT_COWER)) set_activity(n, ACT_IDLE); }
@@ -3253,11 +3322,20 @@ void npcs_think(float dt)
             switch (n->sstate) {
             case NS_MOVING: {
                 bool arrived = follow_route(n, n->speed, dt, 4);
-                if (dist3(n->origin, player_pos) < 96) n->stuck_time = 0;   // waiting for the player to move aside
+                // waiting for the player to move aside: only when the player is really in the way
+                // (ahead, towards the next waypoint), and not for ever (pressing c1a0's desk buzzer
+                // stands the player right beside the scientist who runs off behind the desk)
+                if (dist3(n->origin, player_pos) < 96 && n->pathi < n->npath && n->wait_player < 3) {
+                    const float *wp = n->path[n->pathi];
+                    float wx = wp[0] - n->origin[0], wy = wp[1] - n->origin[1], px = player_pos[0] - n->origin[0], py = player_pos[1] - n->origin[1];
+                    float wl = sqrtf(wx * wx + wy * wy), pl = sqrtf(px * px + py * py);
+                    if (wl > 1 && pl > 1 && (wx * px + wy * py) / (wl * pl) > 0.5f) { n->stuck_time = 0; n->wait_player += dt; }
+                }
                 if (!arrived && n->stuck_time > 1.0f) {
                     // re-plan; after a few tries put the monster on its mark so the scene goes on
                     n->stuck_time = 0;
-                    if (++n->stuck_count >= 4) { debugf("npc %s stuck: teleported to its mark\n", entities[n->ent].targetname); { extern void weapons_tripmine_sweep(const float *a, const float *b, float zlo, float zhi); weapons_tripmine_sweep(n->origin, n->dest, n->mins[2], n->maxs[2]); } memcpy(n->origin, n->dest, 12); arrived = true; }
+                    if (unstick(n)) { route_to(n, n->dest); }   // wedged in furniture: out of it, and go
+                    else if (++n->stuck_count >= 3) { debugf("npc %s stuck: teleported to its mark\n", entities[n->ent].targetname); { extern void weapons_tripmine_sweep(const float *a, const float *b, float zlo, float zhi); weapons_tripmine_sweep(n->origin, n->dest, n->mins[2], n->maxs[2]); } memcpy(n->origin, n->dest, 12); arrived = true; }
                     else route_to(n, n->dest);
                 }
                 if (arrived) {
@@ -3362,7 +3440,7 @@ void npcs_think(float dt)
                         if (d && d->snd && d->snd->alert) npc_sound(n, CHAN_VOICE, d->snd->alert, d->snd->na, 1, ATTN_NORM);
                         else if (d && !strcmp(d->model, "barney") && ok_to_speak(n)) npc_say(n, "BA_ATTACK", 2, 1, ATTN_NORM);
                         else if (n->weapons && !strcmp(d->model, "hgrunt") && ok_to_speak(n)) npc_say(n, e == 0 ? "HG_ALERT" : "HG_MONST", 2, 1, ATTN_NORM);
-                        if (n->flags & NF_SCI) { n->ai = AI_FLEE; n->fear_time = now; n->said &= ~32; n->next_plan = n->flee_look = 0; }
+                        if (n->flags & NF_SCI) { n->ai = AI_FLEE; n->fear_time = now; n->said &= ~32; n->next_plan = n->flee_look = 0; n->flee_bad = -1; }
                     }
                 } else if (e >= 0 && e != n->enemy) {
                     // switch to a closer target

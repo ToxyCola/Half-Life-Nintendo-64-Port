@@ -82,8 +82,9 @@ def mksprite(png, outdir, fmt='I4', compress=None):
         raise RuntimeError(r.stderr)
 
 
-def build(valve, out, tmp, h2h=False, lang=None):
-    """lang: a language folder (valve_spanish ...) whose gfx.wad font and titles.txt replace valve's"""
+def build(valve, out, tmp, h2h=False, lang=None, pc_menu=None):
+    """lang: a language folder (valve_spanish ...) whose gfx.wad font and titles.txt replace valve's;
+    pc_menu: (a mod's folder, the game's valve folder) for a mod's ROM, which has the PC version's menu"""
     def lf(name):
         p = find_ci(lang, name) if lang else None
         return p or os.path.join(valve, name)
@@ -168,7 +169,9 @@ def build(valve, out, tmp, h2h=False, lang=None):
     mksprite(png, ui)
 
     build_fx(valve, ui, tmp)
-    build_title(valve, ui, tmp)
+    build_title(valve, ui, tmp, pc=bool(pc_menu))
+    if pc_menu:
+        build_pc_menu(pc_menu[0], pc_menu[1], ui, tmp)
     if h2h:
         build_h2h_menu(ui, tmp)
 
@@ -438,11 +441,12 @@ def build_h2h_menu(ui, tmp):
         aim.save(apng)
         mksprite(apng, ui, 'RGBA32', 2)
 
-def build_title(valve, ui, tmp):
+def build_title(valve, ui, tmp, pc=False):
     """title.sprite (320x240 title-screen background) and lambda.sprite (the icon beside
-    "LOADING"): this port's own artwork, kept in the repository's assets/ folder"""
+    "LOADING"): this port's own artwork, kept in the repository's assets/ folder (pc: a mod's ROM,
+    whose title screen is the PC version's: no title backdrop or title lettering)"""
     here = os.path.dirname(os.path.abspath(__file__))
-    for name in ('title', 'lambda', 'glowcircle', 'menuglow', 'buttons_a', 'buttons_b',
+    for name in (() if pc else ('title',)) + ('lambda', 'glowcircle', 'menuglow', 'buttons_a', 'buttons_b',
                  'color2', 'colorstrip2', 'slider', 'slider_end_cap', 'slider_piece', 'box'):
         src = os.path.join(here, '..', 'assets', name + '.png')
         if not os.path.exists(src):
@@ -477,7 +481,7 @@ def build_title(valve, ui, tmp):
         mksprite(ctrl_png, ui, 'RGBA32')
 
     hl_src = os.path.join(here, '..', 'assets', 'hl.png')
-    if os.path.exists(hl_src):
+    if os.path.exists(hl_src) and not pc:
         hl_im = Image.open(hl_src).convert('RGB')
         top = hl_im.crop((0, 0, 512, 64))
         bot = hl_im.crop((0, 64, 512, 128))
@@ -513,6 +517,80 @@ def build_title(valve, ui, tmp):
         mksprite(top_png, ui, 'RGBA32')
         mksprite(bot_png, ui, 'RGBA32')
     print('title background and loading icon: assets/')
+
+
+# ---------------------------------------------------------------- a mod's main menu (the PC version's)
+def _tiles(game):
+    """the PC main menu's background (resource/BackgroundLayout.txt's tiles, else the usual
+    800x600 ones: resource/background/800_<row>_<a-d>_loading.tga) as one image, None if the
+    game has none"""
+    res = find_ci(game, 'resource')
+    if not res:
+        return None
+    parts, size = [], (800, 600)
+    lay = find_ci(res, 'BackgroundLayout.txt')
+    if lay:
+        for line in open(lay, encoding='latin1'):
+            w = line.split()
+            if len(w) >= 3 and w[0].lower() == 'resolution':
+                size = (int(w[1]), int(w[2]))
+            elif len(w) >= 5 and w[0].lower().endswith('.tga'):
+                parts.append((w[0], int(w[3]), int(w[4])))
+    if not parts:
+        size = (800, 600)
+        for r, y in (('1', 0), ('2', 256), ('3', 512)):
+            for c, x in (('a', 0), ('b', 256), ('c', 512), ('d', 768)):
+                parts.append(('resource/background/800_%s_%s_loading.tga' % (r, c), x, y))
+    im, n = Image.new('RGB', size), 0
+    for path, x, y in parts:
+        p = find_ci(game, *path.replace('\\', '/').split('/'))
+        if not p:
+            continue
+        try:
+            im.paste(Image.open(p).convert('RGB'), (x, y))
+            n += 1
+        except OSError:
+            pass
+    return im if n else None
+
+
+def build_pc_menu(mod, valve, ui, tmp):
+    """pc_bg.sprite (320x240) and pc_title.sprite: the mod's own main menu background (its
+    resource/background tiles, or the old gfx/shell/splash.bmp) and title (resource/game_menu.tga),
+    else Half-Life's background and the mod's name in text (the engine draws it)"""
+    bg, src = _tiles(mod), 'the mod\'s'
+    if bg is None:
+        p = find_ci(mod, 'gfx', 'shell', 'splash.bmp')
+        if p:
+            try:
+                bg, src = Image.open(p).convert('RGB'), 'the mod\'s splash.bmp'
+            except OSError:
+                bg = None
+    if bg is None:
+        bg, src = _tiles(valve), 'Half-Life\'s'
+    if bg is None:
+        bg, src = Image.new('RGB', (320, 240)), 'black'
+    bg = bg.resize((320, 240), Image.LANCZOS)
+    png = os.path.join(tmp, 'pc_bg.png')
+    bg.save(png)
+    mksprite(png, ui, 'RGBA16')
+    title = 'the mod\'s name'
+    p = find_ci(mod, 'resource', 'game_menu.tga')
+    if p:
+        try:
+            t = Image.open(p).convert('RGBA')
+            bb = t.getbbox()
+            if bb:
+                t = t.crop(bb)
+                h = 18
+                t = t.resize((max(1, round(t.width * h / t.height)), h), Image.LANCZOS)
+                png = os.path.join(tmp, 'pc_title.png')
+                t.save(png)
+                mksprite(png, ui, 'RGBA32')
+                title = 'resource/game_menu.tga'
+        except OSError:
+            pass
+    print('pc menu: background %s, title %s' % (src, title))
 
 
 def parse_titles(path):

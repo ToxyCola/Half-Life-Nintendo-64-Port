@@ -66,6 +66,8 @@ typedef struct {
     float tongue_len;        // barnacle: distance to the floor (traced once)
     float next_plan, flee_look;     // path re-planning / sight checks while fleeing are throttled
     bool look_hidden;
+    float wait_player;              // scripted move: time spent held up by the player standing in the way
+    int flee_bad;                   // flee: the node it couldn't reach last time (-1 none)
     float next_dormant, think_dt;   // dormant (idle, out of the player's PVS): AI a few times a second
     float light_pos[3], light_time;
     float leaf_org[3]; int leaf_cache;

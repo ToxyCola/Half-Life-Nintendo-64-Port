@@ -144,12 +144,22 @@ def find_steam_halflife():
     return None
 
 
+EXPANSIONS = {'bshift': 'Blue Shift', 'gearbox': 'Opposing Force'}   # their folders next to valve
+
+
+def expansion_installed(valve, key):
+    return bool(valve) and os.path.isfile(os.path.join(os.path.dirname(valve), key, 'liblist.gam'))
+
+
 # ---------------------------------------------------------------- the build (a worker thread)
 class Build(threading.Thread):
-    def __init__(self, valve, outdir, tempdir, clean, events, ps2=None, lang=None):
+    def __init__(self, valve, outdir, tempdir, clean, events, ps2=None, lang=None, custom=None, mod=None, expansion=None):
         super().__init__(daemon=True)
         self.valve, self.outdir, self.tempdir, self.clean, self.ev = valve, outdir, tempdir, clean, events
         self.ps2 = ps2   # the PS2 disc's files (Head-To-Head), or None
+        self.custom = custom          # the map loader's folder of .bsp maps, or None
+        self.mod = mod                # a mod's folder (liblist.gam), or None
+        self.expansion = expansion    # 'bshift' (Blue Shift) / 'gearbox' (Opposing Force), or None
         self.lang = lang if lang and lang != 'english' else None   # the game language (spanish ...), None: English
         self.rom = None
         self.proc = None
@@ -208,7 +218,8 @@ class Build(threading.Thread):
 
         fsdir = os.path.join(work, 'filesystem')
         stamp = os.path.join(work, 'converted.txt')
-        want = '%s\n%s\n%s\n%s\n' % (VERSION, self.valve, self.ps2 or '', self.lang or '')
+        want = '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' % (VERSION, self.valve, self.ps2 or '', self.lang or '', self.mod or '',
+                                                self.custom or '', self.expansion or '')
         have = ''
         try:
             have = open(stamp).read()
@@ -230,6 +241,15 @@ class Build(threading.Thread):
             if self.ps2:
                 cmd += ['--ps2', self.ps2]
                 self.log('      With Head-To-Head from the PS2 files in %s\n\n' % self.ps2)
+            if self.custom:
+                cmd += ['--custom', self.custom]
+                self.log("      Experimental: with the map loader's maps in %s\n\n" % self.custom)
+            if self.mod:
+                cmd += ['--mod', self.mod]
+                self.log("      Experimental: building the mod in %s, with the PC version's menu\n\n" % self.mod)
+            if self.expansion:
+                cmd += ['--expansion', self.expansion]
+                self.log('      Experimental: building %s, with its own menu\n\n' % EXPANSIONS[self.expansion])
             code = self.run_step(cmd, env)
             if code != 0:
                 self.fail('converting the game data failed (see the messages above).')
@@ -270,7 +290,7 @@ class Build(threading.Thread):
         self.log('\nDone: %s (%.1f MB)\n' % (rom, mb))
         if os.path.getsize(rom) > 64 * 1048576:
             self.log('\nWARNING: the ROM is larger than 64 MB, the most an N64 cartridge (and a flashcart) can hold.\n'
-                     'Build it again with English chosen as the language, or without Head-To-Head, to make it fit.\n')
+                     'Build it again with English chosen as the language, or without Head-To-Head or the map loader, to make it fit.\n')
         self.log('Play it in ares, gopher64 or simple64 with the Expansion Pak on and the save type set to SRAM,\n'
                  "or copy it to a 64 MB-capable flashcart. Keep it to yourself: it contains Half-Life's game data.\n")
         self.status('Done: the ROM is ready.', 100)
@@ -296,7 +316,7 @@ def main():
     root = tk.Tk()
     root.title('Half-Life 64 ROM builder (%s)' % VERSION)
     root.minsize(640, 460)
-    root.geometry('780x720')
+    root.geometry('800x760')
     try:
         style = ttk.Style()
         style.theme_use('aqua' if IS_MAC else 'clam')
@@ -326,10 +346,23 @@ def main():
 
     ttk.Label(frm, text='Builds hl64.z64 from your own copy of Half-Life. No game data is included in this program.').grid(
         row=0, column=0, columnspan=2, sticky='w', pady=(0, 8))
+    # two tabs: Build (the usual options) and Experimental (the map loader, a mod, the expansions)
+    nb = ttk.Notebook(frm)
+    nb.grid(row=1, column=0, columnspan=2, sticky='ew')
+    pb = ttk.Frame(nb, padding=(10, 10))
+    pe = ttk.Frame(nb, padding=(10, 10))
+    nb.add(pb, text='Build')
+    nb.add(pe, text='Experimental')
+    pb.columnconfigure(0, weight=1)
+    pe.columnconfigure(0, weight=1)
 
-    def row(r, label, var, title, widget_list):
-        ttk.Label(frm, text=label).grid(row=r, column=0, columnspan=2, sticky='w')
-        e = ttk.Entry(frm, textvariable=var)
+    def row(r, label, var, title, widget_list, page=None):
+        page = page or pb
+        if label:
+            ttk.Label(page, text=label).grid(row=r, column=0, columnspan=2, sticky='w')
+        else:
+            r -= 1   # (no label: the entry goes on row r)
+        e = ttk.Entry(page, textvariable=var)
         e.grid(row=r + 1, column=0, sticky='ew', pady=(2, 8))
 
         def pick():
@@ -337,7 +370,7 @@ def main():
             d = filedialog.askdirectory(parent=root, title=title, initialdir=start, mustexist=False)
             if d:
                 var.set(d)
-        b = ttk.Button(frm, text='Browse...', command=pick)
+        b = ttk.Button(page, text='Browse...', command=pick)
         b.grid(row=r + 1, column=1, sticky='e', padx=(8, 0), pady=(2, 8))
         widget_list += [e, b]
         return e, b
@@ -345,9 +378,9 @@ def main():
     controls = []
     row(1, 'Half-Life folder (the one that contains "valve"):', v_valve, 'Choose your Half-Life folder', controls)
     row(3, 'Save the ROM in:', v_out, 'Choose where to save hl64.z64', controls)
-    cb_temp = ttk.Checkbutton(frm, text='Keep the temporary files somewhere else (optional; they take about 1.5 GB):', variable=v_temp_on)
+    cb_temp = ttk.Checkbutton(pb, text='Keep the temporary files somewhere else (optional; they take about 1.5 GB):', variable=v_temp_on)
     cb_temp.grid(row=5, column=0, columnspan=2, sticky='w')
-    temp_entry = ttk.Entry(frm, textvariable=v_temp)
+    temp_entry = ttk.Entry(pb, textvariable=v_temp)
     temp_entry.grid(row=6, column=0, sticky='ew', pady=(2, 8))
 
     def pick_temp():
@@ -355,13 +388,13 @@ def main():
                                     initialdir=v_temp.get() if os.path.isdir(v_temp.get()) else os.path.expanduser('~'))
         if d:
             v_temp.set(d)
-    temp_btn = ttk.Button(frm, text='Browse...', command=pick_temp)
+    temp_btn = ttk.Button(pb, text='Browse...', command=pick_temp)
     temp_btn.grid(row=6, column=1, sticky='e', padx=(8, 0), pady=(2, 8))
 
     # Head-To-Head: the PS2 version's two-player maps and characters, from a copy of its disc's files
-    cb_ps2 = ttk.Checkbutton(frm, text='Add Head-To-Head from the PlayStation 2 version (optional): the folder with its disc\'s files:', variable=v_ps2_on)
+    cb_ps2 = ttk.Checkbutton(pb, text='Add Head-To-Head from the PlayStation 2 version (optional): the folder with its disc\'s files:', variable=v_ps2_on)
     cb_ps2.grid(row=7, column=0, columnspan=2, sticky='w')
-    ps2_entry = ttk.Entry(frm, textvariable=v_ps2)
+    ps2_entry = ttk.Entry(pb, textvariable=v_ps2)
     ps2_entry.grid(row=8, column=0, sticky='ew', pady=(2, 8))
 
     def pick_ps2():
@@ -369,14 +402,14 @@ def main():
                                     initialdir=v_ps2.get() if os.path.isdir(v_ps2.get()) else os.path.expanduser('~'))
         if d:
             v_ps2.set(d)
-    ps2_btn = ttk.Button(frm, text='Browse...', command=pick_ps2)
+    ps2_btn = ttk.Button(pb, text='Browse...', command=pick_ps2)
     ps2_btn.grid(row=8, column=1, sticky='e', padx=(8, 0), pady=(2, 8))
 
     # the game's language: speech and on-screen text from the language Half-Life is set to in Steam
     # (Steam keeps that language's files in valve_<language>)
-    ttk.Label(frm, text='Language (speech and on-screen text), from the languages your Half-Life install has:').grid(
-        row=9, column=0, columnspan=2, sticky='w')
-    lang_box = ttk.Combobox(frm, textvariable=v_lang, state='readonly', width=30)
+    lang_lbl = ttk.Label(pb, text='Language (speech and on-screen text), from the languages your Half-Life install has:')
+    lang_lbl.grid(row=9, column=0, columnspan=2, sticky='w')
+    lang_box = ttk.Combobox(pb, textvariable=v_lang, state='readonly', width=30)
     lang_box.grid(row=10, column=0, sticky='w', pady=(2, 8))
     lang_codes = {}
 
@@ -397,8 +430,38 @@ def main():
     refresh_langs()
     v_valve.trace_add('write', refresh_langs)
 
+    # ---- Experimental: the map loader, and one game: Half-Life, a mod, Blue Shift or Opposing Force
+    v_cust_on = tk.BooleanVar(value=c.get('custom_on', '0') == '1')
+    v_cust = tk.StringVar(value=c.get('custom_maps', ''))
+    v_mod = tk.StringVar(value=c.get('mod', ''))
+    v_game = tk.StringVar(value=c.get('game', 'halflife') if c.get('game', 'halflife') in ('halflife', 'mod', 'bshift', 'gearbox') else 'halflife')
+    ttk.Label(pe, text='Experimental: these work, but not everything in them does yet. Building a mod, Blue Shift or Opposing Force '
+              'leaves out Head-To-Head, the map loader and the language choice.', wraplength=700, justify='left').grid(
+        row=0, column=0, columnspan=2, sticky='w', pady=(0, 8))
+    cb_cust = ttk.Checkbutton(pe, text='Map loader: add custom maps (a folder of .bsp maps) to play from the menu and in Head-To-Head:', variable=v_cust_on)
+    cb_cust.grid(row=1, column=0, columnspan=2, sticky='w')
+    cust_entry, cust_btn = row(2, None, v_cust, 'Choose the folder with your custom maps (.bsp files)', [], pe)
+    ttk.Label(pe, text='Game (one at a time):').grid(row=4, column=0, columnspan=2, sticky='w', pady=(4, 2))
+    rb_hl = ttk.Radiobutton(pe, text='Half-Life', variable=v_game, value='halflife')
+    rb_hl.grid(row=5, column=0, columnspan=2, sticky='w', padx=(8, 0))
+    rb_mod = ttk.Radiobutton(pe, text="A mod: its folder (the one with liblist.gam), with the PC version's menu:", variable=v_game, value='mod')
+    rb_mod.grid(row=6, column=0, columnspan=2, sticky='w', padx=(8, 0))
+    mod_entry, mod_btn = row(7, None, v_mod, "Choose the mod's folder (the one with liblist.gam)", [], pe)
+    mod_entry.grid_configure(padx=(26, 0))
+    rb_bs = ttk.Radiobutton(pe, text='Blue Shift', variable=v_game, value='bshift')
+    rb_bs.grid(row=9, column=0, columnspan=2, sticky='w', padx=(8, 0))
+    rb_of = ttk.Radiobutton(pe, text='Opposing Force', variable=v_game, value='gearbox')
+    rb_of.grid(row=10, column=0, columnspan=2, sticky='w', padx=(8, 0))
+
+    def refresh_expansions(*a):
+        valve = resolve_valve(v_valve.get())
+        for rb, key in ((rb_bs, 'bshift'), (rb_of, 'gearbox')):
+            rb.configure(text=EXPANSIONS[key] + ('' if expansion_installed(valve, key) else ' (not installed in this Half-Life folder)'))
+    refresh_expansions()
+    v_valve.trace_add('write', refresh_expansions)
+
     bar = ttk.Frame(frm)
-    bar.grid(row=11, column=0, columnspan=2, sticky='ew')
+    bar.grid(row=2, column=0, columnspan=2, sticky='ew', pady=(10, 0))
     bar.columnconfigure(0, weight=1)
     cb_clean = ttk.Checkbutton(bar, text="Convert everything again (don't reuse the last run's game data)", variable=v_clean)
     cb_clean.grid(row=0, column=0, sticky='w')
@@ -407,12 +470,12 @@ def main():
     btn_build.grid(row=0, column=2, sticky='e')
 
     prog = ttk.Progressbar(frm, mode='determinate', maximum=100)
-    prog.grid(row=12, column=0, columnspan=2, sticky='ew', pady=(10, 2))
-    ttk.Label(frm, textvariable=v_status).grid(row=13, column=0, columnspan=2, sticky='w')
+    prog.grid(row=3, column=0, columnspan=2, sticky='ew', pady=(10, 2))
+    ttk.Label(frm, textvariable=v_status).grid(row=4, column=0, columnspan=2, sticky='w')
 
     logf = ttk.Frame(frm)
-    logf.grid(row=14, column=0, columnspan=2, sticky='nsew', pady=(6, 0))
-    frm.rowconfigure(14, weight=1)
+    logf.grid(row=5, column=0, columnspan=2, sticky='nsew', pady=(6, 0))
+    frm.rowconfigure(5, weight=1)
     logf.columnconfigure(0, weight=1)
     logf.rowconfigure(0, weight=1)
     log = tk.Text(logf, wrap='none', height=12, font=('Menlo' if IS_MAC else 'DejaVu Sans Mono', 10), state='disabled',
@@ -440,6 +503,10 @@ def main():
         c['ps2'] = v_ps2.get()
         c['ps2_on'] = '1' if v_ps2_on.get() else '0'
         c['language'] = lang_codes.get(v_lang.get(), 'english')
+        c['custom_on'] = '1' if v_cust_on.get() else '0'
+        c['custom_maps'] = v_cust.get()
+        c['mod'] = v_mod.get()
+        c['game'] = v_game.get()
         try:
             with open(ini, 'w') as f:
                 cfg.write(f)
@@ -455,13 +522,29 @@ def main():
         custom = v_temp_on.get() and not busy
         temp_entry.state(['!disabled'] if custom else ['disabled'])
         temp_btn.state(['!disabled'] if custom else ['disabled'])
-        p = v_ps2_on.get() and not busy
-        ps2_entry.state(['!disabled'] if p else ['disabled'])
-        ps2_btn.state(['!disabled'] if p else ['disabled'])
+        # a mod, Blue Shift or Opposing Force is built on its own: no Head-To-Head, map loader or language
+        alone = v_game.get() != 'halflife'
+        on = lambda w, ok: w.state(['!disabled'] if ok else ['disabled'])  # noqa
+        on(cb_ps2, not busy and not alone)
+        p = v_ps2_on.get() and not busy and not alone
+        on(ps2_entry, p)
+        on(ps2_btn, p)
+        if alone:
+            lang_box.state(['disabled'])
+        on(lang_lbl, not alone)
+        for rb in (rb_hl, rb_mod, rb_bs, rb_of):
+            on(rb, not busy)
+        on(cb_cust, not busy and not alone)
+        on(cust_entry, v_cust_on.get() and not busy and not alone)
+        on(cust_btn, v_cust_on.get() and not busy and not alone)
+        on(mod_entry, v_game.get() == 'mod' and not busy)
+        on(mod_btn, v_game.get() == 'mod' and not busy)
         btn_build.configure(text='Building...' if busy else 'Build ROM')
 
     v_temp_on.trace_add('write', lambda *a: set_busy(False))
     v_ps2_on.trace_add('write', lambda *a: set_busy(False))
+    v_cust_on.trace_add('write', lambda *a: set_busy(False))
+    v_game.trace_add('write', lambda *a: set_busy(False))
 
     events = queue.Queue()
 
@@ -475,8 +558,32 @@ def main():
         outdir = os.path.expanduser(v_out.get().strip()) or default_output()
         tempdir = os.path.expanduser(v_temp.get().strip()) if v_temp_on.get() else default_temp()
         tempdir = tempdir or default_temp()
+        game = v_game.get()
+        custom = mod = expansion = None
+        if game in EXPANSIONS:
+            if not expansion_installed(valve, game):
+                messagebox.showwarning('Half-Life 64 ROM builder',
+                                       "%s isn't in this Half-Life folder: there's no \"%s\" folder next to \"valve\".\n\n"
+                                       'Install it from Steam (it goes in the same Half-Life folder), or choose Half-Life on the '
+                                       'Experimental tab.' % (EXPANSIONS[game], game), parent=root)
+                return
+            expansion = game
+        elif game == 'mod':
+            mod = os.path.expanduser(v_mod.get().strip())
+            if not mod or not any(f.lower() == 'liblist.gam' for f in (os.listdir(mod) if os.path.isdir(mod) else [])):
+                messagebox.showwarning('Half-Life 64 ROM builder',
+                                       "That folder isn't a Half-Life mod: it needs a liblist.gam.\n\n"
+                                       'Choose the mod\'s own folder (the one next to "valve" with liblist.gam in it), or choose '
+                                       'Half-Life on the Experimental tab.', parent=root)
+                return
+        elif v_cust_on.get():
+            custom = os.path.expanduser(v_cust.get().strip())
+            if not os.path.isdir(custom):
+                messagebox.showwarning('Half-Life 64 ROM builder',
+                                       "Choose the folder with the map loader's maps (.bsp files), or untick the map loader.", parent=root)
+                return
         ps2 = None
-        if v_ps2_on.get():
+        if v_ps2_on.get() and game == 'halflife':
             ps2 = os.path.expanduser(v_ps2.get().strip())
             if not ps2_valid(ps2):
                 messagebox.showwarning('Half-Life 64 ROM builder',
@@ -491,8 +598,8 @@ def main():
         btn_show.grid_remove()
         set_busy(True)
         prog.configure(mode='determinate', value=10)
-        lang = lang_codes.get(v_lang.get(), 'english')
-        b = Build(valve, outdir, tempdir, v_clean.get(), events, ps2, lang)
+        lang = lang_codes.get(v_lang.get(), 'english') if game == 'halflife' else None
+        b = Build(valve, outdir, tempdir, v_clean.get(), events, ps2, lang, custom, mod, expansion)
         state['build'] = b
         b.start()
 

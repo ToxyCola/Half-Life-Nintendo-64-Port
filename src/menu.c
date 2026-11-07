@@ -20,6 +20,11 @@
 #include "menu.h"
 #include "h2h.h"
 void snd_play(const char *sample, float volume, int channel);
+const char *game_start_map(void);
+const char *game_train_map(void);
+const char *game_mod_name(void);
+int game_num_custom_maps(void);
+const char *game_custom_map(int i);
 void snd_set_volume(float v);
 
 settings_t settings = {.control_scheme = 0, .invert_y = false, .look_sens = 5, .volume = 8,
@@ -142,13 +147,14 @@ void settings_load(void)
 #define C_SEL_BG      RGBA32(149, 136, 49, 255)
 #define C_CTRL_BRIGHT RGBA32(196, 181, 80, 255)
 
-typedef enum { SCR_MAIN, SCR_NEWGAME, SCR_LOAD, SCR_SAVE, SCR_OPTIONS, SCR_OPTIONS_LEGACY, SCR_OPTIONS_CTRL, SCR_OPTIONS_CTRL_ADV, SCR_OPTIONS_BINDS, SCR_OPTIONS_AV, SCR_OPTIONS_CREDITS, SCR_OPTIONS_CHEATS, SCR_LEAVE, SCR_H2H_CHARS, SCR_H2H_MAP } screen_t;
+typedef enum { SCR_MAIN, SCR_NEWGAME, SCR_LOAD, SCR_SAVE, SCR_OPTIONS, SCR_OPTIONS_LEGACY, SCR_OPTIONS_CTRL, SCR_OPTIONS_CTRL_ADV, SCR_OPTIONS_BINDS, SCR_OPTIONS_AV, SCR_OPTIONS_CREDITS, SCR_OPTIONS_CHEATS, SCR_LEAVE, SCR_H2H_CHARS, SCR_H2H_MAP, SCR_CUSTOM } screen_t;
 
 static bool open, in_game;
 static screen_t screen;
 static int bind_sel;
 static int cheat_sel;
 static int cheat_count(void);
+static bool h2h_custom;
 static bool bind_listen;
 static float bind_listen_t;
 static int main_sel, new_sel = 2, load_sel, load_scroll, opt_tab, opt_sel, opt_menu_sel, ctrl_sel, adv_sel, av_sel, leave_sel;
@@ -156,6 +162,9 @@ static float anim_t, repeat_t;
 static float menu_time;
 static int repeat_dir;
 static image_t logo;
+bool game_pc_menu(void);
+static sprite_t *pc_bg_spr, *pc_title_spr;   // the PC version's menu art (a mod's ROM)
+static bool pc_tried;
 
 static char chapters[24][40];
 static char chapter_maps[24][16];
@@ -257,7 +266,7 @@ void menu_init(void)
             *sp = 0;
             char *t = sp + 1;
             t[strcspn(t, "\r\n")] = 0;
-            if (!strcmp(l, "t0a0")) continue;   // the Training Room is in New Game
+            if (!strcmp(l, game_train_map())) continue;   // the Training Room is in New Game
             strncpy(chapter_maps[num_chapters], l, 15);
             strncpy(chapters[num_chapters], t, 39);
             num_chapters++;
@@ -275,6 +284,9 @@ void menu_open(bool ig)
     anim_t = 0;
 #ifdef TESTSCREEN
     screen = TESTSCREEN;   // test: open straight on a screen
+#ifdef H2HCUSTOM
+    h2h_custom = true;
+#endif
 #endif
 }
 
@@ -299,10 +311,10 @@ static sprite_t *colorstrip2_spr;
 static bool colorstrip2_tried;
 static int num_saves, save_slots[6];
 static char save_labels[6][48];
-typedef enum { MI_CONTINUE, MI_RESUME, MI_SAVE, MI_NEWGAME, MI_LOAD, MI_OPTIONS, MI_LEAVE, MI_H2H } mitem_t;
-static const char *mi_label[] = {"Continue", "Resume game", "Save game", "New game", "Load game", "Options", "Leave game", "Head-To-Head"};
+typedef enum { MI_CONTINUE, MI_RESUME, MI_SAVE, MI_NEWGAME, MI_LOAD, MI_OPTIONS, MI_LEAVE, MI_H2H, MI_CUSTOM } mitem_t;
+static const char *mi_label[] = {"Continue", "Resume game", "Save game", "New game", "Load game", "Options", "Leave game", "Head-To-Head", "Custom maps"};
 static const char *mi_hint[] = {"Continue from your most recent save.", "", "Save your progress here.", "Start a new single player game.", "Load an autosave or a saved game.",
-                                "Change game settings, configure controls.", "", "Head-to-head multiplayer match."};
+                                "Change game settings, configure controls.", "", "Head-to-head multiplayer match.", "Play one of the map loader's maps."};
 
 // ------------------------------------------------------------------ Head-To-Head (PS2 front end:
 // HeadToHeadPlayerSelection, then HeadToHeadMapSelection with the frag and time limits)
@@ -311,6 +323,8 @@ static int h2h_p1_sel = 0, h2h_p2_sel = 1;          // the character grid, in it
 static bool h2h_p1_ready = false, h2h_p2_ready = false;
 static int h2h_match_sel = 0;                       // 0 map, 1 frag limit, 2 time limit
 static int h2h_map_sel = 0;                         // h2h_maps[]
+static bool h2h_custom;                             // choosing from the builder's custom maps (R / Z)
+static int h2h_custom_sel;
 static int h2h_fraglimit = 50, h2h_timelimit = 0;   // 0 = no time limit
 // the grid's characters -> the game's (h2h.c char_models: Gordon, Gina, Colette, Barney, soldier, scientist)
 static const int h2h_char_of[6] = {0, 3, 1, 2, 5, 4};
@@ -351,7 +365,7 @@ static int main_items(mitem_t *out)
     int n = 0;
     if (in_game && h2h_active) { out[n++] = MI_RESUME; out[n++] = MI_OPTIONS; out[n++] = MI_LEAVE; return n; }
     if (in_game) { out[n++] = MI_RESUME; out[n++] = MI_SAVE; }
-    else { if (game_save_exists()) out[n++] = MI_CONTINUE; out[n++] = MI_NEWGAME; if (h2h_available()) out[n++] = MI_H2H; }      // GameMenu.res: New game is hidden while playing
+    else { if (game_save_exists()) out[n++] = MI_CONTINUE; out[n++] = MI_NEWGAME; if (h2h_available()) out[n++] = MI_H2H; if (game_num_custom_maps() > 0) out[n++] = MI_CUSTOM; }      // GameMenu.res: New game is hidden while playing
     out[n++] = MI_LOAD;
     out[n++] = MI_OPTIONS;
     if (in_game) out[n++] = MI_LEAVE;
@@ -459,6 +473,7 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
             case MI_SAVE: screen = SCR_SAVE; pak_sel = 0; num_saves = game_saves_list(save_slots, save_labels); load_sel = load_scroll = 0; break;
             case MI_OPTIONS: screen = SCR_OPTIONS; opt_menu_sel = 0; anim_t = 0.0f; break;
             case MI_LEAVE: screen = SCR_LEAVE; leave_sel = 1; break;
+            case MI_CUSTOM: screen = SCR_CUSTOM; load_sel = load_scroll = 0; break;
             case MI_H2H: screen = SCR_H2H_CHARS; h2h_p1_sel = 0; h2h_p2_sel = 1; h2h_p1_ready = false; h2h_p2_ready = false; break;
             }
         }
@@ -478,8 +493,11 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         if (pressed.a || pressed.start) {
             snd_play("ui/confirm.wav", 1.0f, 3);
             open = false;
-            if (new_sel == 3) strncpy(map_out, "t0a0", map_out_len);
-            else { settings.skill = new_sel + 1; strncpy(map_out, "c0a0", map_out_len); }
+            if (new_sel == 3) {
+                if (!game_train_map()[0]) { snd_play("ui/cancel.wav", 1.0f, 3); open = true; break; }   // (a mod without one)
+                strncpy(map_out, game_train_map(), map_out_len);
+            }
+            else { settings.skill = new_sel + 1; strncpy(map_out, game_start_map(), map_out_len); }
             return MENU_ACT_START_MAP;
         }
         break;
@@ -858,6 +876,15 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         pr_m.a |= pressed2.a;
         pr_m.b |= pressed2.b;
         pr_m.start |= pressed2.start;
+        pr_m.r |= pressed2.r;
+        pr_m.z |= pressed2.z;
+
+        if ((pr_m.r || pr_m.z) && game_num_custom_maps() > 0) {   // the official maps <-> the custom maps
+            h2h_custom = !h2h_custom;
+            if (h2h_custom_sel >= game_num_custom_maps()) h2h_custom_sel = 0;
+            snd_play("ui/confirm.wav", 1.0f, 3);
+        }
+        if (game_num_custom_maps() == 0) h2h_custom = false;
 
         // Navigation Up/Down between: 0=Map, 1=Frag limit, 2=Time limit
         // Using nav_dir gives immediate response on D-pad + debounce on thumbstick!
@@ -870,7 +897,11 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
         // Adjust value Left/Right
         int dx = nav_dir(dt, in_m, pr_m, true);
         if (dx != 0) {
-            if (h2h_match_sel == 0) {
+            if (h2h_match_sel == 0 && h2h_custom) {
+                int nc = game_num_custom_maps();
+                h2h_custom_sel = (h2h_custom_sel + dx + nc) % nc;
+                snd_play("ui/select.wav", 1.0f, 3);
+            } else if (h2h_match_sel == 0) {
                 for (int k = 0; k < H2H_NUM_MAPS; k++) {   // (the maps built into this ROM)
                     h2h_map_sel = (h2h_map_sel + dx + H2H_NUM_MAPS) % H2H_NUM_MAPS;
                     if (h2h_map_ok & (1 << h2h_map_sel)) break;
@@ -897,12 +928,33 @@ menu_action_t menu_update(float dt, joypad_inputs_t in, joypad_buttons_t pressed
             break;
         }
 
+        if ((pr_m.a || pr_m.start) && h2h_custom) {
+            snd_play("ui/confirm.wav", 1.0f, 3);
+            open = false;
+            strncpy(map_out, game_custom_map(h2h_custom_sel), map_out_len);
+            return MENU_ACT_START_H2H;
+        }
         if (pr_m.a || pr_m.start) {
             if (!(h2h_map_ok & (1 << h2h_map_sel))) { snd_play("ui/cancel.wav", 1.0f, 3); break; }
             snd_play("ui/confirm.wav", 1.0f, 3);
             open = false;
             strncpy(map_out, h2h_maps[h2h_map_sel], map_out_len);
             return MENU_ACT_START_H2H;
+        }
+        break;
+    }
+    case SCR_CUSTOM: {   // the map loader's maps: one starts as a single player game
+        int nc = game_num_custom_maps();
+        int d = nav_dir(dt, in, pressed, false);
+        if (d && nc) { load_sel = (load_sel + d + nc) % nc; snd_play("ui/select.wav", 1.0f, 3); }
+        if (load_sel < load_scroll) load_scroll = load_sel;
+        if (load_sel >= load_scroll + 8) load_scroll = load_sel - 7;
+        if (pressed.b) { snd_play("ui/cancel.wav", 1.0f, 3); screen = SCR_MAIN; break; }
+        if ((pressed.a || pressed.start) && nc) {
+            snd_play("ui/confirm.wav", 1.0f, 3);
+            open = false;
+            strncpy(map_out, game_custom_map(load_sel), map_out_len);
+            return MENU_ACT_START_MAP;
         }
         break;
     }
@@ -1041,9 +1093,10 @@ static float bounce_pos(float time, float min_x, float max_x, float speed)
 static sprite_t *h2h_top_spr, *h2h_bot_spr;
 static bool h2h_top_tried, h2h_bot_tried;
 
+static bool pc_mode(void);
 static void draw_title_hl(void)
 {
-    if (in_game) return;
+    if (in_game || pc_mode()) return;   // (the PC version's menu has no PS2-style title art)
     bool is_h2h = (screen == SCR_H2H_CHARS || screen == SCR_H2H_MAP);
     sprite_t *top_spr = NULL;
     sprite_t *bot_spr = NULL;
@@ -1355,6 +1408,45 @@ static const char *get_chapter_title_for_map(const char *map)
     return map;
 }
 
+// a row of the Load / Save lists (the Game Pak's slots or the Controller Pak's)
+static void save_line(bool is_save, int k, char *line, int n)
+{
+    if (pak_sel == 1) {
+        char mapname[32];
+        int slot = is_save ? 3 + k : (num_pak_saves ? pak_slots[k] : -1);
+        if (!pak_ok) snprintf(line, n, "%s", "No Controller Pak (A: look again)");
+        else if (slot >= 0 && game_save_slot_info(slot, mapname, sizeof(mapname))) {
+            char tc[48];
+            to_title_case(tc, get_chapter_title_for_map(mapname), sizeof(tc));
+            snprintf(line, n, "Controller Pak %d - %s", slot - 2, tc);
+        } else snprintf(line, n, "%s", is_save ? "-- Unused Data --" : "-- No saved games --");
+    } else if (is_save) {
+        char mapname[32];
+        int slot = k + 1;
+        if (game_save_slot_info(slot, mapname, sizeof(mapname))) {
+            const char *cname = get_chapter_title_for_map(mapname);
+            char tc[48];
+            to_title_case(tc, cname, sizeof(tc));
+            snprintf(line, n, "Saved Game %d - %s", slot, tc);
+        } else {
+            snprintf(line, n, "%s", "-- Unused Data --");
+        }
+    } else {
+        if (k < num_saves) {
+            int slot = save_slots[k];
+            const char *prefix = (slot == 0) ? "Autosave" : "Saved Game";
+            char mapname[32] = "";
+            game_save_slot_info(slot, mapname, sizeof(mapname));
+            const char *cname = get_chapter_title_for_map(mapname);
+            char tc[48];
+            to_title_case(tc, cname, sizeof(tc));
+            snprintf(line, n, "%s - %s", prefix, tc);
+        } else {
+            to_title_case(line, chapters[k - num_saves], n);
+        }
+    }
+}
+
 static void draw_load_save(bool is_save)
 {
     draw_title_hl();
@@ -1446,40 +1538,7 @@ static void draw_load_save(bool is_save)
         }
 
         char line[64];
-        if (pak_sel == 1) {
-            char mapname[32];
-            int slot = is_save ? 3 + k : (num_pak_saves ? pak_slots[k] : -1);
-            if (!pak_ok) strcpy(line, "No Controller Pak (A: look again)");
-            else if (slot >= 0 && game_save_slot_info(slot, mapname, sizeof(mapname))) {
-                char tc[48];
-                to_title_case(tc, get_chapter_title_for_map(mapname), sizeof(tc));
-                snprintf(line, sizeof(line), "Controller Pak %d - %s", slot - 2, tc);
-            } else strcpy(line, is_save ? "-- Unused Data --" : "-- No saved games --");
-        } else if (is_save) {
-            char mapname[32];
-            int slot = k + 1;
-            if (game_save_slot_info(slot, mapname, sizeof(mapname))) {
-                const char *cname = get_chapter_title_for_map(mapname);
-                char tc[48];
-                to_title_case(tc, cname, sizeof(tc));
-                snprintf(line, sizeof(line), "Saved Game %d - %s", slot, tc);
-            } else {
-                strcpy(line, "-- Unused Data --");
-            }
-        } else {
-            if (k < num_saves) {
-                int slot = save_slots[k];
-                const char *prefix = (slot == 0) ? "Autosave" : "Saved Game";
-                char mapname[32] = "";
-                game_save_slot_info(slot, mapname, sizeof(mapname));
-                const char *cname = get_chapter_title_for_map(mapname);
-                char tc[48];
-                to_title_case(tc, cname, sizeof(tc));
-                snprintf(line, sizeof(line), "%s - %s", prefix, tc);
-            } else {
-                to_title_case(line, chapters[k - num_saves], sizeof(line));
-            }
-        }
+        save_line(is_save, k, line, sizeof line);
 
         int tx = cx + 8;
         int ty = ry + 2;
@@ -1541,6 +1600,27 @@ static void draw_load(void)
 static void draw_save(void)
 {
     draw_load_save(true);
+}
+
+static void ui_load_common(void);
+static void ui_header(int x, int y, const char *label);
+static void ui_item(int x, int y, const char *label, bool armed, color_t col);
+static void ui_hints(const char *a_label, const char *b_label);
+static void draw_custom(void)
+{
+    ui_load_common();
+    ui_header(28, 56, "Custom maps");
+    int nc = game_num_custom_maps();
+    for (int i = 0; i < 8 && load_scroll + i < nc; i++) {
+        int k = load_scroll + i;
+        ui_item(40, 82 + i * 17, game_custom_map(k), k == load_sel, C_MENU);
+    }
+    if (nc > 8) {
+        char b[24];
+        snprintf(b, sizeof b, "%d of %d", load_sel + 1, nc);
+        text(FONT_SMALL, SW - 70, 60, C_TEXT_DIM, b);
+    }
+    ui_hints("Play", "Back");
 }
 
 static void draw_options(void)
@@ -2486,6 +2566,7 @@ static void h2h_menu_release(void);
 void menu_release_title(void)
 {
     h2h_menu_release();   // (the Head-To-Head menu's art: about half a megabyte)
+    if (pc_bg_spr) { rspq_wait(); sprite_free(pc_bg_spr); pc_bg_spr = NULL; }
     if (title_bg) { rspq_wait(); sprite_free(title_bg); title_bg = NULL; }
     if (glowcircle_spr) { rspq_wait(); sprite_free(glowcircle_spr); glowcircle_spr = NULL; }
     if (menuglow_spr) { rspq_wait(); sprite_free(menuglow_spr); menuglow_spr = NULL; }
@@ -2797,6 +2878,7 @@ static void draw_h2h_chars(void)
     font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, "Back");
     font_color(C_MENU);
     font_draw(FONT_SMALL, btn_x, by_btn, "Back");
+
 }
 
 static void draw_h2h_map(void)
@@ -2859,7 +2941,7 @@ static void draw_h2h_map(void)
     font_draw_scaled(FONT_MEDIUM, cs_x, cs_y, "MAP:", 1.05f);
 
     // Map Name Selector Box (identical styling to Controller Options)
-    const char *cur_map = h2h_map_titles[h2h_map_sel];
+    const char *cur_map = h2h_custom ? game_custom_map(h2h_custom_sel) : h2h_map_titles[h2h_map_sel];
     int label_w = (int)(font_width(FONT_MEDIUM, "MAP:") * 1.05f);
     int bx = cs_x + label_w + 14;
     int bw = (int)(font_width(FONT_MEDIUM, cur_map) * 1.05f) + 16;
@@ -2918,7 +3000,16 @@ static void draw_h2h_map(void)
         font_draw_scaled(FONT_MEDIUM, bx + 8, cs_y, cur_map, 1.05f);
     }
 
-    if (h2h_map_credits[h2h_map_sel]) {   // a community map: its maker, small, under the name
+    if (h2h_custom) {
+        font_begin(BLEND_ALPHA);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        char cbuf[32];
+        snprintf(cbuf, sizeof cbuf, "Custom map %d of %d", h2h_custom_sel + 1, game_num_custom_maps());
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw(FONT_SMALL, bx + 8 + 1, cs_y + 19 + 1, cbuf);
+        font_color(RGBA32(196, 181, 80, 230));
+        font_draw(FONT_SMALL, bx + 8, cs_y + 19, cbuf);
+    } else if (h2h_map_credits[h2h_map_sel]) {   // a community map: its maker, small, under the name
         font_begin(BLEND_ALPHA);
         rdpq_mode_filter(FILTER_BILINEAR);
         font_color(RGBA32(0, 0, 0, 217));
@@ -2926,7 +3017,7 @@ static void draw_h2h_map(void)
         font_color(RGBA32(196, 181, 80, 230));
         font_draw(FONT_SMALL, bx + 8, cs_y + 19, h2h_map_credits[h2h_map_sel]);
     }
-    if (!(h2h_map_ok & (1 << h2h_map_sel))) {   // (a map this ROM wasn't built with)
+    if (!h2h_custom && !(h2h_map_ok & (1 << h2h_map_sel))) {   // (a map this ROM wasn't built with)
         font_begin(BLEND_ALPHA);
         font_color(RGBA32(220, 90, 60, 255));
         font_draw(FONT_SMALL, bx + 8, cs_y + 19, "Not built into this ROM");
@@ -2938,7 +3029,7 @@ static void draw_h2h_map(void)
     int map_px = SW - map_w; // 222 (literally touches the right side of the screen)
     int map_py = 40;
 
-    if (h2h_map_spr[h2h_map_sel]) {
+    if (!h2h_custom && h2h_map_spr[h2h_map_sel]) {
         rdpq_set_mode_standard();
         rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
         rdpq_mode_filter(FILTER_BILINEAR);
@@ -3143,7 +3234,7 @@ static void draw_h2h_map(void)
         start_x = (SW - slot_w) / 2 - 2 * spacing; // -22
     }
 
-    for (int slot = 0; slot < 5; slot++) {
+    for (int slot = 0; slot < 5 && !h2h_custom; slot++) {
         int m = start_idx + slot;
         int sx = start_x + slot * spacing;
         if (m >= 0 && m < 11 && h2h_thumb_spr[m]) {
@@ -3203,12 +3294,196 @@ static void draw_h2h_map(void)
     font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, "Back");
     font_color(C_MENU);
     font_draw(FONT_SMALL, btn_x, by_btn, "Back");
+    btn_x += font_width(FONT_SMALL, "Back") + 28;
+
+    if (game_num_custom_maps() > 0) {   // (R) Custom maps / Official maps
+        const char *lbl = h2h_custom ? "Official maps" : "Custom maps";
+        char ic[2] = {FONT_ICON(PAD_R), 0};
+        font_begin(BLEND_ALPHA);
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, ic);
+        font_color(C_MENU);
+        font_draw(FONT_SMALL, btn_x, by_btn, ic);
+        btn_x += font_width(FONT_SMALL, ic) + 4;
+        font_color(RGBA32(0, 0, 0, 217));
+        font_draw(FONT_SMALL, btn_x + 1, by_btn + 1, lbl);
+        font_color(h2h_custom ? C_MENU_ARMED : C_MENU);
+        font_draw(FONT_SMALL, btn_x, by_btn, lbl);
+    }
+}
+
+// ------------------------------------------------------------------ the PC version's menu (a mod's ROM)
+// GameUI as on PC: the game's own background (resource/background, or an old mod's splash.bmp) and
+// title (resource/game_menu.tga, else its name), the menu as a list on the left, dialogs in frames
+static sprite_t *load_if(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fclose(f);
+    return sprite_load(path);
+}
+static bool pc_mode(void) { return game_pc_menu(); }
+
+static void draw_pc_title(int x, int y)
+{
+    if (!pc_tried) { pc_tried = true; pc_title_spr = load_if("rom:/ui/pc_title.sprite"); }
+    if (pc_title_spr) {
+        rdpq_set_mode_standard();
+        rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+        rdpq_mode_filter(FILTER_BILINEAR);
+        rdpq_sprite_blit(pc_title_spr, x, y, NULL);
+        return;
+    }
+    const char *name = game_mod_name()[0] ? game_mod_name() : "Half-Life";
+    char up[48];
+    int i = 0;
+    for (; name[i] && i < 47; i++) up[i] = (name[i] >= 'a' && name[i] <= 'z') ? name[i] - 32 : name[i];
+    up[i] = 0;
+    font_begin(BLEND_ALPHA);
+    rdpq_mode_filter(FILTER_BILINEAR);
+    font_color(RGBA32(0, 0, 0, 200));
+    font_draw_scaled(FONT_MEDIUM, x + 1, y + 1, up, 1.25f);
+    font_color(C_TEXT_BRIGHT);
+    font_draw_scaled(FONT_MEDIUM, x, y, up, 1.25f);
+}
+
+static void draw_pc_main(void)
+{
+    mitem_t items[8];
+    int n = main_items(items);
+    int x = 32, y = 112, step = 18;
+    draw_pc_title(x, y - 30);
+    for (int i = 0; i < n; i++) {
+        bool armed = i == main_sel && screen == SCR_MAIN;
+        if (screen == SCR_MAIN && anim_t < 0.06f * i) continue;   // items appear one after another
+        if (armed) {
+            float pulse = 0.75f + 0.25f * sinf(anim_t * 4.0f);
+            font_begin(BLEND_ADD);
+            font_color(RGBA32(255 * pulse * 0.55f, 178 * pulse * 0.55f, 67 * pulse * 0.55f, 255));
+            font_draw(FONT_GLOW, x, y + i * step, mi_label[items[i]]);
+        }
+        font_begin(BLEND_ALPHA);
+        font_color(RGBA32(0, 0, 0, 160));
+        font_draw(FONT_MEDIUM, x + 1, y + i * step + 1, mi_label[items[i]]);
+        text(FONT_MEDIUM, x, y + i * step, armed ? C_MENU_ARMED : C_MENU, mi_label[items[i]]);
+    }
+    if (screen == SCR_MAIN) {
+        font_begin(BLEND_ALPHA);
+        font_color(RGBA32(0, 0, 0, 160));
+        font_draw(FONT_SMALL, x + 1, SH - 29, mi_hint[items[main_sel]]);
+        text(FONT_SMALL, x, SH - 30, C_TEXT_DIM, mi_hint[items[main_sel]]);
+    }
+}
+
+static void draw_pc_newgame(void)
+{
+    int x = 70, y = 52, w = 180, h = 140;
+    frame(x, y, w, h, "New Game");
+    text(FONT_SMALL, x + 14, y + 22, C_TEXT, "Select Difficulty");
+    static const char *opts[] = {"Easy", "Medium", "Difficult", "Training"};
+    for (int i = 0; i < 4; i++) {
+        if (i == 3 && !game_train_map()[0]) {   // (a mod without a training map)
+            text(FONT_SMALL, x + 33, y + 39 + i * 14, C_TEXT_DIM, "No training map");
+            continue;
+        }
+        radio(x + 18, y + 38 + i * 14, opts[i], i == new_sel, i == new_sel);
+    }
+    help_text(x + 14, y + 96, w - 28, "Choose a difficulty, or the training course.");
+    button(x + w - 128, y + h - 22, 56, "Play (A)", true);
+    button(x + w - 66, y + h - 22, 56, "Cancel (B)", false);
+}
+
+static void draw_pc_load_save(bool is_save)
+{
+    int x = 24, y = 30, w = 272, h = 184;
+    frame(x, y, w, h, is_save ? "Save Game" : "Load Game");
+    static const char *tabs[] = {"Game Pak", "Controller Pak"};
+    int tx = x + 10;
+    for (int t = 0; t < 2; t++) {   // property sheet tabs (left / right)
+        int tw = font_width(FONT_SMALL, tabs[t]) + 14;
+        fill(tx, y + 20, tw, 14, t == pak_sel ? C_CONTROL_BG : C_WINDOW_BG);
+        bevel(tx, y + 20, tw, 14, C_BORDER_BRT, C_BORDER_DARK);
+        text(FONT_SMALL, tx + 7, y + 22, t == pak_sel ? C_TEXT_BRIGHT : C_TEXT_DIM, tabs[t]);
+        tx += tw + 2;
+    }
+    text(FONT_SMALL, x + w - 82, y + 22, C_TEXT_DIM, "Left / Right");
+    int ly = y + 36, lh = 6 * 15 + 4;
+    fill(x + 10, ly, w - 20, lh, C_WINDOW_BG);
+    bevel(x + 10, ly, w - 20, lh, C_BORDER_DARK, C_BORDER_BRT);
+    int total = pak_sel == 0 ? (is_save ? 2 : num_saves) : (!pak_ok || (!is_save && num_pak_saves == 0) ? 1 : is_save ? 3 : num_pak_saves);
+    if (!total) text(FONT_SMALL, x + 16, ly + 4, C_TEXT_DIM, "No saved games.");
+    for (int i = 0; i < 6 && load_scroll + i < total; i++) {
+        int k = load_scroll + i;
+        int ry = ly + 2 + i * 15;
+        char line[64];
+        save_line(is_save, k, line, sizeof line);
+        if (k == load_sel) fill(x + 12, ry, w - 24, 15, C_SEL_BG);
+        text(FONT_SMALL, x + 16, ry + 2, k == load_sel ? C_TEXT_BRIGHT : C_TEXT, line);
+    }
+    if (total > 6) {   // scroll bar
+        int track = 6 * 15;
+        int th = track * 6 / total, ty = track * load_scroll / total;
+        fill(x + w - 16, ly + 2 + ty, 4, th < 6 ? 6 : th, C_BORDER_BRT);
+    }
+    help_text(x + 12, y + h - 40, w - 24, is_save ? "Choose where to save your game." : "Autosaves and saved games, newest at the top.");
+    button(x + w - 128, y + h - 22, 56, is_save ? "Save (A)" : "Load (A)", true);
+    button(x + w - 66, y + h - 22, 56, "Cancel (B)", false);
+}
+
+static void draw_pc_options(void)
+{
+    static const char *labels[] = {"Audio / Video", "Controller", "Cheat Codes", "Credits"};
+    static const char *hints[] = {"Sound volume, video and display options.", "Control schemes, sensitivity and the look axis.",
+                                  "Cheats and developer options (needs Enable cheats).", "The people who made this port."};
+    int x = 70, y = 52, w = 180, h = 140;
+    frame(x, y, w, h, "Options");
+    for (int i = 0; i < 4; i++) {
+        int ry = y + 24 + i * 16;
+        bool armed = i == opt_menu_sel;
+        if (armed) fill(x + 10, ry - 2, w - 20, 15, C_SEL_BG);
+        text(FONT_SMALL, x + 16, ry, i == 2 && !settings.cheats ? C_TEXT_DIM : armed ? C_TEXT_BRIGHT : C_TEXT, labels[i]);
+    }
+    help_text(x + 14, y + 92, w - 28, hints[opt_menu_sel]);
+    button(x + w - 66, y + h - 22, 56, "Done (B)", true);
+}
+
+static void draw_pc_leave(void)
+{
+    int x = 70, y = 80, w = 180, h = 70;
+    frame(x, y, w, h, "Leave game");
+    text_c(FONT_SMALL, x + w / 2, y + 24, C_TEXT, "Return to the main menu?");
+    button(x + w / 2 - 62, y + h - 22, 56, "OK", leave_sel == 0);
+    button(x + w / 2 + 6, y + h - 22, 56, "Cancel", leave_sel == 1);
+}
+
+// the PC version's screens; false: one this menu draws the usual way (Options' own pages)
+static bool draw_pc(void)
+{
+    switch (screen) {
+    case SCR_MAIN: draw_pc_main(); return true;
+    case SCR_NEWGAME: draw_pc_main(); draw_pc_newgame(); return true;
+    case SCR_LOAD: draw_pc_main(); draw_pc_load_save(false); return true;
+    case SCR_SAVE: draw_pc_main(); draw_pc_load_save(true); return true;
+    case SCR_OPTIONS: draw_pc_main(); draw_pc_options(); return true;
+    case SCR_LEAVE: draw_pc_main(); draw_pc_leave(); return true;
+    default: return false;
+    }
 }
 
 void menu_draw(void)
 {
     if (!open) return;
     if (in_game) fill(0, 0, SW, SH, RGBA32(0, 0, 0, 120));   // the game shows through, dimmed
+    else if (pc_mode()) {
+        if (!pc_bg_spr) pc_bg_spr = load_if("rom:/ui/pc_bg.sprite");
+        if (pc_bg_spr) {
+            rdpq_set_mode_copy(false);
+            rdpq_sprite_blit(pc_bg_spr, 0, 0, NULL);
+            rdpq_set_mode_standard();
+        }
+    }
+    if (pc_mode() && draw_pc()) return;
+    if (in_game || pc_mode()) {}
     else {
         // title screen backdrop
         if (!title_tried) { title_tried = true; title_bg = sprite_load("rom:/ui/title.sprite"); }
@@ -3253,6 +3528,7 @@ void menu_draw(void)
     else if (screen == SCR_LEAVE) draw_title_hl();
     else if (screen == SCR_H2H_CHARS) draw_h2h_chars();
     else if (screen == SCR_H2H_MAP) draw_h2h_map();
+    else if (screen == SCR_CUSTOM) draw_custom();
     else draw_main();
     switch (screen) {
     case SCR_OPTIONS_LEGACY: draw_options_legacy(); break;

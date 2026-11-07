@@ -20,7 +20,7 @@ Output is big-endian (the VR4300 runs big-endian).
 
 Usage: bsp2n64.py map.bsp out.hlb [--wad path.wad ...] [--grid 64] [--maxtexels 2048]
 """
-import struct, sys, os, math, argparse
+import struct, sys, os, math, argparse, re
 import numpy as np
 
 LUMP_NAMES = ['ENTITIES', 'PLANES', 'TEXTURES', 'VERTICES', 'VISIBILITY', 'NODES',
@@ -46,6 +46,12 @@ class BSP:
         if ver != 30:
             raise SystemExit('Not a Half-Life BSP (version %d)' % ver)
         self.lumps = [struct.unpack_from('<ii', data, 4 + 8 * i) for i in range(15)]
+        # Blue Shift's maps list the planes before the entities (the first two lumps swapped)
+        def text(lump):
+            o, n = lump
+            return data[o:o + min(n, 64)].lstrip()[:1] == b'{'
+        if not text(self.lumps[0]) and text(self.lumps[1]):
+            self.lumps[0], self.lumps[1] = self.lumps[1], self.lumps[0]
 
     def raw(self, name):
         o, l = self.lumps[L[name]]
@@ -281,11 +287,15 @@ def choose_grid(lm, bmin, finest, tol):
     return finest
 
 
-def convert(bsp_path, out_path, wads, grid, maxtexels, verbose=True, lm_tolerance=12):
+def convert(bsp_path, out_path, wads, grid, maxtexels, verbose=True, lm_tolerance=12, aliases=None):
     data = open(bsp_path, 'rb').read()
     bsp = BSP(data)
 
     ent_text = bsp.raw('ENTITIES').split(b'\0')[0].decode('latin1')
+    if aliases:   # (an expansion's classes -> the game's, build_assets.EXPANSIONS)
+        lower = {k.lower(): v for k, v in aliases.items()}
+        ent_text = re.sub(r'("classname"\s*")([^"]*)(")',
+                          lambda m: m.group(1) + lower.get(m.group(2).lower(), m.group(2)) + m.group(3), ent_text)
     ents = parse_entities(ent_text)
 
     planes = bsp.arr('PLANES', '<4fi')
@@ -399,7 +409,7 @@ def convert(bsp_path, out_path, wads, grid, maxtexels, verbose=True, lm_toleranc
 
         lw, lh = ext[0] // 16 + 1, ext[1] // 16 + 1
         lm = None
-        if lofs >= 0 and styles and lighting:
+        if lofs >= 0 and styles and lighting and lofs + len(styles) * lw * lh * 3 <= len(lighting):   # (some old maps point past their lighting)
             n = lw * lh * 3
             arrs = []
             for si, st in enumerate(styles):
