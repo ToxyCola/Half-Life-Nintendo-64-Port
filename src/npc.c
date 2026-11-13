@@ -696,16 +696,18 @@ static bool box_free(npc_t *n, const float *p, int self)
 }
 
 // SV_movestep: step up to 18 units, never off a ledge (unless `allow_fall`); slides along walls
+// SF_MONSTER_HITMONSTERCLIP: func_monsterclip brushes stop it
+#define MCLIP(n) ((entities[(n)->ent].spawnflags & 4) ? TR_MONSTERCLIP : 0)
 static bool walk_step(npc_t *n, int self, float dx, float dy, bool allow_fall, int *blocker)
 {
     // step up 18, across, then down (no room above: across from where it stands)
     float up[3] = {n->origin[0], n->origin[1], n->origin[2] + 18};
     float fw[3] = {up[0] + dx, up[1] + dy, up[2]};
     gtrace_t t1;
-    game_trace(up, fw, n->mins, n->maxs, 0, self, &t1);
+    game_trace(up, fw, n->mins, n->maxs, MCLIP(n), self, &t1);
     if (t1.startsolid) {
         up[2] = fw[2] = n->origin[2];
-        game_trace(up, fw, n->mins, n->maxs, 0, self, &t1);
+        game_trace(up, fw, n->mins, n->maxs, MCLIP(n), self, &t1);
         if (t1.startsolid) return false;
     }
     if (t1.fraction < 1 && blocker) *blocker = t1.ent;
@@ -713,14 +715,14 @@ static bool walk_step(npc_t *n, int self, float dx, float dy, bool allow_fall, i
         // slide: try each axis on its own
         float ax[3] = {up[0] + dx, up[1], up[2]}, ay[3] = {up[0], up[1] + dy, up[2]};
         gtrace_t tx, ty;
-        game_trace(up, ax, n->mins, n->maxs, 0, self, &tx);
-        game_trace(up, ay, n->mins, n->maxs, 0, self, &ty);
+        game_trace(up, ax, n->mins, n->maxs, MCLIP(n), self, &tx);
+        game_trace(up, ay, n->mins, n->maxs, MCLIP(n), self, &ty);
         if (fabsf(dx) * tx.fraction >= fabsf(dy) * ty.fraction) t1 = tx; else t1 = ty;
         if (t1.startsolid || t1.fraction < 0.05f) return false;
     }
     float dn[3] = {t1.endpos[0], t1.endpos[1], t1.endpos[2] - 18 - 18};
     gtrace_t t2;
-    game_trace(t1.endpos, dn, n->mins, n->maxs, 0, self, &t2);
+    game_trace(t1.endpos, dn, n->mins, n->maxs, MCLIP(n), self, &t2);
     if (t2.startsolid) return false;
     if (t2.fraction >= 1) {
         if (!allow_fall) return false;      // a ledge: MOVE_STEP won't walk off it
@@ -751,7 +753,7 @@ static bool local_walk(const float *a, const float *b, void *vctx)
     npc_t *n = c->n;
     if (n->flags & NF_FLY) {
         gtrace_t tr;
-        game_trace(a, b, n->mins, n->maxs, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS, c->self, &tr);
+        game_trace(a, b, n->mins, n->maxs, TR_IGNORE_PLAYER | TR_IGNORE_MONSTERS | MCLIP(n), c->self, &tr);
         return tr.fraction >= 1 && !tr.startsolid;
     }
     float d = dist2d(a, b);
@@ -1595,9 +1597,11 @@ static void npc_die(npc_t *n, int dmgtype, const float *dir)
     }
     entity_t *e = &entities[n->ent];
     if (e->target[0]) ents_fire_entity_target(e);   // a monster's "TriggerTarget" on death
-    const char *tt = ent_value(e, "TriggerTarget");
+    // (ent_value hands back one shared buffer: the condition's lookup used to overwrite the target's,
+    // so a gunner's death fired "4" and On A Rail's guns kept shooting after their men were dead)
     int cond = ent_value(e, "TriggerCondition") ? atoi(ent_value(e, "TriggerCondition")) : 0;
-    if (tt && cond == 4 && n->trig_cond == 4) { n->trig_cond = -1; ents_fire_targets(tt); }   // AITRIGGER_DEATH
+    const char *tt = ent_value(e, "TriggerTarget");
+    if (tt && cond == 4 && n->trig_cond == 4) { char t[48]; snprintf(t, sizeof t, "%s", tt); n->trig_cond = -1; ents_fire_targets(t); }   // AITRIGGER_DEATH
 }
 
 // ---------------------------------------------------------------- attacks
@@ -3463,6 +3467,17 @@ void npcs_think(float dt)
 #ifdef PROFX
         uint32_t q2 = TICKS_READ();
 #endif
+        {   // CTriggerPush::Touch on monsters: their base velocity (c1a1c's "pusha" slides the
+            // headcrabs off the ledge onto the player's lift)
+            extern int ents_push_count(void);
+            extern void ents_push_at(const float *o, float *v);
+            if (ents_push_count() && !(n->flags & (NF_FLY | NF_NODROP | NF_ITEM | NF_STATIC)) && n->script < 0) {
+                float c[3] = {n->origin[0], n->origin[1], n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f}, base[3];
+                ents_push_at(c, base);
+                if (base[0] != 0 || base[1] != 0) walk_step(n, i, base[0] * dt, base[1] * dt, true, NULL);
+                if (base[2] > 0) { n->vz = fmaxf(n->vz, base[2]); n->onground = false; }
+            }
+        }
         gravity(n, dt);
 #ifdef PROFX
         uint32_t q3 = TICKS_READ();

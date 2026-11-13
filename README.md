@@ -7,7 +7,7 @@ lighting, played with Valve's own player-movement code, running on stock N64 har
 Expansion Pak. It also has the PlayStation 2 version's two-player split-screen **Head-To-Head**
 mode, built from your own copy of the PS2 game.
 
-**Current release: 1.4** ([what's new](#whats-new-in-14), [1.3.3](#whats-new-in-133), [1.3.2](#whats-new-in-132), [1.3.1](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
+**Current release: 1.4.5** ([what's new](#whats-new-in-145), [1.4](#whats-new-in-14), [1.3.3](#whats-new-in-133), [1.3.2](#whats-new-in-132), [1.3.1](#whats-new-in-131), [1.3](#whats-new-in-13)). Get the builder for Windows, Linux or macOS from the [Releases](../../releases) page; it
 builds the ROM from your own copy of Half-Life (see
 [Building the ROM with the builder](#building-the-rom-with-the-builder-the-easy-way)). Notes for
 earlier versions are on their release pages.
@@ -24,6 +24,22 @@ It is built from:
 * **A new N64 engine** written for this port, because the GoldSrc engine (`hw.dll`) has never
   been released as source. It uses [libdragon](https://github.com/DragonMinded/libdragon) and
   [tiny3d](https://github.com/HailToDodongo/tiny3d).
+
+## What's new in 1.4.5
+
+**Fixes**
+
+- **Blast Pit:** the rocket engine can be fired again after switching on the oxygen, fuel and power (#30), and the big fan in c1a4e lifts the player and grenades (#19).
+- **Power Up:** the large door in c2a1 opens once the generator in c2a1a is on (#24), and the Gargantua stays in its arena instead of following the player into the corridors (#23).
+- **On A Rail:** shooting the track switches flips them and changes the track (#27), the mounted guns stop firing when the soldier manning them dies (#28), and a satchel thrown onto a lift rides up with it (#29).
+- **Questionable Ethics:** the "psycho surgery" machine in c2a4e hurts whoever gets in its way again (#22).
+- **Surface Tension:** the door between c2a5b and c2a5c no longer sends the player back to the map they just left when it closes behind them (#21).
+- **Lambda Core:** the spinning platforms in c3a2c carry the player around with them (#20).
+- **c2a4b:** the conveyor belts are in the right place and move the player (#18).
+- **c1a1c:** the headcrabs slide off the ledge onto the lift as they should (#16).
+- Tripmines placed on floors and ceilings face out of the surface (#25).
+- Crossbow bolts stuck in a wall no longer replay their hit sound (#26).
+- Walls, breakables and other brushes placed with a direction are no longer drawn and solid in the wrong place.
 
 ## What's new in 1.4
 

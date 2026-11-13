@@ -399,6 +399,8 @@ typedef struct {
     int target;         // for homing
     bool stuck;
     float bounce_t;     // when the last bounce sound played
+    int ride;           // a satchel at rest: the brush entity it sits on (0 the world)
+    float ride_at[3];   //   that entity's origin when last moved with it
     float beam_end[3];
     studio_t *model;
     float frame;
@@ -593,7 +595,20 @@ static void projs_think_one(proj_t *p, float dt)
             }
             continue;
         }
-        if (p->kind == P_SATCHEL && p->stuck) continue;
+        if (p->kind == P_BOLT && p->stuck) continue;   // (in the wall: it used to sag into it and "hit" every frame)
+        if (p->kind == P_SATCHEL && p->stuck) {
+            // resting on a moving brush (a lift, a train): it rides along (the satchel's MOVETYPE_TOSS
+            // keeps its groundentity) - On A Rail's crates at the top of the lift
+            if (p->ride > 0) {
+                const entity_t *re = &entities[p->ride];
+                if (re->removed) { p->stuck = false; p->ride = 0; continue; }
+                float d[3] = {re->origin[0] - p->ride_at[0], re->origin[1] - p->ride_at[1], re->origin[2] - p->ride_at[2]};
+                if (d[0] || d[1] || d[2]) {
+                    for (int k = 0; k < 3; k++) { p->o[k] += d[k]; p->ride_at[k] = re->origin[k]; }
+                }
+            }
+            continue;
+        }
         // homing
         if (p->kind == P_HORNET || p->kind == P_HORNET_P || p->kind == P_SNARK || (p->kind == P_BALL && p->target >= 0) ||
             p->kind == P_TELEBALL || p->kind == P_NIHZAP) {
@@ -632,7 +647,12 @@ static void projs_think_one(proj_t *p, float dt)
         if (p->kind == P_HGRENADE || p->kind == P_ARGRENADE || p->kind == P_SATCHEL || p->kind == P_SNARK || p->kind == P_SPIT || p->kind == P_MORTAR)
             p->v[2] -= (p->kind == P_ARGRENADE ? 400 : 800) * dt;
         if (p->kind == P_BOLT && pm_get_waterlevel() < 3) p->v[2] -= 40 * dt;
-        float to[3] = {p->o[0] + p->v[0] * dt, p->o[1] + p->v[1] * dt, p->o[2] + p->v[2] * dt};
+        float base[3] = {0, 0, 0};
+        if (p->kind == P_HGRENADE || p->kind == P_ARGRENADE || p->kind == P_SATCHEL || p->kind == P_SNARK) {
+            extern void ents_push_at(const float *o, float *v);
+            ents_push_at(p->o, base);   // a fan's push field carries them too (their base velocity)
+        }
+        float to[3] = {p->o[0] + (p->v[0] + base[0]) * dt, p->o[1] + (p->v[1] + base[1]) * dt, p->o[2] + (p->v[2] + base[2]) * dt};
         static const float smn[3] = {-2, -2, -2}, smx[3] = {2, 2, 2};
         gtrace_t tr;
         int flags = p->owner == 0 ? TR_IGNORE_PLAYER : 0;
@@ -738,7 +758,11 @@ static void projs_think_one(proj_t *p, float dt)
             for (int k = 0; k < 3; k++) p->v[k] = (p->v[k] - 2 * dn * tr.normal[k]) * 0.6f;
             if (tr.normal[2] > 0.7f && sp < 60) {
                 p->v[0] = p->v[1] = p->v[2] = 0;
-                if (p->kind == P_SATCHEL) p->stuck = true;
+                if (p->kind == P_SATCHEL) {
+                    p->stuck = true;
+                    p->ride = tr.ent > 0 && tr.ent < num_entities ? tr.ent : 0;
+                    if (p->ride) memcpy(p->ride_at, entities[p->ride].origin, 12);
+                }
             } else if (sp > 80 && dn < -40 && wtime - p->bounce_t > 0.2f) {
                 p->bounce_t = wtime;
                 char s[32];
@@ -2337,6 +2361,21 @@ void weapons_draw3d(const float *eye, const float *angles, const uint8_t *light)
         studio_draw_t d = {.model = p->model, .yaw = p->yaw, .seq = 0, .frame = p->frame, .body = p->kind == P_TRIPMINE ? 3 : 0, .cacheable = true};
         if (p->kind == P_TRIPMINE) { int s = studio_find_seq(p->model, "world"); d.seq = s >= 0 ? s : 0; }
         memcpy(d.origin, p->o, 12);
+        if (p->kind == P_TRIPMINE && fabsf(p->v[2]) > 0.05f) {
+            // on a floor, a ceiling or a slope: the mine faces out of the surface (its +x along the
+            // beam), not just turned by yaw (UTIL_VecToAngles of the plane's normal)
+            float f[3] = {p->v[0], p->v[1], p->v[2]}, l = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+            for (int k = 0; k < 3; k++) f[k] /= l > 0 ? l : 1;
+            float ref[3] = {0, 0, 1};
+            if (fabsf(f[2]) > 0.95f) { ref[0] = cosf(p->yaw * (float)M_PI / 180); ref[1] = sinf(p->yaw * (float)M_PI / 180); ref[2] = 0; }
+            float lf[3] = {ref[1] * f[2] - ref[2] * f[1], ref[2] * f[0] - ref[0] * f[2], ref[0] * f[1] - ref[1] * f[0]};   // left = ref x f
+            float ll = sqrtf(lf[0] * lf[0] + lf[1] * lf[1] + lf[2] * lf[2]);
+            for (int k = 0; k < 3; k++) lf[k] /= ll > 0 ? ll : 1;
+            float up[3] = {f[1] * lf[2] - f[2] * lf[1], f[2] * lf[0] - f[0] * lf[2], f[0] * lf[1] - f[1] * lf[0]};   // up = f x left
+            for (int k = 0; k < 3; k++) { d.xform[k][0] = f[k]; d.xform[k][1] = lf[k]; d.xform[k][2] = up[k]; d.xform[k][3] = p->o[k]; }
+            d.use_xform = true;
+            d.cacheable = false;
+        }
         bsp_light_at(p->o, d.light);
         studio_draw(&d);
     }

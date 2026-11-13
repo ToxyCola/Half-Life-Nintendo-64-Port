@@ -176,7 +176,12 @@ static event_t events[MAX_EVENTS];
 static int num_events;
 static int fire_depth;
 static int cur_activator = -1;   // entity that caused the current FireTargets (for func_trackautochange)
-static int cur_caller = -1;      // entity whose target is being fired (pCaller: multisource sources)
+static int cur_caller = -1;
+// the active trigger_push fields (see ents_push_at)
+#define MAX_PUSH_LIST 16
+static int16_t push_list[MAX_PUSH_LIST], push_next[MAX_PUSH_LIST];
+static int num_push_list, num_push_next;
+      // entity whose target is being fired (pCaller: multisource sources)
 
 // ---- global states (CGlobalState: env_global, multisource/trigger_auto "globalstate"); they live
 // across maps and in saved games
@@ -318,8 +323,35 @@ void pm_set_velocity(const float *v);
 // after "changedelay" (Office Complex: starts the elevator you arrive in)
 static char carry_target[48];
 static float carry_delay;
+static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs);
+// CChangeLevel::InTransitionVolume: with trigger_transition volumes named after the landmark, the
+// level changes only while the player is in one of them. Surface Tension's c2a5b/c2a5c doors fire
+// their level change when they shut, which happens behind the player who has walked on: without
+// this the door sent them back to the map they had just come from
+void pm_get_hull(float *mins, float *maxs);
+static bool in_transition_volume(const char *landmark)
+{
+    if (!landmark || !landmark[0]) return true;
+    bool any = false;
+    float o[3], mn[3], mx[3];
+    pm_get_origin(o);
+    pm_get_hull(mn, mx);
+    for (int i = 1; i < num_entities; i++) {
+        entity_t *t = &entities[i];
+        if (t->model <= 0 || strcasecmp(t->targetname, landmark) || strcasecmp(t->classname, "trigger_transition")) continue;
+        any = true;
+        if (player_touches(t, o, mn, mx)) return true;
+    }
+    return !any;
+}
+
 static void request_changelevel(entity_t *e)
 {
+    {
+        char lm0[48];
+        str_copy(lm0, ent_value(e, "landmark"), sizeof(lm0));
+        if (!in_transition_volume(lm0)) { debugf("changelevel %s: player isn't in the transition volume %s\n", ent_value(e, "map"), lm0); return; }
+    }
     const char *ct = ent_value(e, "changetarget");
     str_copy(carry_target, ct ? ct : "", sizeof(carry_target));
     carry_delay = ent_float(e, "changedelay", 0);
@@ -329,9 +361,13 @@ static void request_changelevel(entity_t *e)
     game_request_changelevel(map, lm);
 }
 
-void ents_fire_targets(const char *name)
+void ents_fire_targets(const char *name0)
 {
-    if (!name || !name[0]) return;
+    if (!name0 || !name0[0]) return;
+    // a copy: the name often comes straight from ent_value()'s shared buffer, which the targets'
+    // own Use() lookups overwrite while this loop is still finding the rest of them
+    char name[48];
+    str_copy(name, name0, sizeof(name));
     debugf("[%.1f] fire %s\n", g_time, name);
     fire_depth++;
     for (int i = ents_find_targetname(name, 1); i >= 0; i = ents_find_targetname(name, i + 1))
@@ -503,11 +539,14 @@ static void mover_reached(entity_t *e)
             if (!plat_toggle(e)) e->nextthink = g_time + 3.0f;
         } else if (e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) {
             fire_entity_target(e);
-            if (e->wait >= 0) e->nextthink = g_time + e->wait;
+            // CBaseButton::TriggerAndWait: a toggle button stays in until it's used (or shot) again
+            if (e->wait >= 0 && !(e->spawnflags & 32)) e->nextthink = g_time + e->wait;
         }
     } else if (e->state == MS_GOING_DOWN) {
         e->state = MS_AT_BOTTOM;
         e->nextthink = 0;
+        // CBaseButton::ButtonBackHome: a toggle button fires its targets again on the way back out
+        if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && (e->spawnflags & 32)) fire_entity_target(e);
         // CBaseDoor::DoorHitBottom: "netname" fires when the door is back shut (the Office
         // Complex elevator door: closing it starts the level change to c1a2)
         if (is_door(e)) {
@@ -979,6 +1018,15 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
         }
         return;
     }
+    if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && !e->removed && ent_float(e, "health", 0) > 0) {
+        // CBaseButton::TakeDamage: a button with health is pressed by shooting it (On A Rail's
+        // track switches); like a press, it does nothing while it's moving
+        if (e->state == MS_AT_BOTTOM || (e->state == MS_AT_TOP && (e->spawnflags & 32))) {
+            if (!master_ok(e)) door_locked_sound(e);
+            else ent_use(e);
+        }
+        return;
+    }
     if (!ents_brush_is_breakable(ent)) {
         // a hit on unbreakable glass/metal still makes its impact sound
         return;
@@ -1300,6 +1348,11 @@ static void ent_use(entity_t *e)
             e->state = MS_GOING_UP;
             if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang2);
             else move_linear(e, e->pos2);
+        } else if (e->state == MS_AT_TOP && (e->spawnflags & 32)) {   // SF_BUTTON_TOGGLE: ButtonReturn
+            snd_emit(e - entities, CHAN_VOICE, button_sound(e->movesnd), 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+            e->state = MS_GOING_DOWN;
+            if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang1);
+            else move_linear(e, e->pos1);
         }
         break;
     case ENT_PLAT:
@@ -1413,7 +1466,11 @@ static void ent_use(entity_t *e)
         guntarget_next(e);
         break;
     }
+    case ENT_CONVEYOR:                   // CFuncConveyor::Use: the belt reverses
+        e->speed = -e->speed;
+        break;
     case ENT_TRIGGER_HURT:
+    case ENT_TRIGGER_PUSH:               // (c1a4e's silo fan: its push fields start off and are switched on with it)
         e->active = !e->active;          // CBaseTrigger::ToggleUse
         break;
     case ENT_MULTISOURCE:
@@ -1584,6 +1641,17 @@ static void spawn_entity(entity_t *e)
     if (e->rendermode != 0 && e->renderamt == 0 && e->rendermode != 4) e->visible = false;
 
     float size[3];
+    // brushes whose "angle" is only an editor direction: CFuncWall / CFuncIllusionary set
+    // pev->angles = g_vecZero, CBreakable keeps the yaw for its gibs and zeroes it (an "angle" key
+    // used to turn them about the world origin, drawn and solid away from where they are)
+    switch (e->type) {
+    case ENT_WALL: case ENT_WALL_TOGGLE: case ENT_ILLUSIONARY: case ENT_BREAKABLE: case ENT_PUSHABLE:
+    case ENT_INVISIBLE_BRUSH: case ENT_LADDER: case ENT_RECHARGE: case ENT_HEALTHCHARGER:
+        if (e->model > 0 && strcasecmp(e->classname, "func_rotating")) memset(e->angles, 0, 12);
+        break;
+    default:
+        break;
+    }
     switch (e->type) {
     case ENT_WORLD:
         e->visible = false; e->solid = SOLID_NOT; // drawn separately
@@ -1747,6 +1815,10 @@ static void spawn_entity(entity_t *e)
         }
         break;
     case ENT_CONVEYOR:
+        // CFuncConveyor::Spawn: "angle" is the belt's direction (SetMovedir, which zeroes the
+        // angles: c2a4b's belts were drawn turned about the world origin, away from where they are)
+        set_movedir(e);
+        if (e->speed == 0) e->speed = 100;
         e->solid = (e->spawnflags & 2) ? SOLID_NOT : SOLID_BSP;
         break;
     case ENT_TRAIN:
@@ -2476,6 +2548,40 @@ static float angle_distance(float next, float cur)
 }
 
 // move a brush entity by (delta, dyaw) and carry the player if they stand on it (SV_Push/SV_PushRotate)
+// CFuncRotating::Blocked: a spinning brush that runs into the player or a monster stops there and
+// does its "dmg" to them (DMG_CRUSH) - c2a4e's "psycho surgery" machine (dmg 1000) used to pass
+// harmlessly through people. true: blocked this frame
+bool pm_box_in_entity(int ent, const float *c);
+void pm_get_hull(float *mins, float *maxs);
+static bool rotating_blocked(entity_t *e, int idx)
+{
+    bmodel_t *bm = &world.bmodels[e->model];
+    float r = 0;
+    for (int j = 0; j < 3; j++) r = fmaxf(r, fmaxf(fabsf(bm->mins[j]), fabsf(bm->maxs[j])));
+    r = r * 1.74f + 48;
+    float dmg = -1;
+    bool blocked = false;
+    float porg[3];
+    pm_get_origin(porg);
+    if (player_alive() && fabsf(porg[0] - e->origin[0]) < r && fabsf(porg[1] - e->origin[1]) < r && fabsf(porg[2] - e->origin[2]) < r &&
+        pm_player_in_entity(idx, porg)) {
+        blocked = true;
+        dmg = ent_float(e, "dmg", 0);
+        if (dmg > 0) player_take_damage(dmg, DMG_CRUSH, e->origin, idx);
+    }
+    for (int n = 0; n < num_npcs; n++) {
+        if (!npc_alive(n)) continue;
+        npc_t *m = &npcs[n];
+        float c[3] = {m->origin[0], m->origin[1], m->origin[2] + 36};
+        if (fabsf(c[0] - e->origin[0]) > r || fabsf(c[1] - e->origin[1]) > r || fabsf(c[2] - e->origin[2]) > r) continue;
+        if (!pm_box_in_entity(idx, c)) continue;
+        blocked = true;
+        if (dmg < 0) dmg = ent_float(e, "dmg", 0);
+        if (dmg > 0) npc_take_damage(n, dmg, DMG_CRUSH, NULL, 0);
+    }
+    return blocked;
+}
+
 static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
 {
     float porg[3];
@@ -2994,6 +3100,12 @@ void ents_touch_only(float dt)
                 pm_add_basevelocity(v);
             }
             break;
+        case ENT_CONVEYOR:
+            if (e->solid == SOLID_BSP && pm_entity_for_physent(pm_get_groundent()) == i) {
+                float v[3] = {e->movedir[0] * e->speed, e->movedir[1] * e->speed, 0};
+                pm_add_basevelocity(v);
+            }
+            break;
         case ENT_TRIGGER_GRAVITY:
             if (player_touches(e, porg, pmins, pmaxs)) {
                 extern void pm_set_gravity(float g);
@@ -3010,6 +3122,9 @@ void ents_touch_only(float dt)
 void ents_think(float dt)
 {
     frame_dt_for_use = dt;
+    memcpy(push_list, push_next, sizeof(push_list));   // last frame's active push fields
+    num_push_list = num_push_next;
+    num_push_next = 0;
     if (pushable_settle_pending) { settle_pushables(); game_trace_begin_frame(); }
     g_time += dt;
     // delayed events
@@ -3056,7 +3171,7 @@ void ents_think(float dt)
             case ENT_TRIGGER_AUTO: case ENT_TRIGGER_CHANGELEVEL: case ENT_TRIGGER_HURT: case ENT_TRIGGER_MULTIPLE:
             case ENT_TRIGGER_ONCE: case ENT_TRIGGER_PUSH: case ENT_TRIGGER_TELEPORT:
             case ENT_TRIGGER_GRAVITY: case ENT_FRICTION: case ENT_AUTOSAVE: case ENT_MOMENTARY_DOOR:
-            case ENT_MOMENTARY_BUTTON: case ENT_PENDULUM: case ENT_TANK:
+            case ENT_MOMENTARY_BUTTON: case ENT_PENDULUM: case ENT_TANK: case ENT_CONVEYOR:
                 think_list[num_think++] = i;
                 break;
             default:
@@ -3155,13 +3270,25 @@ void ents_think(float dt)
                 if (e->state == MS_GOING_UP) train_wait(e); else train_next(e);
             }
             break;
-        case ENT_TRIGGER_AUTO:
-            // triggers.cpp CAutoTrigger: fire once shortly after the map starts
-            if (!e->removed && g_time > 0.2f) {
-                if (global_ok(e)) queue_fire(e->target, e->delay);   // CAutoTrigger: only with its global state on
-                e->removed = true;
+        case ENT_TRIGGER_AUTO: {
+            // triggers.cpp CAutoTrigger: fires shortly after the map starts (and again after each
+            // restore: Precache sets its think), only with its global state on; it removes itself
+            // only when it has fired with SF_AUTO_FIREONCE. It used to be removed either way, so
+            // c1a4i's "power / oxygen / fuel on" triggers, run with the states still off on the way
+            // through, never ran on the return and the engine test couldn't be fired
+            static int16_t auto_gen[MAX_ENTITIES];
+            if (!e->removed && g_time > 0.2f && i < MAX_ENTITIES && auto_gen[i] != (int16_t)(ents_gen + 1)) {
+                auto_gen[i] = (int16_t)(ents_gen + 1);
+                if (global_ok(e)) {
+                    int oldc = cur_caller;
+                    cur_caller = i;
+                    queue_fire(e->target, e->delay);
+                    cur_caller = oldc;
+                    if (e->spawnflags & 1) e->removed = true;   // SF_AUTO_FIREONCE
+                }
             }
             break;
+        }
         case ENT_TRACKAUTO:
             trackchange_think(e, i, dt);
             break;
@@ -3400,11 +3527,21 @@ void ents_think(float dt)
             if (e->model > 0 && !e->targetname[0] && player_touches(e, porg, pmins, pmaxs)) game_end_section();
             break;
         case ENT_ROTATING:
-            if (e->active)
-                for (int k = 0; k < 3; k++) {
-                    e->angles[k] += e->avelocity[k] * e->speed * dt;
-                    e->angles[k] = fmodf(e->angles[k], 360.0f);
-                }
+            if (e->active) {
+                float was[3];
+                memcpy(was, e->angles, 12);
+                if (e->avelocity[0] == 0 && e->avelocity[2] == 0 && e->solid == SOLID_BSP && e->model > 0) {
+                    // spinning about the vertical: whoever stands on it turns with it (SV_PushRotate;
+                    // Lambda Core's c3a2c platforms used to turn under the player)
+                    static const float zero[3] = {0, 0, 0};
+                    push_entity(e, i, zero, e->avelocity[1] * e->speed * dt);
+                } else
+                    for (int k = 0; k < 3; k++) {
+                        e->angles[k] += e->avelocity[k] * e->speed * dt;
+                        e->angles[k] = fmodf(e->angles[k], 360.0f);
+                    }
+                if (e->solid == SOLID_BSP && e->model > 0 && rotating_blocked(e, i)) memcpy(e->angles, was, 12);
+            }
             break;
         case ENT_TRIGGER_ONCE:
         case ENT_TRIGGER_MULTIPLE:
@@ -3466,9 +3603,18 @@ void ents_think(float dt)
             }
             break;
         case ENT_TRIGGER_PUSH:
+            if (e->active && e->model > 0 && num_push_next < MAX_PUSH_LIST) push_next[num_push_next++] = (int16_t)i;
             if (e->active && e->model > 0 && player_touches(e, porg, pmins, pmaxs)) {
                 float v[3];
                 for (int k = 0; k < 3; k++) v[k] = e->movedir[k] * e->speed;
+                pm_add_basevelocity(v);
+            }
+            break;
+        case ENT_CONVEYOR:
+            // FL_CONVEYOR: standing on the belt carries the player along (the ground entity's
+            // movedir * speed as base velocity)
+            if (e->solid == SOLID_BSP && pm_entity_for_physent(pm_get_groundent()) == i) {
+                float v[3] = {e->movedir[0] * e->speed, e->movedir[1] * e->speed, 0};
                 pm_add_basevelocity(v);
             }
             break;
@@ -3520,6 +3666,25 @@ static void charger_use(entity_t *e, int idx)
         if (player.armor > 100) player.armor = 100;
     }
     e->ltime = g_time + 0.1f;
+}
+
+// the push of the active trigger_push fields that a point is in (CTriggerPush::Touch: their base
+// velocity, for grenades, satchels and monsters; the player's is in the touch loop). The active
+// fields are listed as the think loop passes them (one frame behind)
+int ents_push_count(void) { return num_push_list; }
+void ents_push_at(const float *o, float *v)
+{
+    v[0] = v[1] = v[2] = 0;
+    for (int pi = 0; pi < num_push_list; pi++) {
+        int i = push_list[pi];
+        if (i <= 0 || i >= num_entities) continue;
+        entity_t *e = &entities[i];
+        if (e->type != ENT_TRIGGER_PUSH || !e->active || e->model <= 0) continue;
+        bmodel_t *bm = &world.bmodels[e->model];
+        if (o[0] < e->origin[0] + bm->mins[0] || o[0] > e->origin[0] + bm->maxs[0] || o[1] < e->origin[1] + bm->mins[1] ||
+            o[1] > e->origin[1] + bm->maxs[1] || o[2] < e->origin[2] + bm->mins[2] || o[2] > e->origin[2] + bm->maxs[2]) continue;
+        for (int k = 0; k < 3; k++) v[k] += e->movedir[k] * e->speed;
+    }
 }
 
 void ents_use_entity(int ent)

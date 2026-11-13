@@ -243,6 +243,7 @@ typedef struct {
 #define TR_IGNORE_PLAYER   2
 #define TR_IGNORE_GLASS    4
 #define TR_WORLD_ONLY      8
+#define TR_MONSTERCLIP     32   // func_monsterclip brushes are solid (SF_MONSTER_HITMONSTERCLIP)
 #define TR_HIT_CORPSES     16   // player weapons: dead bodies are hit (a flat box on the floor, as on PC)
 // box: mins/maxs of the moving object relative to its origin (NULL = a point)
 void game_trace(const float *start, const float *end, const float *mins, const float *maxs, int flags, int ignore_npc, gtrace_t *tr);

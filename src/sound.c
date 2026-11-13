@@ -17,6 +17,7 @@
 #define MAX_WORDS    32
 #define NOMINAL_CLIP 1000.0f     // sound_nominal_clip_dist
 #define OUT_GAIN     0.55f
+#define MIX_HEADROOM 0.65f   // the mixer's master volume (see snd_init)
 
 // ------------------------------------------------------------------ wave cache
 typedef struct { char name[56]; wav64_t wav; bool ok; int refs; uint32_t used; } wave_t;
@@ -260,6 +261,11 @@ void snd_init(void)
 #endif
     audio_init(22050, AUDIO_INIT_LATENCY_MS(240));   // headroom for slow frames on real hardware
     mixer_init(NUM_MIX);
+    // headroom: libdragon's mixer adds every channel together and clips the sum, which crackles
+    // whenever a few loud sounds (or a sound over the music) play at once. The whole mix is
+    // scaled down here, so the settings' 100% is about 0.65 of full scale (#15); the TV's volume
+    // makes up the difference
+    mixer_set_vol(MIX_HEADROOM);
     wav64_init_compression(2);
     mixer_ch_set_limits(MUSIC_CH, 16, 22050, 0);   // allocate the music channel's buffer now, not mid-game
     for (int i = 0; i < NUM_DYN; i++) {

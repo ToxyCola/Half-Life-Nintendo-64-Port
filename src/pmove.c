@@ -534,7 +534,11 @@ int pm_entity_for_physent(int pe)
 }
 
 // does the player box at `pos` intersect brush entity `ent`?
-bool pm_player_in_entity(int ent, const float *pos)
+static bool hull_in_entity(int ent, const float *pos, int usehull);
+bool pm_player_in_entity(int ent, const float *pos) { return hull_in_entity(ent, pos, pm->usehull); }
+// a monster-sized box (the standing player's hull, centred on c) inside a brush entity
+bool pm_box_in_entity(int ent, const float *c) { return hull_in_entity(ent, c, 1); }
+static bool hull_in_entity(int ent, const float *pos, int usehull)
 {
     entity_t *e = &entities[ent];
     if (e->model <= 0) return false;
@@ -545,7 +549,7 @@ bool pm_player_in_entity(int ent, const float *pos)
     VectorCopy(e->origin, pe.origin);
     VectorCopy(e->angles, pe.angles);
     float offset[3], test[3];
-    hull_t *hull = hull_for_physent(&pe, pm->usehull, offset);
+    hull_t *hull = hull_for_physent(&pe, usehull, offset);
     VectorSubtract(pos, offset, test);
     if (has_angles(&pe)) {
         float f[3], r[3], u[3], t[3];
@@ -746,8 +750,8 @@ static void merge(gtrace_t *out, btrace_t *tr, int ent, int npc, bool player)
 }
 
 // the solid brush entities and their world bounds, gathered once a frame (SV_LinkEdict's areanodes, simply)
-typedef struct { int ent; float mn[3], mx[3]; } solid_t;
-static solid_t solids[256];
+typedef struct { int ent; float mn[3], mx[3]; bool clip; } solid_t;   // clip: a func_monsterclip
+static solid_t solids[384];
 static int num_solid;
 static bool solid_valid;
 
@@ -791,13 +795,15 @@ void game_trace_begin_frame(void)
         if (n->tn.hit_top > 0) nboxes[i].mx[2] = fmaxf(nboxes[i].mx[2], n->origin[2] + n->tn.hit_top);   // a risen tentacle
     }
     update_brush_ents();
-    for (int bi = 0; bi < num_brush_ents && num_solid < 256; bi++) {
+    for (int bi = 0; bi < num_brush_ents && num_solid < 384; bi++) {
         int i = brush_ents[bi];
         entity_t *en = &entities[i];
-        if (en->model <= 0 || en->removed || en->solid != SOLID_BSP) continue;
+        bool clip = en->model > 0 && !en->removed && en->type == ENT_INVISIBLE_BRUSH && !strcasecmp(en->classname, "func_monsterclip");
+        if (en->model <= 0 || en->removed || (en->solid != SOLID_BSP && !clip)) continue;
         bmodel_t *bm = &world.bmodels[en->model];
         solid_t *sd = &solids[num_solid++];
         sd->ent = i;
+        sd->clip = clip;
         bool rotated = en->angles[0] != 0 || en->angles[1] != 0 || en->angles[2] != 0;
         for (int k = 0; k < 3; k++) {
             if (rotated || en->type == ENT_DOOR_ROTATING || en->type == ENT_ROTATING || en->type == ENT_ROT_BUTTON) {
@@ -865,7 +871,9 @@ void game_trace_(const float *start, const float *end, const float *mins, const 
                 bmax[2] < sd->mn[2] || bmin[2] > sd->mx[2]) continue;
             int i = sd->ent;
             entity_t *en = &entities[i];
-            if (en->removed || en->solid != SOLID_BSP) continue;
+            // func_monsterclip stops only the monsters with SF_MONSTER_HITMONSTERCLIP (the c2a1
+            // Gargantua: its arena's exits are sealed with them)
+            if (sd->clip ? !(flags & TR_MONSTERCLIP) : (en->removed || en->solid != SOLID_BSP)) continue;
             if ((flags & TR_IGNORE_GLASS) && en->rendermode != 0) continue;
             trace_brush(&world.models[en->model], hn, en->origin, en->angles, s, e, &tr);
             merge(out, &tr, i, -1, false);
