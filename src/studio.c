@@ -239,7 +239,7 @@ studio_t *studio_get(const char *name)
     // its renderer still has to allocate; in play: a margin for everything else). Without room the
     // game carries on without drawing it. (This used to ask for six times the compressed size in
     // one block, about three times too much: big maps lost their scientists.)
-    {
+    for (int attempt = 0; ; attempt++) {
         int need = model_unpacked_size(path, csize) + 1024;
         void *volatile probe = malloc(need);
         // (gibs are small and short-lived: they may dig deeper into the margin)
@@ -247,7 +247,12 @@ studio_t *studio_get(const char *name)
         void *volatile spare = probe && keep > 0 ? malloc(keep) : NULL;
         bool ok = probe && (keep <= 0 || spare);
         free(spare); free(probe);
-        if (!ok) { debugf("studio: no room for %s (%d KB + %d KB kept free)\n", name, need / 1024, studio_reserve / 1024); return NULL; }
+        // the sounds nobody is playing are opened again when needed: a model (the gun in hand
+        // above all, in the Office Complex) comes first
+        extern int snd_trim_cache(void);
+        if (!ok && attempt == 0 && snd_trim_cache() > 0) continue;
+        if (ok) break;
+        { debugf("studio: no room for %s (%d KB + %d KB kept free)\n", name, need / 1024, studio_reserve / 1024); return NULL; }
     }
     int size;
     uint8_t *buf = asset_load(path, &size);

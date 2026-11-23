@@ -1652,6 +1652,11 @@ static void spawn_entity(entity_t *e)
     default:
         break;
     }
+    // CBaseTrigger::InitTrigger: a trigger's "angle" is only its direction (SetMovedir zeroes the
+    // angles). Kept, it turned the trigger's brushes about the world origin for the clip-hull
+    // touch test, so a trigger with an "angle" key never fired where it is (the HECU ambush in
+    // c2a3d, the level change out of the garbage compactor in c2a3e)
+    if (e->model > 0 && !strncasecmp(e->classname, "trigger_", 8)) set_movedir(e);
     switch (e->type) {
     case ENT_WORLD:
         e->visible = false; e->solid = SOLID_NOT; // drawn separately
@@ -1809,7 +1814,6 @@ static void spawn_entity(entity_t *e)
         if (e->type == ENT_TRIGGER_MULTIPLE && e->wait == 0) e->wait = 0.2f;
         if (e->type == ENT_TRIGGER_HURT) e->active = !(e->spawnflags & 2);   // SF_TRIGGER_HURT_START_OFF
         if (e->type == ENT_TRIGGER_PUSH) {
-            set_movedir(e);
             if (e->speed == 0) e->speed = 100;
             e->active = !(e->spawnflags & 2);
         }
@@ -2303,7 +2307,30 @@ static void mover_step(entity_t *e, int idx, float dt)
             memcpy(porg, np, 12);
             pm_set_origin(np);
         }
-        if (pm_player_in_entity(idx, porg)) {
+        // SV_PushRotate: whoever stands on a turning door (c1a4f's swinging buckets) or is swept by
+        // it is turned about its hinge with it. The player used to be left behind, and the door,
+        // finding them in its way, turned back
+        float rp[3];
+        bool turned = false;
+        if (e->angular && (riding || pm_player_in_entity(idx, porg))) {
+            float f0[3], r0[3], u0[3], f1[3], r1[3], u1[3];
+            pm_build_physents();   // collision must see the door where it has turned to
+            angle_vectors(old, f0, r0, u0);
+            angle_vectors(cur, f1, r1, u1);
+            float d[3] = {porg[0] - e->origin[0], porg[1] - e->origin[1], porg[2] - e->origin[2]};
+            float lx = d[0] * f0[0] + d[1] * f0[1] + d[2] * f0[2];
+            float ly = -(d[0] * r0[0] + d[1] * r0[1] + d[2] * r0[2]);
+            float lz = d[0] * u0[0] + d[1] * u0[1] + d[2] * u0[2];
+            for (int k = 0; k < 3; k++) rp[k] = e->origin[k] + f1[k] * lx - r1[k] * ly + u1[k] * lz;
+            if (riding) rp[2] += 0.03125f;
+            if (pm_position_free(rp)) {
+                pm_set_origin(rp);
+                memcpy(porg, rp, 12);
+                turned = true;
+                if (riding && moved[1] != 0 && moved[0] == 0 && moved[2] == 0) game_add_view_yaw(moved[1]);
+            }
+        }
+        if (!turned && pm_player_in_entity(idx, porg)) {
             // try pushing the player along with the mover (SV_Push)
             float np[3] = {porg[0] + moved[0], porg[1] + moved[1], porg[2] + moved[2]};
             if (!e->angular && pm_position_free(np)) {

@@ -40,6 +40,30 @@ static bool file_exists(const char *path)
     return true;
 }
 
+// Out of memory, libdragon's audio asserts (wav64_open, the mixer growing a channel's buffer for
+// a longer sound): the Office Complex crash, after the view models had already found no room.
+// A sound is only opened or started with this much of the heap still free
+#define SND_HEAP_MARGIN (24 * 1024)
+static bool heap_room(int n)
+{
+    void *volatile p = malloc(n);
+    free(p);
+    return p != NULL;
+}
+
+// close the cached waves nobody is playing (they are opened again when next needed): room for a
+// model that didn't fit
+int snd_trim_cache(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_CACHED; i++)
+        if (cache[i].name[0] && cache[i].refs == 0) {
+            if (cache[i].ok) { wav64_close(&cache[i].wav); n++; }
+            cache[i].name[0] = 0;
+        }
+    return n;
+}
+
 // "doors/doormove1.wav" -> cache entry (NULL if the file isn't on the cartridge)
 static wave_t *wave_get(const char *sample)
 {
@@ -63,6 +87,16 @@ static wave_t *wave_get(const char *sample)
         if (freeslot < 0) return NULL;
         if (cache[freeslot].ok) wav64_close(&cache[freeslot].wav);
         cache[freeslot].name[0] = 0;
+    }
+    // short of memory: make room from the waves nobody is playing, else go without this one
+    while (!heap_room(SND_HEAP_MARGIN)) {
+        uint32_t best = 0xffffffff;
+        int ev = -1;
+        for (int i = 0; i < MAX_CACHED; i++)
+            if (i != freeslot && cache[i].name[0] && cache[i].ok && cache[i].refs == 0 && cache[i].used < best) { best = cache[i].used; ev = i; }
+        if (ev < 0) { debugf("snd: no room for %s\n", nm); return NULL; }
+        wav64_close(&cache[ev].wav);
+        cache[ev].name[0] = 0;
     }
     wave_t *w = &cache[freeslot];
     strcpy(w->name, nm);
@@ -366,7 +400,7 @@ static bool sentence_next_word(slot_t *s)
     while (s->word < s->nwords) {
         word_t *wd = &s->words[s->word++];
         wave_t *w = wave_get(wd->file);
-        if (!w) continue;
+        if (!w || !heap_room(SND_HEAP_MARGIN / 2)) continue;
         if (s->wave) s->wave->refs--;
         s->wave = w;
         w->refs++;
@@ -427,7 +461,7 @@ int snd_emit(int ent, int chan, const char *sample, float vol, float attn, int p
     }
     if (sample[0] == '*') sample++;     // "*" = streaming flag in GoldSrc
     wave_t *w = wave_get(sample);
-    if (!w) return -1;
+    if (!w || !heap_room(SND_HEAP_MARGIN / 2)) return -1;
     slot_t tmp = {0};
     tmp.ent = ent; tmp.vol = vol; tmp.attn = attn;
     if (origin) { memcpy(tmp.origin, origin, 12); tmp.has_origin = ent < 0; }
