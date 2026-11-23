@@ -87,4 +87,9 @@ typedef struct {
 } btrace_t;
 void  bsp_trace_hull(hull_t *hull, const float *start, const float *end, btrace_t *tr);
 const char *bsp_trace_texture(int modelindex, const float *offset, const float *start, const float *end);
+int bsp_trace_face(int modelindex, const float *offset, const float *start, const float *end);
+// a decal w x h (world units) centred on pos (model space), laid on the surfaces R_DecalNode
+// would pick, each piece cut to its surface's span along the texture axes
+typedef struct { int face; float c[4][3]; float uv[4][2]; float n[3]; uint8_t rgb[3]; } bdecal_t;
+int bsp_decal_faces(int modelindex, const float *pos, float w, float h, bdecal_t *out, int max);
 void  bsp_light_at(const float *p, uint8_t *rgb);

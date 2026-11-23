@@ -79,7 +79,11 @@ int main(int argc, char **argv)
         }
         in.viewangles[1] = yaw;
         pm_clear_basevelocity();
+        { static int fi; char fn[8][48]; float ft[8]; int nf = 0; const char *fs = getenv("FIRE");   // FIRE="name@t name@t"
+          while (fs && *fs && nf < 8) { int n = 0; if (sscanf(fs, " %47[^@]@%f%n", fn[nf], &ft[nf], &n) < 2) break; nf++; fs += n; }
+          if (fi < nf && t >= ft[fi]) { fprintf(stderr, "FIRE %s\n", fn[fi]); ents_fire_targets(fn[fi]); fi++; } }
         ents_think(dt);
+        if (getenv("PENT")) { static float pn; if (t >= pn) { pn = t + 0.25f; entity_t *pe = &entities[atoi(getenv("PENT"))]; fprintf(stderr, "ENT t=%.2f org %.1f %.1f %.1f ang %.1f %.1f %.1f state %d\n", t, pe->origin[0], pe->origin[1], pe->origin[2], pe->angles[0], pe->angles[1], pe->angles[2], pe->state); } }
         pm_run(&in, dt);
         if (pend) do_change();
         pm_unstick(dt);

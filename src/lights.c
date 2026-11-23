@@ -97,7 +97,8 @@ bool lights_use(entity_t *e)
     // each light keeps its own on/off (SF_LIGHT_START_OFF flipped) and sets the style to it: two
     // lights sharing a name and a style (the hologram's spotlights in the Hazard Course) both turn
     // it on, instead of toggling it twice back to off
-    if (s >= 32 && s < 64) {
+    extern bool ents_should_toggle(bool on);
+    if (s >= 32 && s < 64 && ents_should_toggle(!(e->spawnflags & 1))) {   // CLight::Use
         e->spawnflags ^= 1;
         on[s] = !(e->spawnflags & 1);
     }

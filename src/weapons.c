@@ -13,6 +13,7 @@
 #include "npc.h"
 #include "font.h"
 #include "weapons.h"
+#include "hud.h"
 
 void pm_get_origin(float *o);
 void pm_get_velocity(float *v);
@@ -83,8 +84,11 @@ static PCTX int select_slot = -1;
 static PCTX int shotgun_reload_state;     // 0 none, 1 starting, 2 shells going in
 static PCTX float gauss_charge_start;
 static PCTX bool gauss_charging;
+static PCTX float gauss_burn, gauss_spin_at, gauss_aftershock;
+static PCTX int gauss_snd = -1;
+static void gauss_start_fire(float dmg, bool prim);
 static PCTX int egon_state;              // 0 off, 1 firing
-static PCTX float egon_ammo_time;
+static PCTX float egon_ammo_time, egon_dmg_time, egon_shoot_time, egon_shake_time;
 static float grenade_start;          // pin pulled (0 = not)
 static PCTX float hornet_regen;
 static PCTX int satchel_out;              // satchels in the world
@@ -335,9 +339,11 @@ void game_effect_explosion(const float *origin, float magnitude)
 }
 
 // ------------------------------------------------------------------ radius damage (RadiusDamage)
+static void snarks_radius(const float *o, float dmg, float radius);
 void game_radius_damage(const float *origin, float damage, float radius, int attacker_npc, int dmgtype)
 {
     if (radius <= 0) radius = damage * 2.5f;
+    snarks_radius(origin, damage, radius);
     float pe[3];
     player_get_eye(pe);
     float po[3];
@@ -372,7 +378,7 @@ void game_radius_damage(const float *origin, float damage, float radius, int att
         float dd = sqrtf((c[0] - origin[0]) * (c[0] - origin[0]) + (c[1] - origin[1]) * (c[1] - origin[1]) + (c[2] - origin[2]) * (c[2] - origin[2]));
         if (dd < radius + 32) ents_damage_brush(i, damage * (1 - fminf(dd, radius) / (radius + 32)), dmgtype, NULL);
     }
-    npc_hear(origin, 1500, -1);
+    npc_hear(origin, 1024, -1);   // CGrenade::Explode: NORMAL_EXPLOSION_VOLUME
 }
 
 static void explode(const float *o, float dmg, int owner)
@@ -404,6 +410,13 @@ typedef struct {
     float beam_end[3];
     studio_t *model;
     float frame;
+    // snarks (CSqueakGrenade)
+    float hunt_t, think_t, next_hit, next_bite, dmg, health, aim[3], prev[3];
+    bool owner_clear, onground;
+    // hornets (CHornet)
+    float fly;
+    bool dart, red;
+    int snd;            // a sound that travels with it (the rocket's motor), -1 none
 } proj_t;
 #define MAX_PROJ 32
 static proj_t projs[MAX_PROJ];
@@ -416,6 +429,7 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
     proj_t *p = &projs[s];
     memset(p, 0, sizeof(*p));
     p->kind = kind;
+    p->snd = -1;
     memcpy(p->o, origin, 12);
     p->owner = owner;
     p->pl = owner == 0 ? h2h_cur : -1;
@@ -425,11 +439,21 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
     switch (kind) {
     case P_HGRENADE: speed = 500; p->die = wtime + 3.0f; model = "w_grenade"; break;
     case P_ARGRENADE: speed = 800; p->die = wtime + 10; model = "grenade"; break;
-    case P_ROCKET: speed = 250; p->die = wtime + 15; model = "rpgrocket"; p->armed = wtime + 0.4f; break;
+    case P_ROCKET: speed = 250; p->die = wtime + 15; model = "rpgrocket"; p->armed = wtime + 0.4f; p->think_t = p->armed; break;
     case P_BOLT: speed = pm_get_waterlevel() == 3 ? 1000 : 2000; p->die = wtime + 10; model = "crossbow_bolt"; break;
     case P_SATCHEL: speed = 274; p->die = wtime + 600; model = "w_satchel"; break;
-    case P_SNARK: speed = 200; p->die = wtime + 15; model = "w_squeak"; break;
-    case P_HORNET: case P_HORNET_P: speed = owner == 0 ? 300 : 300; p->die = wtime + 5; model = "hornet"; break;
+    case P_SNARK: speed = 200; p->die = wtime + 15; model = "w_squeak";   // SQUEEK_DETONATE_DELAY
+        p->hunt_t = wtime + 1e6f; p->think_t = wtime + 0.1f; p->dmg = skill_get("sk_snark_dmg_pop");
+        p->health = skill_get("sk_snark_health") > 0 ? skill_get("sk_snark_health") : 2; break;
+    case P_HORNET: case P_HORNET_P:
+        // CHornet::Spawn: red (2 in 5, 600, slows to turn) or orange (800); five seconds of hunting
+        speed = 300; model = "hornet";
+        p->red = rand() % 5 < 2; p->fly = p->red ? 600 : 800;
+        p->hunt_t = wtime + 5;            // m_flStopAttack
+        p->die = wtime + 6;
+        p->think_t = wtime + 0.1f;        // StartTrack
+        if (target == -2) { p->dart = true; speed = 1200; p->die = wtime + 4; p->target = -1; }   // StartDart: straight, no hunting
+        break;
     case P_SPIT: speed = 900; p->die = wtime + 4; break;
     case P_BALL: speed = 500; p->die = wtime + 5; break;
     case P_MORTAR: speed = 1; p->die = wtime + 8; break;            // velocity set by the caller (a lob)
@@ -444,6 +468,7 @@ int proj_spawn(int kind, const float *origin, const float *dir, int owner, int t
         for (int k = 0; k < 3; k++) p->v[k] += pv[k];
     }
     if (kind == P_SPIT) p->v[2] += 150;
+    if (kind == P_HORNET || kind == P_HORNET_P) for (int k = 0; k < 3; k++) p->aim[k] = origin[k] + p->v[k];
     p->yaw = atan2f(dir[1], dir[0]) * 180 / (float)M_PI;
     p->pitch = 0;
     if (model) p->model = studio_get(model);
@@ -496,7 +521,7 @@ int proj_spawn_vel(int kind, const float *origin, const float *vel, int owner, i
 int proj_spawn_snark(const float *origin, float yaw)
 {
     float a = yaw * (float)M_PI / 180, dir[3] = {cosf(a), sinf(a), 0};
-    return proj_spawn(P_SNARK, origin, dir, -1, 0);
+    return proj_spawn(P_SNARK, origin, dir, -1, -1);   // (it looks for its own enemy once it lands)
 }
 
 static void proj_hit_damage(proj_t *p, gtrace_t *tr, float dmg, int type)
@@ -545,6 +570,205 @@ static void target_point(int t, float *o)
     else { npc_t *n = &npcs[t - 1]; o[0] = n->origin[0]; o[1] = n->origin[1]; o[2] = n->origin[2] + (n->mins[2] + n->maxs[2]) * 0.5f; }
 }
 
+
+// ---- snarks (squeakgrenade.cpp CSqueakGrenade): a little monster thrown or out of a nest. It
+// hunts the nearest thing it can see within 512 in front of it (the player too - it's a
+// bioweapon, it dislikes everyone), re-aiming every 2 s and straight after each bounce: 300 units/s
+// at the enemy's eyes. Half gravity, bouncy (friction 0.5). Each bite (sk_snark_dmg_bite, at most
+// every half second) adds sk_snark_dmg_pop to the blast it makes when killed or at 15 s
+static void snark_pop(proj_t *p)
+{
+    // CSqueakGrenade::Killed: the blast (RadiusDamage over dmg * 2.5), blood, gibbed
+    snd_emit(-1, CHAN_ITEM, "squeek/sqk_blast1.wav", 1, 0.5f, PITCH_NORM, p->o);
+    snd_emit(-1, CHAN_VOICE, "common/bodysplat.wav", 0.75f, ATTN_NORM, 200, p->o);
+    npc_hear(p->o, 384, -1);   // SMALL_EXPLOSION_VOLUME
+    game_effect_particles(p->o, 12, 200, 220, 200, 0, 0.6f, 400);
+    p->kind = P_NONE;          // (before the blast: it mustn't hurt itself again)
+    game_radius_damage(p->o, p->dmg, p->dmg * 2.5f, -1, DMG_BLAST);
+}
+static bool snark_can_see(const float *from, const float *to)
+{
+    gtrace_t tr;
+    game_trace(from, to, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+    return tr.fraction >= 1;
+}
+// Look(512) + BestVisibleEnemy: the nearest living thing it can see in its front half
+static int snark_find_enemy(proj_t *p)
+{
+    float fwd[2] = {cosf(p->yaw * (float)M_PI / 180), sinf(p->yaw * (float)M_PI / 180)};
+    int best = -1;
+    float bd = 512;
+    float eye[3];
+    player_get_eye(eye);
+    if (player_alive() && !pm_noclip_active()) {
+        float d[3] = {eye[0] - p->o[0], eye[1] - p->o[1], eye[2] - p->o[2]}, l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), fl = sqrtf(d[0] * d[0] + d[1] * d[1]);
+        if (l < bd && (fl < 1 || (fwd[0] * d[0] + fwd[1] * d[1]) / fl > 0) && snark_can_see(p->o, eye)) { bd = l; best = 0; }
+    }
+    for (int i = 0; i < num_npcs; i++) {
+        npc_t *n = &npcs[i];
+        if (!npc_alive(i) || (n->flags & (16 | 128))) continue;   // (items; turrets and the like: CLASS_MACHINE, nothing to it)
+        float t[3];
+        target_point(i + 1, t);
+        float d[3] = {t[0] - p->o[0], t[1] - p->o[1], t[2] - p->o[2]}, l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), fl = sqrtf(d[0] * d[0] + d[1] * d[1]);
+        if (l >= bd || (fl >= 1 && (fwd[0] * d[0] + fwd[1] * d[1]) / fl <= 0) || !snark_can_see(p->o, t)) continue;
+        bd = l; best = i + 1;
+    }
+    return best;
+}
+static void snark_think(proj_t *p, float dt)
+{
+    float flpitch = 155.0f - 60.0f * ((p->die - wtime) / 15.0f);
+    if (flpitch < 80) flpitch = 80;
+    bool water = game_point_contents(p->o) <= -3 && game_point_contents(p->o) >= -5;
+    // HuntThink, every tenth of a second
+    if (wtime >= p->think_t) {
+        p->think_t = wtime + 0.1f;
+        if (water) { for (int k = 0; k < 3; k++) p->v[k] *= 0.9f; p->v[2] += 8; }   // swims up
+        if (wtime >= p->hunt_t) {
+            p->hunt_t = wtime + 2;
+            if (p->target < 0 || (p->target > 0 && !npc_alive(p->target - 1)) || (p->target == 0 && !player_alive())) p->target = snark_find_enemy(p);
+            float left = p->die - wtime;
+            if (left <= 0.5f && left >= 0.3f) {
+                snd_emit(-1, CHAN_VOICE, "squeek/sqk_die1.wav", 1, ATTN_NORM, 100 + rand() % 64, p->o);
+                npc_hear(p->o, 256, -1);
+            }
+            if (p->target >= 0) {
+                float t[3];
+                if (p->target == 0) player_get_eye(t); else target_point(p->target, t);
+                if (snark_can_see(p->o, t)) {
+                    float d[3] = {t[0] - p->o[0], t[1] - p->o[1], t[2] - p->o[2]}, l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                    if (l > 0.01f) for (int k = 0; k < 3; k++) p->aim[k] = d[k] / l;
+                }
+                float vl = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]);
+                float adj = 50.0f / (vl + 10.0f);
+                if (adj > 1.2f) adj = 1.2f;
+                for (int k = 0; k < 3; k++) p->v[k] = p->v[k] * adj + p->aim[k] * 300;
+            }
+            // stuck: a random shove
+            float mv[3] = {p->o[0] - p->prev[0], p->o[1] - p->prev[1], p->o[2] - p->prev[2]};
+            if (mv[0] * mv[0] + mv[1] * mv[1] + mv[2] * mv[2] < 1) { p->v[0] = (rand() % 201) - 100; p->v[1] = (rand() % 201) - 100; }
+            memcpy(p->prev, p->o, 12);
+        }
+        if (p->v[0] != 0 || p->v[1] != 0) p->yaw = atan2f(p->v[1], p->v[0]) * 180 / (float)M_PI;
+    }
+    // MOVETYPE_BOUNCE at half gravity (MOVETYPE_FLY in water)
+    if (!water) p->v[2] -= 400 * dt;
+    float base[3] = {0, 0, 0};
+    { extern void ents_push_at(const float *o, float *v); ents_push_at(p->o, base); }
+    float to[3] = {p->o[0] + (p->v[0] + base[0]) * dt, p->o[1] + (p->v[1] + base[1]) * dt, p->o[2] + (p->v[2] + base[2]) * dt};
+    static const float smn[3] = {-2, -2, -2}, smx[3] = {2, 2, 2};
+    gtrace_t tr;
+    game_trace(p->o, to, smn, smx, (p->owner == 0 && !p->owner_clear) ? TR_IGNORE_PLAYER : 0, p->owner > 0 && !p->owner_clear ? p->owner - 1 : -1, &tr);
+    if (tr.startsolid) tr.fraction = 0;
+    memcpy(p->o, tr.endpos, 12);
+    if (tr.fraction >= 1) { p->onground = false; return; }
+    // SuperBounceTouch
+    p->owner_clear = true;   // (it passes through whoever threw it only until it first touches something)
+    float dn = p->v[0] * tr.normal[0] + p->v[1] * tr.normal[1] + p->v[2] * tr.normal[2];
+    if (dn < 0) for (int k = 0; k < 3; k++) p->v[k] -= 1.5f * dn * tr.normal[k];   // ClipVelocity, backoff 2 - friction
+    if (tr.normal[2] > 0.7f) {
+        if (p->v[2] < 400 * dt * 2) { p->onground = true; p->v[2] = 0; }
+        if (p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2] < 30 * 30) { p->v[0] = p->v[1] = p->v[2] = 0; p->onground = true; }
+    } else p->onground = false;
+    if (wtime < p->next_hit) return;
+    if ((tr.npc >= 0 || tr.player) && wtime >= p->next_bite) {
+        float fwd[3] = {cosf(p->yaw * (float)M_PI / 180), sinf(p->yaw * (float)M_PI / 180), 0};
+        if (tr.player) player_take_damage(skill_get("sk_snark_dmg_bite"), DMG_SLASH, p->o, -1);
+        else { extern void npc_set_hitpoint(const float *pt); npc_set_hitpoint(tr.endpos); npc_take_damage(tr.npc, skill_get("sk_snark_dmg_bite"), DMG_SLASH, fwd, p->owner == 0 ? 0 : -1); }
+        p->dmg += skill_get("sk_snark_dmg_pop");   // add more explosion damage
+        snd_emit(-1, CHAN_WEAPON, "squeek/sqk_deploy1.wav", 1, ATTN_NORM, (int)flpitch, p->o);
+        p->next_bite = wtime + 0.5f;
+    }
+    p->next_hit = wtime + 0.1f;
+    p->hunt_t = wtime;
+    if (!p->onground) {
+        static const char *hs[3] = {"squeek/sqk_hunt1.wav", "squeek/sqk_hunt2.wav", "squeek/sqk_hunt3.wav"};
+        snd_emit(-1, CHAN_VOICE, hs[rand() % 3], 1, ATTN_NORM, (int)flpitch, p->o);
+        npc_hear(p->o, 256, -1);
+    } else npc_hear(p->o, 100, -1);
+}
+// a hit on any snark along a shot from a to b (before frac of the way): damage it; true if one was hit
+bool snarks_shot(const float *a, const float *b, float *frac, float dmg)
+{
+    int hit = -1;
+    float best = *frac;
+    float d[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
+    for (int i = 0; i < MAX_PROJ; i++) {
+        proj_t *p = &projs[i];
+        if (p->kind != P_SNARK) continue;
+        // the ray against its box (-4,-4,0)..(4,4,8)
+        float t0 = 0, t1 = best;
+        static const float mn[3] = {-4, -4, 0}, mx[3] = {4, 4, 8};
+        bool ok = true;
+        for (int k = 0; k < 3 && ok; k++) {
+            float lo = p->o[k] + mn[k], hi = p->o[k] + mx[k];
+            if (fabsf(d[k]) < 1e-6f) { if (a[k] < lo || a[k] > hi) ok = false; continue; }
+            float u0 = (lo - a[k]) / d[k], u1 = (hi - a[k]) / d[k];
+            if (u0 > u1) { float t = u0; u0 = u1; u1 = t; }
+            if (u0 > t0) t0 = u0;
+            if (u1 < t1) t1 = u1;
+            if (t0 > t1) ok = false;
+        }
+        if (ok) { best = t0; hit = i; }
+    }
+    if (hit < 0) return false;
+    *frac = best;
+    projs[hit].health -= dmg;
+    if (projs[hit].health <= 0) snark_pop(&projs[hit]);
+    return true;
+}
+// explosions get them too
+static void snarks_radius(const float *o, float dmg, float radius)
+{
+    for (int i = 0; i < MAX_PROJ; i++) {
+        proj_t *p = &projs[i];
+        if (p->kind != P_SNARK) continue;
+        float d = sqrtf((p->o[0] - o[0]) * (p->o[0] - o[0]) + (p->o[1] - o[1]) * (p->o[1] - o[1]) + (p->o[2] - o[2]) * (p->o[2] - o[2]));
+        if (d >= radius || !snark_can_see(o, p->o)) continue;
+        p->health -= dmg * (1 - d / radius);
+        if (p->health <= 0) snark_pop(p);
+    }
+}
+
+// CHornet::TrackTarget: steer at the enemy's last known place - straight at it (orange), or
+// slowing into the turn (red); close in and lined up, a last dive at double speed. false: gone
+static bool hornet_track(proj_t *p)
+{
+    if (wtime > p->hunt_t) { p->kind = P_NONE; return false; }
+    bool valid = p->target == 0 ? player_alive() : (p->target > 0 && npc_alive(p->target - 1));
+    if (!valid) { p->target = nearest_target(p->o, p->owner, 512); valid = p->target >= 0; }
+    float t[3];
+    if (valid) target_point(p->target, t);
+    if (valid && snark_can_see(p->o, t)) memcpy(p->aim, t, 12);
+    else {
+        float l = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]);
+        if (l > 0.01f) for (int k = 0; k < 3; k++) p->aim[k] += p->v[k] / l * p->fly * 0.1f * 600;
+    }
+    float de[3] = {p->aim[0] - p->o[0], p->aim[1] - p->o[1], p->aim[2] - p->o[2]}, dl = sqrtf(de[0] * de[0] + de[1] * de[1] + de[2] * de[2]);
+    if (dl < 0.01f) dl = 1;
+    for (int k = 0; k < 3; k++) de[k] /= dl;
+    float vl = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]), fd[3];
+    if (vl < 0.1f) memcpy(fd, de, 12); else for (int k = 0; k < 3; k++) fd[k] = p->v[k] / vl;
+    float delta = fd[0] * de[0] + fd[1] * de[1] + fd[2] * de[2];
+    static const char *buzz[3] = {"hornet/ag_buzz1.wav", "hornet/ag_buzz2.wav", "hornet/ag_buzz3.wav"};
+    if (delta < 0.5f) snd_emit(-1, CHAN_VOICE, buzz[rand() % 3], 0.8f, ATTN_NORM, PITCH_NORM, p->o);   // turning wide
+    if (delta <= 0 && p->red) delta = 0.25f;
+    float nv[3] = {fd[0] + de[0], fd[1] + de[1], fd[2] + de[2]}, nl = sqrtf(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]);
+    if (nl < 0.01f) { memcpy(nv, de, 12); nl = 1; }
+    for (int k = 0; k < 3; k++) nv[k] /= nl;
+    if (p->owner > 0) for (int k = 0; k < 3; k++) nv[k] += ((rand() % 201) - 100) / 1000.0f;   // a monster's: scrambled a bit
+    if (p->red) { for (int k = 0; k < 3; k++) p->v[k] = nv[k] * p->fly * delta; p->think_t = wtime + 0.1f + (rand() % 21) / 100.0f; }
+    else { for (int k = 0; k < 3; k++) p->v[k] = nv[k] * p->fly; p->think_t = wtime + 0.1f; }
+    p->yaw = atan2f(p->v[1], p->v[0]) * 180 / (float)M_PI;
+    if (valid && delta >= 0.4f && dl <= 300) {
+        snd_emit(-1, CHAN_VOICE, buzz[rand() % 3], 0.8f, ATTN_NORM, PITCH_NORM, p->o);
+        for (int k = 0; k < 3; k++) p->v[k] *= 2;
+        p->think_t = wtime + 1;
+        p->hunt_t = wtime;   // don't attack again
+    }
+    return true;
+}
+
 static void projs_think_one(proj_t *p, float dt);
 static void projs_think(float dt)
 {
@@ -558,6 +782,10 @@ static void projs_think(float dt)
         h2h_inflictor = p->owner == 0 ? h2h_cur : -1;
         projs_think_one(p, dt);
         h2h_inflictor = old_inflictor;
+        if (p->snd >= 0) {
+            if (p->kind == P_NONE) { snd_kill(p->snd); p->snd = -1; }
+            else snd_move(p->snd, p->o);
+        }
     }
 }
 
@@ -567,10 +795,11 @@ static void projs_think_one(proj_t *p, float dt)
         p->frame += dt * 10;
         if (wtime > p->die) {
             if (p->kind == P_HGRENADE) explode(p->o, skill_get("sk_plr_hand_grenade"), p->owner);
-            else if (p->kind == P_SNARK) { snd_emit(-1, CHAN_VOICE, "squeek/sqk_blast1.wav", 1, ATTN_NORM, PITCH_NORM, p->o); game_radius_damage(p->o, skill_get("sk_snark_dmg_pop"), 15 * 2.5f, -1, DMG_BLAST); }
+            else if (p->kind == P_SNARK) { snark_pop(p); continue; }
             p->kind = P_NONE;
             continue;
         }
+        if (p->kind == P_SNARK) { snark_think(p, dt); continue; }
         if (p->kind == P_TRIPMINE) {
             if (wtime < p->armed) continue;
             if (!p->stuck) {
@@ -609,8 +838,11 @@ static void projs_think_one(proj_t *p, float dt)
             }
             continue;
         }
+        if ((p->kind == P_HORNET || p->kind == P_HORNET_P) && !p->dart && wtime >= p->think_t) {
+            if (!hornet_track(p)) continue;
+        }
         // homing
-        if (p->kind == P_HORNET || p->kind == P_HORNET_P || p->kind == P_SNARK || (p->kind == P_BALL && p->target >= 0) ||
+        if ((p->kind == P_BALL && p->target >= 0) ||
             p->kind == P_TELEBALL || p->kind == P_NIHZAP) {
             if (p->target < 0 || (p->target > 0 && !npc_alive(p->target - 1)) || h2h_active) p->target = nearest_target(p->o, p->owner, p->kind == P_SNARK ? 1024 : 512);
             if (p->target >= 0) {
@@ -626,22 +858,47 @@ static void projs_think_one(proj_t *p, float dt)
                 }
             }
         }
-        // rockets follow the laser dot (CRpgRocket::FollowThink)
-        if (p->kind == P_ROCKET && cur == WEAPON_RPG && rpg_laser && p->owner == 0) {
-            float eye[3], f[3];
-            player_get_eye(eye);
-            weapons_aim(f);
-            float end[3] = {eye[0] + f[0] * 8192, eye[1] + f[1] * 8192, eye[2] + f[2] * 8192};
-            gtrace_t tr;
-            game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
-            float d[3] = {tr.endpos[0] - p->o[0], tr.endpos[1] - p->o[1], tr.endpos[2] - p->o[2]};
-            float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-            float sp = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]);
-            if (l > 1) for (int k = 0; k < 3; k++) p->v[k] = p->v[k] * 0.8f + d[k] / l * sp * 0.2f * 1.0f + d[k] / l * 0.0f;
-        }
+        // CRpgRocket: 0.4 s of a lob at half gravity, then lit (IgniteThink) and FollowThink every
+        // 0.1 s: steer for the laser dot if it's ahead, adding 400 a tick for the first second (2000
+        // at most), after that holding course and bleeding speed - and blowing up if it falls under
+        // 1500 (a hard turn does that)
         if (p->kind == P_ROCKET) {
-            float sp = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]);
-            if (sp < 2000 && sp > 0.1f) for (int k = 0; k < 3; k++) p->v[k] *= (sp + 1200 * dt) / sp;
+            if (wtime < p->armed) p->v[2] -= 400 * dt;
+            else if (wtime >= p->think_t) {
+                if (p->hunt_t == 0) {
+                    p->hunt_t = wtime;   // m_flIgniteTime
+                    p->snd = snd_emit(-1, CHAN_VOICE, "weapons/rocket1.wav", 1, 0.5f, PITCH_NORM, p->o);
+                }
+                p->think_t = wtime + 0.1f;
+                float sp = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]);
+                float tgt[3] = {1, 0, 0};
+                if (sp > 0.01f) for (int k = 0; k < 3; k++) tgt[k] = p->v[k] / sp;
+                if (cur == WEAPON_RPG && rpg_laser && p->owner == 0) {
+                    float eye[3], f[3];
+                    player_get_eye(eye);
+                    weapons_aim(f);
+                    float end[3] = {eye[0] + f[0] * 8192, eye[1] + f[1] * 8192, eye[2] + f[2] * 8192};
+                    gtrace_t tr;
+                    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+                    float d[3] = {tr.endpos[0] - p->o[0], tr.endpos[1] - p->o[1], tr.endpos[2] - p->o[2]};
+                    float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                    if (l > 0.01f) {
+                        for (int k = 0; k < 3; k++) d[k] /= l;
+                        float dot = d[0] * tgt[0] + d[1] * tgt[1] + d[2] * tgt[2];
+                        if (dot > 0 && l * (1 - dot) < 4096) memcpy(tgt, d, 12);
+                    }
+                }
+                bool water = game_point_contents(p->o) <= -3 && game_point_contents(p->o) >= -5;
+                if (wtime - p->hunt_t < 1.0f) {
+                    for (int k = 0; k < 3; k++) p->v[k] = p->v[k] * 0.2f + tgt[k] * (sp * 0.8f + 400);
+                    float ns = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]), cap = water ? 300 : 2000;
+                    if (ns > cap) for (int k = 0; k < 3; k++) p->v[k] *= cap / ns;
+                } else {
+                    for (int k = 0; k < 3; k++) p->v[k] = p->v[k] * 0.2f + tgt[k] * sp * 0.798f;
+                    if (!water && sp < 1500) { explode(p->o, skill_get("sk_plr_rpg"), p->owner); p->kind = P_NONE; continue; }
+                }
+                p->yaw = atan2f(p->v[1], p->v[0]) * 180 / (float)M_PI;
+            }
         }
         // gravity for thrown things
         if (p->kind == P_HGRENADE || p->kind == P_ARGRENADE || p->kind == P_SATCHEL || p->kind == P_SNARK || p->kind == P_SPIT || p->kind == P_MORTAR)
@@ -691,17 +948,25 @@ static void projs_think_one(proj_t *p, float dt)
             }
             break;
         case P_HORNET:
-        case P_HORNET_P:
-            if (tr.npc >= 0 || tr.player) {
-                proj_hit_damage(p, &tr, skill_get("sk_hornet_dmg") > 0 ? skill_get("sk_hornet_dmg") : 7, DMG_BULLET);
-                snd_emit(-1, CHAN_VOICE, "hornet/ag_hornethit1.wav", 1, ATTN_NORM, PITCH_NORM, p->o);
+        case P_HORNET_P: {
+            // TrackTouch / DieTouch: an enemy is stung; anything else turns a hunting hornet round
+            // (a dart dies on whatever it hits)
+            bool enemy = p->owner == 0 ? (tr.npc >= 0 && !(npcs[tr.npc].flags & 32)) : (tr.player || (tr.npc >= 0 && p->owner > 0 && npcs[tr.npc].flags & 32));
+            if (p->dart && tr.npc < 0 && !tr.player) { p->kind = P_NONE; break; }
+            if (enemy || p->dart) {
+                float dmg = p->owner == 0 ? (skill_get("sk_plr_hornet_dmg") > 0 ? skill_get("sk_plr_hornet_dmg") : 7) : skill_get("sk_hornet_dmg");
+                proj_hit_damage(p, &tr, dmg, DMG_BULLET);
+                static const char *hs[3] = {"hornet/ag_hornethit1.wav", "hornet/ag_hornethit2.wav", "hornet/ag_hornethit3.wav"};
+                snd_emit(-1, CHAN_VOICE, hs[rand() % 3], 1, ATTN_NORM, PITCH_NORM, p->o);
                 p->kind = P_NONE;
             } else {
-                // bounce off walls
-                float dn = p->v[0] * tr.normal[0] + p->v[1] * tr.normal[1] + p->v[2] * tr.normal[2];
-                for (int k = 0; k < 3; k++) p->v[k] -= 2 * dn * tr.normal[k];
+                float l = sqrtf(p->v[0] * p->v[0] + p->v[1] * p->v[1] + p->v[2] * p->v[2]);
+                if (l < 0.01f) l = 1;
+                float d[3] = {-p->v[0] / l, -p->v[1] / l, p->v[2] / l};
+                for (int k = 0; k < 3; k++) { p->o[k] += d[k] * 4; p->v[k] = d[k] * p->fly; }
             }
             break;
+        }
         case P_SPIT:
             snd_emit(-1, CHAN_VOICE, "bullchicken/bc_spithit1.wav", 1, ATTN_NORM, PITCH_NORM, p->o);
             proj_hit_damage(p, &tr, skill_get("sk_bullsquid_dmg_spit"), DMG_GENERIC);
@@ -784,6 +1049,7 @@ static void satchels_detonate(void)
 }
 
 static void decals_clear(void);
+static void mapdecals_clear(void);
 void weapons_clear_world(void)
 {
     decals_clear();
@@ -909,8 +1175,10 @@ static void release_vmodel(void)
     vmodel = NULL;
 }
 
+extern float g_view_fov;
 static void deploy(int id)
 {
+    g_view_fov = 90;   // (CCrossbow::Holster: out of the zoom)
     const wdef_t *w = wdef(id);
     cur = id;
     pending = 0;
@@ -938,6 +1206,7 @@ static void deploy(int id)
 
 void weapons_reset(void)
 {
+    g_view_fov = 90;
     cur = pending = 0;
     vmodel = NULL;
     weapons_clear_world();
@@ -972,6 +1241,7 @@ void weapons_tripmine_sweep(const float *a, const float *b, float zlo, float zhi
 
 void weapons_map_start(void)
 {
+    g_view_fov = 90;
     memset(gibs, 0, sizeof(gibs));   // the gib models are reloaded per map
     weapons_clear_world();
     int id = player.cur_weapon;
@@ -1125,9 +1395,143 @@ void game_decal(const float *p, const float *n, int tex, float size, int ent, ui
     d->ent = ent > 0 ? ent : 0;
     if (d->ent) memcpy(d->eorg, entities[d->ent].origin, 12);
 }
-static void decals_clear(void) { memset(decals, 0, sizeof(decals)); decal_next = 0; }
+static void decals_clear(void) { memset(decals, 0, sizeof(decals)); decal_next = 0; mapdecals_clear(); }
 static bool project(const float *p, float *sx, float *sy);
 static float proj_z;
+static bool fx_in_view(const float *p, float r);
+// ---- the maps' own decals (infodecal: CDecal::StaticDecal / TriggerDecal -> R_DecalShoot): the
+// decal is laid on every surface whose plane passes within 4 units of its origin (DECAL_DISTANCE),
+// along that surface's texture axes, a texel to a unit, in the decal's colour (decals.wad
+// palette[255]). The builder lists them in mapdecals.txt; their textures load per map
+#define MAX_MAPDECALS 384
+#define MAX_MD_TEX 160
+typedef struct { float c[4][3]; float uv[4][2]; float eorg[3], mid[3], rad; int16_t ent; uint8_t tex, r, g, b; } mdecal_t;
+static mdecal_t *mdecals;   // per map, on first use
+static int num_mdecals;
+typedef struct { char name[24], spr[12]; int16_t w, h; uint8_t r, g, b; } mdtex_t;
+static mdtex_t *md_tex;
+static int num_md_tex = -1;
+static sprite_t *md_spr[MAX_MD_TEX];
+static void mapdecals_index(void)
+{
+    if (num_md_tex >= 0) return;
+    num_md_tex = 0;
+    FILE *f = fopen("rom:/ui/mapdecals.txt", "r");
+    if (!f) return;
+    md_tex = malloc(sizeof(mdtex_t) * MAX_MD_TEX);
+    if (!md_tex) { fclose(f); return; }
+    char line[96];
+    while (num_md_tex < MAX_MD_TEX && fgets(line, sizeof(line), f)) {
+        mdtex_t *t = &md_tex[num_md_tex];
+        int w, h, r, g, b;
+        if (sscanf(line, "%23s %11s %d %d %d %d %d", t->name, t->spr, &w, &h, &r, &g, &b) == 7) {
+            t->w = w; t->h = h; t->r = r; t->g = g; t->b = b;
+            num_md_tex++;
+        }
+    }
+    fclose(f);
+}
+int mapdecals_epoch = 1;
+static void mapdecals_clear(void)
+{
+    mapdecals_epoch++;
+    for (int i = 0; i < MAX_MD_TEX; i++) if (md_spr[i]) { sprite_free(md_spr[i]); md_spr[i] = NULL; }
+    num_mdecals = 0;
+    free(mdecals);
+    mdecals = NULL;
+}
+void game_map_decal(const float *origin, const char *texname)
+{
+    mapdecals_index();
+    int ti = -1;
+    for (int i = 0; i < num_md_tex; i++) if (!strcasecmp(md_tex[i].name, texname)) { ti = i; break; }
+    if (ti < 0 || num_mdecals >= MAX_MAPDECALS) return;
+    if (!md_spr[ti]) {
+        char path[48];
+        snprintf(path, sizeof(path), "rom:/ui/%s.sprite", md_tex[ti].spr);
+        FILE *f = fopen(path, "rb");
+        if (!f) return;
+        fclose(f);
+        md_spr[ti] = sprite_load(path);
+        if (!md_spr[ti]) return;
+    }
+    // CDecal::StaticDecal: the brush the decal sits on (a trace from origin -5 to +5), else the world
+    gtrace_t tr;
+    float a[3] = {origin[0] - 5, origin[1] - 5, origin[2] - 5}, b[3] = {origin[0] + 5, origin[1] + 5, origin[2] + 5};
+    game_trace(a, b, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &tr);
+    int ent = tr.fraction < 1 && tr.ent > 0 && entities[tr.ent].model > 0 ? tr.ent : 0;
+    int model = ent ? entities[ent].model : 0;
+    float pos[3];
+    for (int k = 0; k < 3; k++) pos[k] = origin[k] - (ent ? entities[ent].origin[k] : 0);
+    if (!mdecals && !(mdecals = malloc(sizeof(mdecal_t) * MAX_MAPDECALS))) return;
+    bdecal_t pieces[8];
+    int n = bsp_decal_faces(model, pos, md_tex[ti].w, md_tex[ti].h, pieces, 8);
+    for (int i = 0; i < n && num_mdecals < MAX_MAPDECALS; i++) {
+        mdecal_t *d = &mdecals[num_mdecals++];
+        for (int q = 0; q < 4; q++) {
+            for (int k = 0; k < 3; k++) d->c[q][k] = pieces[i].c[q][k] + pieces[i].n[k] * 0.25f + (ent ? entities[ent].origin[k] : 0);
+            d->uv[q][0] = pieces[i].uv[q][0];
+            d->uv[q][1] = pieces[i].uv[q][1];
+        }
+        float r2 = 0;
+        for (int k = 0; k < 3; k++) { d->mid[k] = (d->c[0][k] + d->c[3][k]) * 0.5f; r2 += (d->c[0][k] - d->mid[k]) * (d->c[0][k] - d->mid[k]); }
+        d->rad = sqrtf(r2) + 1;
+        d->tex = (uint8_t)ti;
+        d->r = md_tex[ti].r * pieces[i].rgb[0] / 255;
+        d->g = md_tex[ti].g * pieces[i].rgb[1] / 255;
+        d->b = md_tex[ti].b * pieces[i].rgb[2] / 255;
+        d->ent = ent;
+        if (ent) memcpy(d->eorg, entities[ent].origin, 12);
+    }
+}
+static void mapdecals_draw(void)
+{
+    if (!num_mdecals) return;
+    int bound = -1;
+    bool mode = false;
+    for (int i = 0; i < num_mdecals; i++) {
+        mdecal_t *d = &mdecals[i];
+        sprite_t *sp = md_spr[d->tex];
+        if (!sp) continue;
+        float ofs[3] = {0, 0, 0};
+        if (d->ent) {
+            entity_t *e = &entities[d->ent];
+            if (e->removed || !e->visible) continue;
+            for (int k = 0; k < 3; k++) ofs[k] = e->origin[k] - d->eorg[k];
+        }
+        float m[3] = {d->mid[0] + ofs[0], d->mid[1] + ofs[1], d->mid[2] + ofs[2]};
+        if (!fx_in_view(m, d->rad)) continue;
+        float v[4][6];
+        bool ok = true;
+        for (int q = 0; q < 4 && ok; q++) {
+            float w[3] = {d->c[q][0] + ofs[0], d->c[q][1] + ofs[1], d->c[q][2] + ofs[2]};
+            ok = project(w, &v[q][0], &v[q][1]);
+            v[q][2] = proj_z - 0.0006f;
+            v[q][3] = d->uv[q][0] * sp->width;
+            v[q][4] = d->uv[q][1] * sp->height;
+            v[q][5] = 1;
+        }
+        if (!ok) continue;
+        if (!mode) {
+            rdpq_set_mode_standard();
+            rdpq_mode_combiner(RDPQ_COMBINER1((0, 0, 0, PRIM), (TEX0, 0, PRIM, 0)));
+            rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+            rdpq_mode_zbuf(true, false);
+            rdpq_mode_filter(FILTER_BILINEAR);
+            mode = true;
+        }
+        if (d->tex != bound) {
+            rdpq_sync_tile(); rdpq_sync_load();
+            rdpq_sprite_upload(TILE0, sp, &(rdpq_texparms_t){.s.repeats = 1, .t.repeats = 1});
+            bound = d->tex;
+        }
+        rdpq_set_prim_color(RGBA32(d->r, d->g, d->b, 255));
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v[0], v[1], v[2]);
+        rdpq_triangle(&TRIFMT_ZBUF_TEX, v[1], v[3], v[2]);
+    }
+    if (mode) rdpq_set_mode_standard();
+}
+
 static void decals_draw(void)
 {
     int bound = -1;
@@ -1233,6 +1637,7 @@ static void fire_bullets(int shots, float spread_x, float spread_y, float dmg, f
         float end[3] = {eye[0] + d[0] * range, eye[1] + d[1] * range, eye[2] + d[2] * range};
         gtrace_t tr;
         game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
+        { float fr = tr.fraction; if (snarks_shot(eye, end, &fr, dmg)) continue; }   // a snark in the way
         if (tr.fraction >= 1) continue;
         if (tr.npc >= 0) {
             { extern void npc_set_hitpoint(const float *p); npc_set_hitpoint(tr.endpos); }
@@ -1291,6 +1696,7 @@ static void dry_fire(void)
 
 static void start_reload(const wdef_t *w, float time)
 {
+    if (w->id == WEAPON_CROSSBOW && player.clip[w->id] < w->maxclip && player.ammo[w->ammo1] > 0) g_view_fov = 90;   // CCrossbow::Reload: unzoom
     if (w->maxclip <= 0 || player.clip[w->id] >= w->maxclip || player.ammo[w->ammo1] <= 0) return;
     if (w->id == WEAPON_SHOTGUN) {
         // CShotgun::Reload: start, then one shell at a time
@@ -1328,19 +1734,24 @@ static void crowbar_swing(void)
         game_trace(eye, end, mn, mx, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
     }
     static int swing;
-    swing++;
+    static PCTX float last_next;   // m_flNextPrimaryAttack as it stood
+    bool full = wtime > last_next + 1 || h2h_active;   // the first swing in a while does full damage, quick ones half
+    int sw = swing++;
 #ifdef TESTCROWBAR
     debugf("SWING eye %.0f %.0f %.0f frac %.2f npc %d ent %d\n", eye[0], eye[1], eye[2], tr.fraction, tr.npc, tr.ent);
 #endif
     if (tr.fraction >= 1) {
         // v_crowbar: attack1 = 1 hit, attack1miss, attack2 = 2 miss, attack2hit, attack3 = 3 miss, attack3hit
-        play_vseq(swing % 3 == 0 ? "attack1miss" : (swing % 3 == 1 ? "attack2" : "attack3"));
-        snd_emit(0, CHAN_WEAPON, "weapons/cbar_miss1.wav", 1, ATTN_NORM, 94 + rand() % 15, NULL);
+        // ATTACK1MISS, ATTACK2MISS ("attack2"), ATTACK3MISS ("attack3")
+        play_vseq(sw % 3 == 0 ? "attack1miss" : (sw % 3 == 1 ? "attack2" : "attack3"));
+        snd_emit(0, CHAN_WEAPON, "weapons/cbar_miss1.wav", 1, ATTN_NORM, 94 + rand() % 16, NULL);
         next_attack = wtime + 0.5f;
+        last_next = next_attack;
         return;
     }
-    play_vseq(swing % 3 == 0 ? "attack1" : (swing % 3 == 1 ? "attack2hit" : "attack3hit"));
-    float dmg = skill_get("sk_plr_crowbar");
+    play_vseq(sw % 2 == 0 ? "attack2hit" : "attack3hit");   // ((m_iSwing++) % 2) + 1
+    float dmg = skill_get("sk_plr_crowbar") * (full ? 1 : 0.5f);
+    npc_hear(eye, tr.npc >= 0 ? 128 : 512, 0);   // CROWBAR_BODYHIT / WALLHIT_VOLUME
     if (tr.npc >= 0) {
         npc_take_damage(tr.npc, dmg, DMG_CLUB, aim_dir, 0);
         char s[32];
@@ -1351,15 +1762,9 @@ static void crowbar_swing(void)
         snd_emit(0, CHAN_ITEM, rand() & 1 ? "weapons/cbar_hit1.wav" : "weapons/cbar_hit2.wav", 1, ATTN_NORM, 98 + rand() % 4, NULL);
     }
     next_attack = wtime + 0.25f;
+    last_next = next_attack;
 }
 
-static void throw_dir(float *d, float up)
-{
-    memcpy(d, aim_dir, 12);
-    d[2] += up;
-    float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    for (int k = 0; k < 3; k++) d[k] /= l;
-}
 
 static void primary(const wdef_t *w)
 {
@@ -1368,7 +1773,6 @@ static void primary(const wdef_t *w)
     switch (w->id) {
     case WEAPON_CROWBAR:
         crowbar_swing();
-        npc_hear(eye, 200, 0);
         return;
     case WEAPON_GLOCK:
         if (player.clip[w->id] <= 0) { dry_fire(); return; }
@@ -1382,10 +1786,10 @@ static void primary(const wdef_t *w)
         npc_hear(eye, 600, 0);
         break;
     case WEAPON_PYTHON:
-        if (player.clip[w->id] <= 0) { dry_fire(); return; }
+        if (player.clip[w->id] <= 0) { dry_fire(); next_attack = wtime + 0.15f; return; }
         use_ammo(w, 1);
         play_vseq("fire1");
-        snd_emit(0, CHAN_WEAPON, rand() & 1 ? "weapons/357_shot1.wav" : "weapons/357_shot2.wav", 0.8f, ATTN_NORM, PITCH_NORM, NULL);
+        snd_emit(0, CHAN_WEAPON, rand() & 1 ? "weapons/357_shot1.wav" : "weapons/357_shot2.wav", 0.8f + (rand() % 11) / 100.0f, ATTN_NORM, PITCH_NORM, NULL);
         fire_bullets(1, 0.0175f, 0.0175f, skill_get("sk_plr_357_bullet"), 8192, DMG_BULLET);
         punch(-10);
         next_attack = wtime + 0.75f;
@@ -1397,13 +1801,15 @@ static void primary(const wdef_t *w)
         use_ammo(w, 1);
         play_vseq("shoot");
         char s[32];
-        snprintf(s, sizeof(s), "weapons/hks%d.wav", 1 + rand() % 3);
-        snd_emit(0, CHAN_WEAPON, s, 1, ATTN_NORM, 94 + rand() % 15, NULL);
-        fire_bullets(1, 0.10461f, 0.10461f, skill_get("sk_plr_9mmAR_bullet"), 8192, DMG_BULLET);
-        punch(-(rand() % 200) / 100.0f);
+        snprintf(s, sizeof(s), "weapons/hks%d.wav", 1 + rand() % 2);   // (hks3 is commented out in CMP5)
+        snd_emit(0, CHAN_WEAPON, s, 1, ATTN_NORM, 94 + rand() % 16, NULL);
+        // single player VECTOR_CONE_6DEGREES (multiplayer 3)
+        if (h2h_active) fire_bullets(1, 0.02618f, 0.02618f, skill_get("sk_plr_9mmAR_bullet"), 8192, DMG_BULLET);
+        else fire_bullets(1, 0.05234f, 0.05234f, skill_get("sk_plr_9mmAR_bullet"), 8192, DMG_BULLET);
+        { float pp[3]; pm_get_punch(pp); pp[0] = ((rand() % 401) - 200) / 100.0f; pm_set_punch(pp); }   // set, not added: RANDOM_FLOAT(-2, 2)
         next_attack = wtime + 0.1f;
         muzzle_flash = 1;
-        npc_hear(eye, 1000, 0);
+        npc_hear(eye, 600, 0);   // NORMAL_GUN_VOLUME
         break;
     }
     case WEAPON_SHOTGUN:
@@ -1411,9 +1817,9 @@ static void primary(const wdef_t *w)
         use_ammo(w, 1);
         shotgun_reload_state = 0;
         play_vseq("shoot");
-        snd_emit(0, CHAN_WEAPON, "weapons/sbarrel1.wav", 0.95f, ATTN_NORM, 93 + rand() % 31, NULL);
+        snd_emit(0, CHAN_WEAPON, "weapons/sbarrel1.wav", 0.95f + (rand() % 6) / 100.0f, ATTN_NORM, 93 + rand() % 32, NULL);
         if (h2h_active) fire_bullets(4, 0.08716f, 0.04362f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);   // VECTOR_CONE_DM_SHOTGUN
-        else fire_bullets(6, 0.17365f, 0.17365f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);
+        else fire_bullets(6, 0.08716f, 0.08716f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);   // VECTOR_CONE_10DEGREES
         punch(-5);
         next_attack = next_attack2 = wtime + 0.75f;
         muzzle_flash = 2;
@@ -1439,30 +1845,33 @@ static void primary(const wdef_t *w)
         use_ammo(w, 1);
         play_vseq("fire");
         snd_emit(0, CHAN_WEAPON, "weapons/rocketfire1.wav", 0.9f, ATTN_NORM, PITCH_NORM, NULL);
-        float o[3] = {eye[0] + aim_dir[0] * 16, eye[1] + aim_dir[1] * 16, eye[2] + aim_dir[2] * 16 - 8};
-        proj_spawn(P_ROCKET, o, aim_dir, 0, -1);
+        // CRpg::PrimaryAttack: from the gun (forward 16, right 8, down 8) at 250 plus the player's own
+        // speed along the aim
+        float rr[2] = {aim_dir[1], -aim_dir[0]}, rl = sqrtf(rr[0] * rr[0] + rr[1] * rr[1]);
+        if (rl > 0.01f) { rr[0] /= rl; rr[1] /= rl; }
+        float o[3] = {eye[0] + aim_dir[0] * 16 + rr[0] * 8, eye[1] + aim_dir[1] * 16 + rr[1] * 8, eye[2] + aim_dir[2] * 16 - 8};
+        int rk = proj_spawn(P_ROCKET, o, aim_dir, 0, -1);
+        if (rk >= 0) {
+            float pv[3];
+            pm_get_velocity(pv);
+            float along = pv[0] * aim_dir[0] + pv[1] * aim_dir[1] + pv[2] * aim_dir[2];
+            for (int k = 0; k < 3; k++) projs[rk].v[k] += aim_dir[k] * along;
+        }
+        snd_emit(0, CHAN_ITEM, "weapons/glauncher.wav", 0.7f, ATTN_NORM, PITCH_NORM, NULL);
         punch(-5);
         next_attack = wtime + 1.5f;
         npc_hear(eye, 1000, 0);
         break;
     }
-    case WEAPON_GAUSS: {
-        if (player.ammo[w->ammo1] < 2) { dry_fire(); return; }
+    case WEAPON_GAUSS:
+        // CGauss::PrimaryAttack: two cells, skill damage, no punch-through
+        if (pm_get_waterlevel() == 3) { dry_fire(); next_attack = next_attack2 = wtime + 0.15f; return; }
+        if (player.ammo[w->ammo1] < 2) { dry_fire(); next_attack = next_attack2 = wtime + 0.5f; return; }
         player.ammo[w->ammo1] -= 2;
-        play_vseq("fire2");
-        snd_emit(0, CHAN_WEAPON, "weapons/gauss2.wav", 0.5f + (rand() % 30) / 100.0f, ATTN_NORM, 85 + rand() % 15, NULL);
-        float end[3] = {eye[0] + aim_dir[0] * 8192, eye[1] + aim_dir[1] * 8192, eye[2] + aim_dir[2] * 8192};
-        gtrace_t tr;
-        game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
-        float from[3] = {eye[0], eye[1], eye[2] - 6};
-        add_beam(from, tr.endpos, 255, 128, 0, 0.1f, 2);
-        if (tr.npc >= 0) npc_take_damage(tr.npc, skill_get("sk_plr_gauss"), DMG_BULLET, aim_dir, 0);
-        else if (tr.ent > 0) ents_damage_brush(tr.ent, skill_get("sk_plr_gauss"), DMG_BULLET, aim_dir);
-        punch(-2);
+        gauss_start_fire(skill_get("sk_plr_gauss"), true);
         next_attack = next_attack2 = wtime + 0.2f;
-        npc_hear(eye, 1000, 0);
+        idle_time = wtime + 1;
         break;
-    }
     case WEAPON_HORNETGUN: {
         if (player.ammo[w->ammo1] <= 0) return;
         player.ammo[w->ammo1]--;
@@ -1470,13 +1879,14 @@ static void primary(const wdef_t *w)
         char s[32];
         snprintf(s, sizeof(s), "agrunt/ag_fire%d.wav", 1 + rand() % 3);
         snd_emit(0, CHAN_WEAPON, s, 1, ATTN_NORM, 100, NULL);
-        float o[3] = {eye[0] + aim_dir[0] * 16, eye[1] + aim_dir[1] * 16, eye[2] + aim_dir[2] * 16 - 12};
-        int p = proj_spawn(P_HORNET_P, o, aim_dir, 0, -1);
-        (void)p;
-        punch(-(rand() % 200) / 100.0f);
+        // CHgun::PrimaryAttack: a hunting hornet at 300 from the gun (right 8, down 12)
+        float rr[2] = {aim_dir[1], -aim_dir[0]}, rl = sqrtf(rr[0] * rr[0] + rr[1] * rr[1]);
+        if (rl > 0.01f) { rr[0] /= rl; rr[1] /= rl; }
+        float o[3] = {eye[0] + aim_dir[0] * 16 + rr[0] * 8, eye[1] + aim_dir[1] * 16 + rr[1] * 8, eye[2] + aim_dir[2] * 16 - 12};
+        proj_spawn(P_HORNET_P, o, aim_dir, 0, -1);
         next_attack = wtime + 0.25f;
         hornet_regen = wtime + 0.5f;
-        npc_hear(eye, 600, 0);
+        npc_hear(eye, 200, 0);   // QUIET_GUN_VOLUME
         break;
     }
     case WEAPON_HANDGRENADE:
@@ -1494,15 +1904,17 @@ static void primary(const wdef_t *w)
     case -WEAPON_SATCHEL: {
         if (player.ammo[AM_SATCHEL] <= 0) return;
         player.ammo[AM_SATCHEL]--;
-        float d[3];
-        throw_dir(d, 0.1f);
-        float o[3] = {eye[0] + d[0] * 16, eye[1] + d[1] * 16, eye[2] - 8};
+        // CSatchel::Throw: from the body, forward * 274 + the player's velocity
+        float d[3], o[3];
+        memcpy(d, aim_dir, 12);
+        pm_get_origin(o);
         proj_spawn(P_SATCHEL, o, d, 0, -1);
         satchel_out++;
         release_vmodel();
         vmodel = studio_get("v_satchel_radio");
         play_vseq("draw");
-        next_attack = next_attack2 = wtime + 1.0f;
+        next_attack = wtime + 1.0f;
+        next_attack2 = wtime + 0.5f;
         break;
     }
     case WEAPON_TRIPMINE: {
@@ -1522,13 +1934,20 @@ static void primary(const wdef_t *w)
         break;
     }
     case WEAPON_SNARK: {
+        // CSqueak::PrimaryAttack: room in front (from the body, 16 to 64 out) or no throw
         if (player.ammo[w->ammo1] <= 0) return;
+        float d[3], po[3];
+        memcpy(d, aim_dir, 12);
+        pm_get_origin(po);
+        float a0[3] = {po[0] + d[0] * 16, po[1] + d[1] * 16, po[2] + d[2] * 16}, a1[3] = {po[0] + d[0] * 64, po[1] + d[1] * 64, po[2] + d[2] * 64};
+        gtrace_t tr;
+        game_trace(a0, a1, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+        if (tr.startsolid || tr.fraction <= 0.25f) return;
         player.ammo[w->ammo1]--;
-        float d[3];
-        throw_dir(d, 0.05f);
-        float o[3] = {eye[0] + d[0] * 24, eye[1] + d[1] * 24, eye[2] - 4};
-        proj_spawn(P_SNARK, o, d, 0, -1);
-        snd_emit(0, CHAN_VOICE, "squeek/sqk_hunt2.wav", 1, ATTN_NORM, 105, NULL);
+        int s = proj_spawn(P_SNARK, tr.endpos, d, 0, -1);   // forward * 200 + the player's velocity
+        (void)s;
+        snd_emit(0, CHAN_VOICE, rand() % 2 ? "squeek/sqk_hunt2.wav" : "squeek/sqk_hunt3.wav", 1, ATTN_NORM, 105, NULL);
+        npc_hear(eye, 200, -1);   // QUIET_GUN_VOLUME
         play_vseq("throw");
         next_attack = wtime + 0.3f;
         break;
@@ -1564,7 +1983,7 @@ static void secondary(const wdef_t *w)
         proj_spawn(P_ARGRENADE, o, aim_dir, 0, -1);
         punch(-10);
         next_attack = next_attack2 = wtime + 1.0f;
-        npc_hear(eye, 1000, 0);
+        npc_hear(eye, 600, 0);   // NORMAL_GUN_VOLUME
         break;
     }
     case WEAPON_SHOTGUN:
@@ -1572,13 +1991,18 @@ static void secondary(const wdef_t *w)
         use_ammo(w, 2);
         shotgun_reload_state = 0;
         play_vseq("shoot_big");
-        snd_emit(0, CHAN_WEAPON, "weapons/dbarrel1.wav", 1, ATTN_NORM, 85 + rand() % 31, NULL);
+        snd_emit(0, CHAN_WEAPON, "weapons/dbarrel1.wav", 0.98f + (rand() % 3) / 100.0f, ATTN_NORM, 85 + rand() % 32, NULL);
         if (h2h_active) fire_bullets(8, 0.17365f, 0.04362f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);   // VECTOR_CONE_DM_DOUBLESHOTGUN
-        else fire_bullets(12, 0.17365f, 0.17365f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);
+        else fire_bullets(12, 0.08716f, 0.08716f, skill_get("sk_plr_buckshot"), 2048, DMG_BULLET);   // VECTOR_CONE_10DEGREES
         punch(-10);
         next_attack = next_attack2 = wtime + 1.5f;
         muzzle_flash = 2;
         npc_hear(eye, 1000, 0);
+        break;
+    case WEAPON_CROSSBOW:
+        // CCrossbow::SecondaryAttack: the scope, 20 degrees
+        g_view_fov = g_view_fov < 89 ? 90 : 20;
+        next_attack2 = wtime + 1.0f;
         break;
     case WEAPON_RPG:
         rpg_laser = !rpg_laser;
@@ -1589,26 +2013,38 @@ static void secondary(const wdef_t *w)
         if (player.ammo[w->ammo1] <= 0) return;
         player.ammo[w->ammo1]--;
         play_vseq("Shoot");
-        snd_emit(0, CHAN_WEAPON, "agrunt/ag_fire1.wav", 1, ATTN_NORM, 100, NULL);
-        float o[3] = {eye[0] + aim_dir[0] * 16, eye[1] + aim_dir[1] * 16, eye[2] - 12};
-        int p = proj_spawn(P_HORNET, o, aim_dir, 0, -2);
-        if (p >= 0) { for (int k = 0; k < 3; k++) projs[p].v[k] *= 4; projs[p].target = -2; }
+        { char sn[32]; snprintf(sn, sizeof(sn), "agrunt/ag_fire%d.wav", 1 + rand() % 3); snd_emit(0, CHAN_WEAPON, sn, 1, ATTN_NORM, 100, NULL); }
+        // CHgun::SecondaryAttack: a dart at 1200, from one of eight spots around the muzzle
+        float o[3] = {eye[0] + aim_dir[0] * 16, eye[1] + aim_dir[1] * 16, eye[2] + aim_dir[2] * 16 - 12};
+        proj_spawn(P_HORNET, o, aim_dir, 0, -2);
         next_attack = next_attack2 = wtime + 0.1f;
         hornet_regen = wtime + 0.5f;
+        { float pp[3]; pm_get_punch(pp); pp[0] = (rand() % 201) / 100.0f; pm_set_punch(pp); }
+        npc_hear(eye, 600, 0);   // NORMAL_GUN_VOLUME
         break;
     }
     case WEAPON_SATCHEL:
         primary(&(wdef_t){.id = -WEAPON_SATCHEL});
         break;
     case WEAPON_GAUSS:
-        // charged shot: hold to charge, release to fire (CGauss::SecondaryAttack / StartFire)
+        // CGauss::SecondaryAttack: one cell to start the spin, then (gauss_charge_think) one every
+        // 0.3 s until fully charged at 4 s
+        if (pm_get_waterlevel() == 3) {
+            if (gauss_charging) { snd_emit(0, CHAN_WEAPON, "weapons/electro4.wav", 1, ATTN_NORM, 80 + rand() % 64, NULL); play_vseq("idle"); gauss_charging = false; }
+            else dry_fire();
+            next_attack = next_attack2 = wtime + 0.5f;
+            return;
+        }
         if (!gauss_charging) {
-            if (player.ammo[w->ammo1] <= 0) { dry_fire(); return; }
+            if (player.ammo[w->ammo1] <= 0) { dry_fire(); next_attack = next_attack2 = wtime + 0.5f; return; }
             gauss_charging = true;
             gauss_charge_start = wtime;
+            gauss_burn = wtime;
+            gauss_spin_at = wtime + 0.5f;
             player.ammo[w->ammo1]--;
             play_vseq("spinup");
-            snd_emit(0, CHAN_WEAPON, "ambience/pulsemachine.wav", 1, ATTN_NORM, 110, NULL);
+            gauss_snd = snd_emit(0, CHAN_WEAPON, "ambience/pulsemachine.wav", 1, ATTN_NORM, 110, NULL);
+            npc_hear(eye, 256, 0);   // GAUSS_PRIMARY_CHARGE_VOLUME
         }
         break;
     default:
@@ -1616,50 +2052,139 @@ static void secondary(const wdef_t *w)
     }
 }
 
+// CGauss::Fire: the beam. Off the world at a glancing angle (under 60 degrees from the surface) it
+// reflects, splashing damage * n there and keeping damage * (1 - n); square on, a charged beam
+// punches through a wall thinner than its damage (losing the thickness) and blows out the far side.
+// Through monsters it carries on. Ten legs at most, or until the damage drops to 10
+static void gauss_beam(float dmg, bool prim)
+{
+    float eye[3], dir[3];
+    player_get_eye(eye);
+    memcpy(dir, aim_dir, 12);
+    autoaim(eye, dir);
+    float src[3];
+    memcpy(src, eye, 12);
+    int ignore = -1;
+    bool first = true, punched = false;
+    float r[3] = {dir[1], -dir[0], 0}, rl = sqrtf(r[0] * r[0] + r[1] * r[1]);
+    if (rl > 0.01f) { r[0] /= rl; r[1] /= rl; }
+    for (int hits = 0; dmg > 10 && hits < 10; hits++) {
+        float dest[3] = {src[0] + dir[0] * 8192, src[1] + dir[1] * 8192, src[2] + dir[2] * 8192};
+        gtrace_t tr;
+        game_trace(src, dest, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, ignore, &tr);
+        if (tr.allsolid) break;
+        float from[3];
+        if (first) { for (int k = 0; k < 3; k++) from[k] = src[k] + r[k] * 3; from[2] -= 8; add_view_flash(4.5f); first = false; }
+        else memcpy(from, src, 12);
+        if (prim) add_beam(from, tr.endpos, 255, 128, 0, 0.1f, 2);
+        else { float b = fminf(dmg, 255) / 255.0f; add_beam(from, tr.endpos, (int)(255 * b), (int)(255 * b), (int)(255 * b), 0.1f, 5); }
+        if (tr.fraction >= 1) break;
+        if (tr.npc >= 0) {
+            { extern void npc_set_hitpoint(const float *p); npc_set_hitpoint(tr.endpos); }
+            npc_take_damage(tr.npc, dmg, DMG_BULLET, dir, 0);
+            // not a reflector: on through it
+            for (int k = 0; k < 3; k++) src[k] = tr.endpos[k] + dir[k];
+            ignore = tr.npc;
+            continue;
+        }
+        if (tr.ent > 0 && ents_brush_is_breakable(tr.ent)) {   // takes damage: hurt it, no reflection
+            ents_damage_brush(tr.ent, dmg, DMG_BULLET, dir);
+            break;
+        }
+        ignore = -1;
+        float n = -(tr.normal[0] * dir[0] + tr.normal[1] * dir[1] + tr.normal[2] * dir[2]);
+        if (n < 0.5f) {
+            // reflect
+            for (int k = 0; k < 3; k++) dir[k] = 2 * tr.normal[k] * n + dir[k];
+            for (int k = 0; k < 3; k++) src[k] = tr.endpos[k] + dir[k] * 8;
+            game_radius_damage(tr.endpos, dmg * n, 0, -1, DMG_BLAST);
+            if (n == 0) n = 0.1f;
+            dmg *= 1 - n;
+        } else {
+            game_decal(tr.endpos, tr.normal, DC_BIGSHOT + rand() % 5, 16, tr.ent, 0, 0, 0);
+            if (punched || prim) break;
+            punched = true;
+            // how thick the wall is (its far side: the first open point along the beam)
+            float thick = -1;
+            for (float t = 2; t < dmg && t < 256; t += 2) {
+                float pt[3] = {tr.endpos[0] + dir[0] * t, tr.endpos[1] + dir[1] * t, tr.endpos[2] + dir[2] * t};
+                if (game_point_contents(pt) != -2) { thick = t; break; }
+            }
+            if (thick < 0 || thick >= dmg) break;
+            dmg -= thick;
+            float out[3] = {tr.endpos[0] + dir[0] * thick, tr.endpos[1] + dir[1] * thick, tr.endpos[2] + dir[2] * thick};
+            float boom[3] = {out[0] + dir[0] * 8, out[1] + dir[1] * 8, out[2] + dir[2] * 8};
+            game_radius_damage(boom, dmg, 0, -1, DMG_BLAST);
+            npc_hear(out, 1024, 0);   // NORMAL_EXPLOSION_VOLUME
+            // the hole on the far side
+            {
+                gtrace_t bt;
+                game_trace(out, tr.endpos, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, -1, &bt);
+                if (bt.fraction < 1) game_decal(bt.endpos, bt.normal, DC_BIGSHOT + rand() % 5, 16, bt.ent, 0, 0, 0);
+            }
+            for (int k = 0; k < 3; k++) src[k] = out[k] + dir[k];
+        }
+    }
+}
+// CGauss::StartFire
+static void gauss_start_fire(float dmg, bool prim)
+{
+    if (prim) {
+        float p[3]; pm_get_punch(p); p[0] = -2; pm_set_punch(p);
+    } else {
+        // knocked back along the aim (but not up or down: single player)
+        float v[3];
+        pm_get_velocity(v);
+        for (int k = 0; k < 2; k++) v[k] -= aim_dir[k] * dmg * 5;
+        pm_set_velocity(v);
+    }
+    play_vseq("fire2");
+    if (gauss_snd >= 0) { snd_stop(0, CHAN_WEAPON, "ambience/pulsemachine.wav"); gauss_snd = -1; }
+    snd_emit(0, CHAN_WEAPON, "weapons/gauss2.wav", fminf(0.5f + dmg / 400.0f, 1), ATTN_NORM, 85 + rand() % 32, NULL);
+    gauss_aftershock = wtime + 0.3f + (rand() % 50) / 100.0f;
+    { float eye[3]; player_get_eye(eye); npc_hear(eye, 450, 0); }   // GAUSS_PRIMARY_FIRE_VOLUME
+    gauss_beam(dmg, prim);
+}
 static void gauss_release(const wdef_t *w)
 {
-    float eye[3];
-    player_get_eye(eye);
+    // CGauss::WeaponIdle with a charge in hand: 200 at full charge (4 s), less before
     float t = wtime - gauss_charge_start;
-    if (t > 4) t = 4;   // GAUSS_FULLCHARGE
-    float dmg = 200 * t / 4;
-    snd_stop(0, CHAN_WEAPON, "ambience/pulsemachine.wav");
-    snd_emit(0, CHAN_WEAPON, "weapons/gauss2.wav", 1, ATTN_NORM, 85 + rand() % 15, NULL);
-    play_vseq("fire");
-    float end[3] = {eye[0] + aim_dir[0] * 8192, eye[1] + aim_dir[1] * 8192, eye[2] + aim_dir[2] * 8192};
-    gtrace_t tr;
-    game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
-    float from[3] = {eye[0], eye[1], eye[2] - 6};
-    add_beam(from, tr.endpos, 255, 255, 255, 0.15f, 4);
-    if (tr.npc >= 0) npc_take_damage(tr.npc, dmg, DMG_BULLET | DMG_ALWAYSGIB, aim_dir, 0);
-    else if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, DMG_BULLET, aim_dir);
-    // the recoil pushes the player back
-    float v[3];
-    pm_get_velocity(v);
-    for (int k = 0; k < 2; k++) v[k] -= aim_dir[k] * dmg * 5;
-    pm_set_velocity(v);
+    float dmg = t > 4 ? 200 : 200 * t / 4;
     gauss_charging = false;
-    next_attack = next_attack2 = wtime + 1.0f;
-    npc_hear(eye, 1000, 0);
+    gauss_start_fire(dmg, false);
+    idle_time = wtime + 2;
     (void)w;
 }
 
+static void egon_stop(void);
 static void egon_fire(const wdef_t *w, float dt)
 {
     float eye[3];
     player_get_eye(eye);
-    if (player.ammo[w->ammo1] <= 0 || pm_get_waterlevel() == 3) {
-        if (egon_state) { egon_state = 0; snd_stop(0, CHAN_STATIC, NULL); snd_emit(0, CHAN_WEAPON, "weapons/egon_off1.wav", 0.98f, ATTN_NORM, 100, NULL); }
+    // CEgon::Attack (the wide beam: single player's primary)
+    if (pm_get_waterlevel() == 3) {
+        if (egon_state) egon_stop(); else { dry_fire(); next_attack = wtime + 0.25f; }
+        return;
+    }
+    if (player.ammo[w->ammo1] <= 0) {
+        if (egon_state) { egon_stop(); next_attack = wtime + 1; }
+        else { dry_fire(); next_attack = wtime + 0.25f; }
         return;
     }
     if (!egon_state) {
         egon_state = 1;
         snd_emit(0, CHAN_WEAPON, "weapons/egon_windup2.wav", 0.98f, ATTN_NORM, 125, NULL);
-        snd_emit(0, CHAN_STATIC, "weapons/egon_run3.wav", 0.98f, ATTN_NORM, 125, NULL);
-        play_vseq("fire3");
-        egon_ammo_time = wtime;
+        static const char *fa[4] = {"fire1", "fire2", "fire3", "fire4"};
+        play_vseq(fa[rand() % 4]);
+        egon_ammo_time = wtime;               // ammo at once
+        egon_dmg_time = wtime + 0.1f;         // EGON_PULSE_INTERVAL
+        egon_shoot_time = wtime + 2;          // the run loop after the windup
+        egon_shake_time = 0;
     }
-    if (wtime >= egon_ammo_time) { player.ammo[w->ammo1]--; egon_ammo_time = wtime + 0.2f; }   // EGON_PULSE_INTERVAL-ish
+    if (egon_shoot_time > 0 && wtime > egon_shoot_time) {
+        snd_emit(0, CHAN_STATIC, "weapons/egon_run3.wav", 0.98f, ATTN_NORM, 125, NULL);
+        egon_shoot_time = 0;
+    }
     float end[3] = {eye[0] + aim_dir[0] * 2048, eye[1] + aim_dir[1] * 2048, eye[2] + aim_dir[2] * 2048};
     gtrace_t tr;
     game_trace(eye, end, NULL, NULL, TR_IGNORE_PLAYER | TR_HIT_CORPSES, -1, &tr);
@@ -1700,10 +2225,21 @@ static void egon_fire(const wdef_t *w, float dt)
     beam_world_next = false;
     add_bill(4, tr.endpos, 16, life, 255, 255, 255);
     if (rand() % 3 == 0) game_effect_particles(tr.endpos, 3, 160, 140, 160, 255, 0.35f, 300);
-    float dmg = skill_get("sk_plr_egon_wide") * dt * 10;
-    if (tr.npc >= 0) npc_take_damage(tr.npc, dmg, DMG_ENERGYBEAM | DMG_ALWAYSGIB, aim_dir, 0);
-    else if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, DMG_ENERGYBEAM, aim_dir);
-    npc_hear(eye, 600, 0);
+    // FIRE_WIDE: sk_plr_egon_wide every EGON_DISCHARGE_INTERVAL (0.1 s), a cell each 0.1 s, the screen
+    // shaking every 1.5 s
+    if (wtime >= egon_dmg_time) {
+        float dmg = skill_get("sk_plr_egon_wide");
+        if (tr.npc >= 0) npc_take_damage(tr.npc, dmg, DMG_ENERGYBEAM | DMG_ALWAYSGIB, aim_dir, 0);
+        else if (tr.ent > 0) ents_damage_brush(tr.ent, dmg, DMG_ENERGYBEAM, aim_dir);
+        if (wtime >= egon_ammo_time) { player.ammo[w->ammo1]--; egon_ammo_time = wtime + 0.1f; }
+        egon_dmg_time = wtime + 0.1f;
+        if (egon_shake_time < wtime) {
+            float pd = sqrtf((tr.endpos[0] - eye[0]) * (tr.endpos[0] - eye[0]) + (tr.endpos[1] - eye[1]) * (tr.endpos[1] - eye[1]) + (tr.endpos[2] - eye[2]) * (tr.endpos[2] - eye[2]));
+            if (pd < 250) game_shake(5 * (1 - pd / 250), 150, 0.75f);   // UTIL_ScreenShake(end, 5, 150, 0.75, 250)
+            egon_shake_time = wtime + 1.5f;
+        }
+    }
+    npc_hear(eye, 450, 0);   // EGON_PRIMARY_VOLUME
 }
 
 static void egon_stop(void)
@@ -1721,6 +2257,7 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
 {
     if (!h2h_active || h2h_cur == 0) wtime += dt;   // one clock for both Head-To-Head players
     bob_t += dt;
+    if (!player_alive() || cur != WEAPON_CROSSBOW || h2h_active) g_view_fov = 90;   // (dead, or no scope in hand)
     h2h_inflictor = h2h_cur;   // whoever this context is (shots and explosions it causes)
     if (select_show > 0) select_show -= dt;
     {   // a view model that couldn't be loaded yet (a full heap right after a map load): try again
@@ -1856,13 +2393,18 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
     // hand grenade: throw on release (CHandGrenade::WeaponIdle)
     if (cur == WEAPON_HANDGRENADE && grenade_start && !fire && wtime >= next_attack) {
         float held = wtime - grenade_start;
-        float d[3];
-        throw_dir(d, 0.1f);
+        // CHandGrenade::WeaponIdle: the throw is aimed 10 degrees above the view, and goes harder the
+        // higher it's aimed: (90 - pitch) * 4, at most 500
+        float pitch = -asinf(fmaxf(-1, fminf(1, aim_dir[2]))) * 180 / (float)M_PI;   // down positive
+        { float pp[3]; pm_get_punch(pp); pitch += pp[0]; }
+        pitch = pitch < 0 ? -10 + pitch * (80.0f / 90.0f) : -10 + pitch * (100.0f / 90.0f);
+        float vel = (90 - pitch) * 4;
+        if (vel > 500) vel = 500;
+        float yaw = atan2f(aim_dir[1], aim_dir[0]), pr = pitch * (float)M_PI / 180;
+        float d[3] = {cosf(pr) * cosf(yaw), cosf(pr) * sinf(yaw), -sinf(pr)};
         float eye[3];
         player_get_eye(eye);
         float o[3] = {eye[0] + d[0] * 16, eye[1] + d[1] * 16, eye[2] + d[2] * 16};
-        float vel = (90 - (-asinf(aim_dir[2]) * 180 / (float)M_PI) * 0 + 0) * 6.5f;
-        if (vel > 500) vel = 500;
         int p = proj_spawn(P_HGRENADE, o, d, 0, -1);
         if (p >= 0) {
             for (int k = 0; k < 3; k++) projs[p].v[k] = d[k] * vel;
@@ -1870,9 +2412,10 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
             pm_get_velocity(pv);
             for (int k = 0; k < 3; k++) projs[p].v[k] += pv[k];
             projs[p].die = grenade_start + 3.0f;   // the fuse started when the pin was pulled
-            if (projs[p].die < wtime + 0.1f) projs[p].die = wtime + 0.1f;
+            if (projs[p].die < wtime) projs[p].die = wtime;
         }
-        play_vseq(held < 1 ? "throw1" : (held < 2 ? "throw2" : "throw3"));
+        (void)held;
+        play_vseq(vel < 500 ? "throw1" : "throw2");
         player.ammo[AM_HGREN]--;
         grenade_start = 0;
         next_attack = wtime + 0.5f;
@@ -1883,20 +2426,42 @@ void weapons_think(float dt, const float *view_angles, bool fire, bool fire2, bo
         select_next(1);
         if (pending == WEAPON_HANDGRENADE) pending = 0;
     }
-    // gauss charge release
+    // the gauss's charge (CGauss::SecondaryAttack while held, WeaponIdle when let go)
+    if (cur == WEAPON_GAUSS && gauss_aftershock > 0 && wtime > gauss_aftershock) {
+        static const char *as[3] = {"weapons/electro4.wav", "weapons/electro5.wav", "weapons/electro6.wav"};
+        int k = rand() % 4;
+        if (k < 3) snd_emit(0, CHAN_WEAPON, as[k], 0.7f + (rand() % 10) / 100.0f, ATTN_NORM, PITCH_NORM, NULL);
+        gauss_aftershock = 0;
+    }
     if (cur == WEAPON_GAUSS && gauss_charging) {
         float t = wtime - gauss_charge_start;
-        if (t > 10) {   // overcharged: it bites (CGauss::SecondaryAttack)
-            snd_stop(0, CHAN_WEAPON, NULL);
-            snd_emit(0, CHAN_ITEM, "weapons/electro4.wav", 1, ATTN_NORM, 80 + rand() % 20, NULL);
-            player_take_damage(50, DMG_SHOCK, NULL, -1);
-            gauss_charging = false;
+        if (wtime >= gauss_spin_at && gauss_spin_at > 0) { play_vseq("spin"); gauss_spin_at = 0; }
+        if (!fire2) {
+            if (wtime >= gauss_charge_start + 0.5f) gauss_release(w);   // (not before the spin-up's half second)
+        } else if (pm_get_waterlevel() == 3) {
+            secondary(w);
+        } else if (gauss_spin_at == 0 && player.ammo[w->ammo1] <= 0) {
+            gauss_release(w);   // out of cells: it goes
             next_attack = next_attack2 = wtime + 1;
-        } else if (!fire2) {
-            gauss_release(w);
-        } else if (t < 4 && player.ammo[w->ammo1] > 0) {
-            static PCTX float use;
-            if (wtime > use) { player.ammo[w->ammo1]--; use = wtime + 0.3f; }
+        } else {
+            if (gauss_burn >= 0 && wtime > gauss_burn) { player.ammo[w->ammo1]--; gauss_burn = wtime + 0.3f; }
+            if (t >= 4) gauss_burn = -1;   // full: no more cells taken
+            int pitch = (int)(t * (150 / 4.0f) + 100);
+            if (pitch > 250) pitch = 250;
+            if (gauss_snd >= 0) snd_adjust(gauss_snd, 1, pitch);
+            if (t > 10) {
+                // held too long: it bites
+                snd_stop(0, CHAN_WEAPON, NULL);
+                gauss_snd = -1;
+                snd_emit(0, CHAN_WEAPON, "weapons/electro4.wav", 1, ATTN_NORM, 80 + rand() % 64, NULL);
+                snd_emit(0, CHAN_ITEM, "weapons/electro6.wav", 1, ATTN_NORM, 75 + rand() % 64, NULL);
+                gauss_charging = false;
+                idle_time = wtime + 1;
+                next_attack = next_attack2 = wtime + 1;
+                player_take_damage(50, DMG_SHOCK, NULL, -1);
+                hud_fade((const uint8_t[4]){255, 128, 0, 128}, 2, 0.5f, 0);   // FFADE_IN
+                play_vseq("idle");
+            }
         }
     }
     if (cur == WEAPON_EGON && (!fire || !can_fire)) egon_stop();
@@ -2317,10 +2882,26 @@ static void draw_bills(bool view)
 }
 
 
+#define FL_RADIUS 80.0f     // CL_PlayerFlashlight: dl->radius
 static PCTX float fl_point[3];
 static PCTX bool fl_valid;
+static PCTX float fl_color;   // its colour (255 * falloff)
 // where the flashlight's dynamic light is this frame (for lighting characters)
 bool weapons_flashlight_point(float *out) { if (fl_valid) memcpy(out, fl_point, 12); return fl_valid; }
+// R_StudioDynamicLight: what the flashlight adds to a character standing at `origin` (0..255 light,
+// over its own `base` light)
+int weapons_flashlight_model_add(const float *origin, int base)
+{
+    if (!fl_valid || fl_color <= 0) return 0;
+    float dd = 0;
+    for (int k = 0; k < 3; k++) { float q = origin[k] - fl_point[k]; dd += q * q; }
+    float add = FL_RADIUS - sqrtf(dd);
+    if (add <= 0) return 0;
+    // light units in linear terms, through the light gamma (2.5) like the surfaces
+    float lin = powf(base / 255.0f, 2.5f) + add * fl_color / 256.0f / 255.0f;
+    int out = (int)(255 * powf(fminf(lin, 1.0f), 1.0f / 2.5f));
+    return out > base ? out - base : 0;
+}
 #ifdef PROFX
 static uint32_t wd_acc[6]; static int wd_n;
 #define WD(i) do { uint32_t _t = TICKS_READ(); wd_acc[i] += TICKS_DISTANCE(wd_t, _t); wd_t = _t; } while (0)
@@ -2489,17 +3070,20 @@ void weapons_draw_effects(void)
 #ifdef PROFX
     { static uint32_t acc; static int n; acc += TICKS_DISTANCE(qa, TICKS_READ()); if (++n == 30) { debugf("  syncs %d us\n", (int)TICKS_TO_US(acc / n)); acc = n = 0; } }
 #endif
+    mapdecals_draw();
     decals_draw();
-#if 0
-#endif
-    // flashlight (GoldSrc EF_DIMLIGHT on the local player): a dynamic light placed where the view
-    // trace hits, radius ~100 units, full brightness at its centre falling off to nothing at the edge.
-    // Surfaces get an additive, smoothly shaded disc; characters inside the radius are lit (render.c).
+    // flashlight: CL_PlayerFlashlight (Dreamcast cl_ents.c, EF_DIMLIGHT on the local player). One
+    // dynamic light of radius 80 where a 2000-unit trace from the eye along the view lands - at the
+    // origin of a monster it hits ("no falloff") - its colour 255 out to 500 units, (500/d)^2 beyond.
+    // Surfaces gain (radius - distance) * colour / 256 lightmap units (R_AddDynamicLights), shown
+    // through the game's light gamma (2.5); characters (radius - distance from their origin) the same
+    // way (R_StudioDynamicLight, render.c)
     fl_valid = false;
+    fl_color = 0;
     if (player.flashlight && player_alive()) {
         float p = fx_angles[0] * (float)M_PI / 180, y = fx_angles[1] * (float)M_PI / 180;
         float f[3] = {cosf(p) * cosf(y), cosf(p) * sinf(y), -sinf(p)};
-        float end[3] = {fx_eye[0] + f[0] * 2048, fx_eye[1] + f[1] * 2048, fx_eye[2] + f[2] * 2048};
+        float end[3] = {fx_eye[0] + f[0] * 2000, fx_eye[1] + f[1] * 2000, fx_eye[2] + f[2] * 2000};
         // the view trace is the costly part: reuse it while the view holds still
         static PCTX gtrace_t tr;
         static PCTX float last_eye[3], last_ang[2];
@@ -2512,54 +3096,32 @@ void weapons_draw_effects(void)
             have_tr = true;
             tr_age = 0;
         }
-        if (tr.fraction < 1) {
-            memcpy(fl_point, tr.endpos, 12);
-            fl_valid = true;
+        float d = tr.fraction * 2000;
+        float falloff = d < 500 ? 1.0f : 500.0f / d;
+        falloff *= falloff;
+        fl_color = 255 * falloff;
+        memcpy(fl_point, tr.endpos, 12);
+        if (tr.npc >= 0) {   // a monster: lit at its origin
+            memcpy(fl_point, npcs[tr.npc].origin, 12);
+        }
+        fl_valid = true;
+        // the brightest a surface gets, right under the light: 80 * colour / 256 lightmap units, seen
+        // through the light gamma
+        float peak = powf(fminf(FL_RADIUS * fl_color / 256.0f / 255.0f, 1.0f), 1.0f / 2.5f);
+        if (tr.fraction < 1 && tr.npc < 0 && peak > 0.02f) {
             float n[3] = {tr.normal[0], tr.normal[1], tr.normal[2]};
-            float a[3] = {fabsf(n[2]) < 0.9f ? 0 : 1, 0, fabsf(n[2]) < 0.9f ? 1 : 0}, u[3], v[3];
-            u[0] = n[1] * a[2] - n[2] * a[1]; u[1] = n[2] * a[0] - n[0] * a[2]; u[2] = n[0] * a[1] - n[1] * a[0];
-            float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]); if (ul < 1e-4f) ul = 1;
-            for (int k = 0; k < 3; k++) u[k] /= ul;
-            v[0] = n[1] * u[2] - n[2] * u[1]; v[1] = n[2] * u[0] - n[0] * u[2]; v[2] = n[0] * u[1] - n[1] * u[0];
-            float c[3];
-            for (int k = 0; k < 3; k++) c[k] = tr.endpos[k] + n[k] * 1.0f;
-            // light hitting a surface at a glancing angle is spread thinner
-            float ndl = -(n[0] * f[0] + n[1] * f[1] + n[2] * f[2]);
-            if (ndl < 0.2f) ndl = 0.2f;
-            // the beam is a cone: a small, bright spot on a wall right in front (a duct), a wide dim
-            // one far away (the fixed 100-unit disc reached past the screen and behind the eye up close)
-            float hitd = 2048 * tr.fraction;
-            int lv = (int)(100 * ndl * (hitd < 160 ? 1.6f - hitd / 400 : 1.2f));
-            if (lv > 220) lv = 220;
-            float cx, cy;
-            if (project(c, &cx, &cy)) {
-                float cz = proj_z;
-                rdpq_set_mode_standard();
-                rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
-                rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
-                rdpq_mode_zbuf(true, false);
-                const float R = fminf(fmaxf(hitd * 0.55f, 10), 100);
-                float prev[7]; bool havep = false;
-                // 12 segments: each is a CPU-set-up triangle
-                static float ring[17][2]; static bool ring_ok;
-                if (!ring_ok) { for (int k = 0; k <= 16; k++) { ring[k][0] = cosf(k * (float)M_PI / 8); ring[k][1] = sinf(k * (float)M_PI / 8); } ring_ok = true; }
-                for (int k = 0; k <= 16; k++) {
-                    float w[3], sx, sy;
-                    for (int q = 0; q < 3; q++) w[q] = c[q] + (u[q] * ring[k][0] + v[q] * ring[k][1]) * R;
-                    if (!project(w, &sx, &sy)) { havep = false; continue; }
-                    float cur[7] = {sx, sy, proj_z, 1, 1, 0.9f, 0};
-                    float cc[7] = {cx, cy, cz, 1, 1, 0.9f, lv / 255.0f};
-                    if (havep) rdpq_triangle(&TRIFMT_ZBUF_SHADE, cc, prev, cur);
-                    memcpy(prev, cur, sizeof cur); havep = true;
-                }
-                rdpq_set_mode_standard();
-                // and the light spilling onto the surfaces around the spot (floors, the walls of a
-                // corridor or a duct), as GoldSrc's dlight lights every lightmap in its radius
-                extern void render_dlight_world(const float *c, float R, float bright, const float *skip_n, float skip_d);
-                float lc[3];
-                for (int k = 0; k < 3; k++) lc[k] = tr.endpos[k] + n[k] * fminf(R * 0.35f, 24);
-                render_dlight_world(lc, R * 1.5f, lv / 255.0f * 0.9f, n, n[0] * tr.endpos[0] + n[1] * tr.endpos[1] + n[2] * tr.endpos[2]);
-            }
+            const float R = FL_RADIUS;
+            extern void render_flash_spot(const float *c, const float *n, float R, float bright, int model, const float *ofs);
+            extern void render_dlight_world(const float *c, float R, float bright, const float *skip_n, float skip_d);
+            entity_t *he = tr.ent > 0 ? &entities[tr.ent] : NULL;
+            bool flat = he && he->model > 0 && he->angles[0] == 0 && he->angles[1] == 0 && he->angles[2] == 0;
+            if (flat) render_flash_spot(tr.endpos, n, R, peak, he->model, he->origin);   // a door, a lift...
+            if (!he) {
+                // the spot on the world surface it hits, kept to that surface's own triangles
+                render_flash_spot(tr.endpos, n, R, peak, 0, NULL);
+                // every other surface within the radius (R_MarkLights), less by its distance from the light
+                render_dlight_world(tr.endpos, R, peak, n, n[0] * tr.endpos[0] + n[1] * tr.endpos[1] + n[2] * tr.endpos[2]);
+            } else render_dlight_world(tr.endpos, R, peak, NULL, 0);
         }
     }
     PSTAMP(0);

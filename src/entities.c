@@ -39,6 +39,8 @@ float g_wish_move[2];
 static bool plat_toggle(const entity_t *e);
 static bool pushable_settle_pending;
 float game_time(void) { return g_time; }
+extern int g_use_type;
+bool ents_should_toggle(bool on);
 
 // player access (pmove.c)
 void pm_get_origin(float *o);
@@ -161,12 +163,17 @@ static const char *door_stop_sound(int n)
 }
 static const char *button_sound(int n)
 {
-    static char buf[32];
-    if (n <= 0 || n > 14) return NULL;
-    snprintf(buf, sizeof(buf), "buttons/button%d.wav", n == 14 ? 9 : n);
-    if (n == 10) return "buttons/button10.wav";
-    if (n == 11) return "buttons/button11.wav";
-    return buf;
+    // buttons.cpp ButtonSound
+    static const char *t[] = {NULL, "buttons/button1.wav", "buttons/button2.wav", "buttons/button3.wav",
+        "buttons/button4.wav", "buttons/button5.wav", "buttons/button6.wav", "buttons/button7.wav",
+        "buttons/button8.wav", "buttons/button9.wav", "buttons/button10.wav", "buttons/button11.wav",
+        "buttons/latchlocked1.wav", "buttons/latchunlocked1.wav", "buttons/lightswitch2.wav"};
+    static const char *lev[] = {"buttons/lever1.wav", "buttons/lever2.wav", "buttons/lever3.wav",
+        "buttons/lever4.wav", "buttons/lever5.wav"};
+    if (n <= 0) return NULL;   // common/null.wav
+    if (n <= 14) return t[n];
+    if (n >= 21 && n <= 25) return lev[n - 21];
+    return "buttons/button9.wav";
 }
 
 // ------------------------------------------------------------------ event queue (delayed target firing)
@@ -345,6 +352,7 @@ static bool in_transition_volume(const char *landmark)
     return !any;
 }
 
+void ents_fire_entity_target(entity_t *e);
 static void request_changelevel(entity_t *e)
 {
     {
@@ -355,6 +363,7 @@ static void request_changelevel(entity_t *e)
     const char *ct = ent_value(e, "changetarget");
     str_copy(carry_target, ct ? ct : "", sizeof(carry_target));
     carry_delay = ent_float(e, "changedelay", 0);
+    ents_fire_entity_target(e);   // ChangeLevelNow: SUB_UseTargets before the change
     char map[32], lm[48];
     str_copy(map, ent_value(e, "map"), sizeof(map));
     str_copy(lm, ent_value(e, "landmark"), sizeof(lm));
@@ -376,19 +385,120 @@ void ents_fire_targets(const char *name0)
 }
 
 #define fire_entity_target ents_fire_entity_target
+static void kill_targets(const char *kt)
+{
+    char name[48];
+    str_copy(name, kt, sizeof(name));
+    for (int i = ents_find_targetname(name, 1); i >= 0; i = ents_find_targetname(name, i + 1))
+        entities[i].removed = true, entities[i].visible = false, entities[i].solid = SOLID_NOT;
+}
 void ents_fire_entity_target(entity_t *e)
 {
     const char *kt = ent_value(e, "killtarget");
-    if (kt) {
-        char name[48];
-        str_copy(name, kt, sizeof(name));
-        for (int i = ents_find_targetname(name, 1); i >= 0; i = ents_find_targetname(name, i + 1))
-            entities[i].removed = true, entities[i].visible = false, entities[i].solid = SOLID_NOT;
+    if (kt && kt[0]) {
+        // CBaseDelay::SUB_UseTargets: with a delay the killtarget waits for it too (DelayedUse)
+        if (e->delay > 0) {
+            char m[48];
+            m[0] = 1;
+            str_copy(m + 1, kt, sizeof(m) - 1);
+            queue_event(m, g_time + e->delay);
+        } else kill_targets(kt);
     }
     int oldc = cur_caller;
     cur_caller = (int)(e - entities);
     queue_fire(e->target, e->delay);
     cur_caller = oldc;
+}
+
+// trigger_relay / trigger_auto "triggerstate" (KeyValue): 0 USE_OFF, 2 USE_TOGGLE, anything else
+// USE_ON; unset, the member is left at 0 (USE_OFF)
+static int triggerstate_use(const char *ts)
+{
+    if (!ts) return 0;
+    int v = atoi(ts);
+    return v == 0 ? 0 : v == 2 ? 2 : 1;
+}
+
+// trigger_hurt's damage per second: the "dmg" field or the "damage" key (CBaseTrigger::KeyValue), 0 unset
+static float hurt_dmg(entity_t *e)
+{
+    const char *v = ent_value(e, "dmg");
+    if (!v) v = ent_value(e, "damage");
+    return v ? atof(v) : 0;
+}
+
+// ---- func_rotating sound and spin (bmodels.cpp CFuncRotating): "message" or "sounds" 1-5
+// (fans/fanN.wav), heard over the radius its flags pick
+static const char *rotating_sound(entity_t *e)
+{
+    static char buf[64];
+    const char *m = ent_value(e, "message");
+    if (m && m[0]) { str_copy(buf, m, sizeof(buf)); return buf; }
+    int n = (int)ent_float(e, "sounds", 0);
+    if (n < 1 || n > 5) return NULL;
+    snprintf(buf, sizeof(buf), "fans/fan%d.wav", n);
+    return buf;
+}
+static float rotating_attn(entity_t *e)
+{
+    if (e->spawnflags & 128) return ATTN_IDLE;
+    if (e->spawnflags & 256) return ATTN_STATIC;
+    return ATTN_NORM;
+}
+static void rotating_sound_set(entity_t *e, float vol, int pitch, bool start)
+{
+    int ei = (int)(e - entities);
+    if (start || !e->snd) {
+        const char *sn = rotating_sound(e);
+        if (!sn) return;
+        snd_stop(ei, CHAN_STATIC, NULL);
+        int sl = snd_emit(ei, CHAN_STATIC, sn, vol, rotating_attn(e), pitch, NULL);
+        e->snd = sl >= 0 ? sl + 1 : 0;
+    } else snd_adjust(e->snd - 1, vol, pitch);
+}
+// RotatingUse: a spinning one spins down; a still one spins up (SF_BRUSH_ACCDCC) or starts at once
+static void rotating_use(entity_t *e)
+{
+    if (e->curspeed > 0 && e->active) { e->active = false; return; }   // SpinDown
+    if (e->curspeed > 0) { e->active = true; return; }                  // (spinning down: back up)
+    e->active = true;
+    if (e->spawnflags & 16) rotating_sound_set(e, 0.01f, 30, true);
+    else { e->curspeed = e->speed; rotating_sound_set(e, e->dist, 100, true); }
+}
+// SpinUp / SpinDown: speed * fanfriction more or less every tenth of a second, the sound's pitch
+// (30-100) and volume following (RampPitchVol)
+static void rotating_ramp(entity_t *e, float dt)
+{
+    float target = e->active ? e->speed : 0;
+    if (e->curspeed == target) return;
+    float step = e->speed * e->lip * 10 * dt;
+    if (e->curspeed < target) e->curspeed = fminf(target, e->curspeed + step);
+    else e->curspeed = fmaxf(target, e->curspeed - step);
+    if (e->curspeed == target) {
+        if (target > 0) rotating_sound_set(e, e->dist, 100, false);
+        else { if (e->snd) snd_stop((int)(e - entities), CHAN_STATIC, NULL); e->snd = 0; }
+        return;
+    }
+    float pct = e->speed > 0 ? e->curspeed / e->speed : 0;
+    int pitch = (int)(30 + 70 * pct);
+    if (pitch == 100) pitch = 99;
+    rotating_sound_set(e, e->dist * pct, pitch, false);
+}
+
+// CBaseTrigger::ActivateMultiTrigger: its "noise", its targets, its "message" (titles.txt) for a
+// player, then rearmed after "wait" - or gone (trigger_once, trigger_counter: wait -1)
+void hud_show_message(const char *name);
+static void trigger_activate(entity_t *e, bool by_player)
+{
+    if (g_time < e->nextthink) return;
+    if (!master_ok(e)) return;
+    const char *nz = ent_value(e, "noise");
+    if (nz && nz[0]) { char n[64]; str_copy(n, nz, sizeof(n)); snd_emit(e - entities, CHAN_VOICE, n, 1, ATTN_NORM, PITCH_NORM, NULL); }
+    fire_entity_target(e);
+    const char *msg = ent_value(e, "message");
+    if (by_player && msg && msg[0]) { char m[64]; str_copy(m, msg, sizeof(m)); hud_show_message(m); }
+    if (e->type == ENT_TRIGGER_MULTIPLE && e->wait > 0) e->nextthink = g_time + e->wait;
+    else e->removed = true;
 }
 
 // ------------------------------------------------------------------ movers
@@ -425,7 +535,15 @@ static const char *plat_stop_sound(int n)
 static bool is_door(entity_t *e) { return e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING; }
 static const char *mover_move_sound(entity_t *e)
 {
+    if (is_door(e) && e->contents < 0) return NULL;   // CBaseDoor::Spawn: a door with special contents (water) is SF_DOOR_SILENT
     return is_door(e) ? door_move_sound(e->movesnd) : plat_move_sound(e->movesnd);
+}
+// CBasePlatTrain "volume" (m_volume, 0.85 unset) for plats and trains; doors play at full volume
+static float mover_volume(entity_t *e)
+{
+    if (is_door(e)) return 1.0f;
+    float v = ent_float(e, "volume", 0);
+    return v != 0 ? v : 0.85f;
 }
 static void mover_sound_start(entity_t *e)
 {
@@ -433,14 +551,14 @@ static void mover_sound_start(entity_t *e)
     if (!m) return;
     if (e->type == ENT_TRAIN && snd_playing(e - entities, CHAN_STATIC)) return;   // already rolling
     snd_stop(e - entities, CHAN_STATIC, m);
-    snd_emit(e - entities, CHAN_STATIC, m, e->type == ENT_TRAIN ? 0.85f : 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+    snd_emit(e - entities, CHAN_STATIC, m, mover_volume(e), ATTN_NORM, PITCH_NORM, NULL);
 }
 static void mover_sound_stop(entity_t *e)
 {
     const char *m = mover_move_sound(e);
     if (m) snd_stop(e - entities, CHAN_STATIC, m);
-    const char *st = is_door(e) ? door_stop_sound(e->stopsnd) : plat_stop_sound(e->stopsnd);
-    if (st) snd_emit(e - entities, is_door(e) ? CHAN_STATIC : CHAN_WEAPON, st, 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+    const char *st = is_door(e) ? (e->contents < 0 ? NULL : door_stop_sound(e->stopsnd)) : plat_stop_sound(e->stopsnd);
+    if (st) snd_emit(e - entities, is_door(e) ? CHAN_STATIC : CHAN_WEAPON, st, mover_volume(e), ATTN_NORM, PITCH_NORM, NULL);
 }
 
 // ---- func_guntarget (plats.cpp CGunTarget): the Hazard Course's shooting range targets. Used,
@@ -538,6 +656,8 @@ static void mover_reached(entity_t *e)
             // Anomalous Materials lift ele_2), which stays until its button is used again
             if (!plat_toggle(e)) e->nextthink = g_time + 3.0f;
         } else if (e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) {
+            if (!master_ok(e)) { e->state = MS_GOING_UP; return; }   // TriggerAndWait: stuck until its master lets it
+            e->texframe = 1;   // pev->frame = 1: the alternate (lit) textures
             fire_entity_target(e);
             // CBaseButton::TriggerAndWait: a toggle button stays in until it's used (or shot) again
             if (e->wait >= 0 && !(e->spawnflags & 32)) e->nextthink = g_time + e->wait;
@@ -547,9 +667,20 @@ static void mover_reached(entity_t *e)
         e->nextthink = 0;
         // CBaseButton::ButtonBackHome: a toggle button fires its targets again on the way back out
         if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && (e->spawnflags & 32)) fire_entity_target(e);
+        else if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && e->target[0]) {
+            // ButtonBackHome: the multisources among its targets are used again (switched back off)
+            char nm[48];
+            str_copy(nm, e->target, sizeof(nm));
+            int oldc = cur_caller;
+            cur_caller = (int)(e - entities);
+            for (int k = ents_find_targetname(nm, 1); k >= 0; k = ents_find_targetname(nm, k + 1))
+                if (entities[k].type == ENT_MULTISOURCE) ent_use(&entities[k]);
+            cur_caller = oldc;
+        }
         // CBaseDoor::DoorHitBottom: "netname" fires when the door is back shut (the Office
         // Complex elevator door: closing it starts the level change to c1a2)
         if (is_door(e)) {
+            fire_entity_target(e);   // DoorHitBottom: SUB_UseTargets, as on reaching the top
             const char *nn = ent_value(e, "netname");
             if (nn && !(e->spawnflags & 1)) ents_fire_targets(nn);
         }
@@ -592,14 +723,94 @@ static void parse_color(const entity_t *e, const char *key, uint8_t *c, int n)
     if (n > 3) c[3] = a;
 }
 
-// doors.cpp / buttons.cpp: "locked_sound" when the master isn't satisfied
-static void door_locked_sound(entity_t *e)
+// doors.cpp PlayLockSounds: "locked_sound"/"unlocked_sound" (button sounds) and the
+// "locked_sentence"/"unlocked_sentence" announcements ("access denied", "access granted"...), played
+// in order once through each group, the sound quieter while a sentence plays
+static void play_lock_sounds(entity_t *e, bool locked, bool button)
 {
-    int n = (int)ent_float(e, "locked_sound", 0);
-    if (n <= 0) return;
-    if (g_time < e->sndtime) return;
-    e->sndtime = g_time + 1.0f;
-    snd_emit(e - entities, CHAN_ITEM, button_sound(n), 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+    static const char *lsent[] = {NULL, "NA", "ND", "NF", "NFIRE", "NCHEM", "NRAD", "NCON", "NH", "NG"};
+    static const char *usent[] = {NULL, "EA", "ED", "EF", "EFIRE", "ECHEM", "ERAD", "ECON", "EH"};
+    int sn = (int)ent_float(e, locked ? "locked_sound" : "unlocked_sound", 0);
+    int ti = (int)ent_float(e, locked ? "locked_sentence" : "unlocked_sentence", 0);
+    const char *grp = locked ? (ti > 0 && ti <= 9 ? lsent[ti] : NULL) : (ti > 0 && ti <= 8 ? usent[ti] : NULL);
+    uint8_t eofbit = locked ? 1 : 2;
+    bool psnd = sn > 0 && g_time > e->sndtime;
+    bool psent = grp && !(e->lock_eof & eofbit) && g_time > e->lock_sentwait;
+    if (psnd) {
+        snd_emit(e - entities, CHAN_ITEM, button_sound(sn), psent ? 0.25f : 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+        e->sndtime = g_time + (button ? 0.5f : 3.0f);   // BUTTON_SOUNDWAIT / DOOR_SOUNDWAIT
+    }
+    if (psent) {
+        // SENTENCEG_PlaySequentialSz (no reset): the next of the group, until it runs out
+        int8_t *idx = locked ? &e->lock_lidx : &e->lock_uidx;
+        int n = snd_sentence_group_count(grp);
+        if (*idx < n) {
+            char nm[16];
+            snprintf(nm, sizeof(nm), "!%s%d", grp, *idx);
+            snd_emit(e - entities, CHAN_VOICE, nm, 0.85f, ATTN_NORM, PITCH_NORM, NULL);
+            (*idx)++;
+        }
+        if (*idx >= n) e->lock_eof |= eofbit;
+        if (locked) { e->lock_uidx = 0; e->lock_eof &= ~2; } else { e->lock_lidx = 0; e->lock_eof &= ~1; }
+        e->lock_sentwait = g_time + 6.0f;   // DOOR_SENTENCEWAIT
+    }
+}
+
+// CBaseDoor::DoorActivate: a toggle door (SF_DOOR_NO_AUTO_RETURN) open at the top shuts; otherwise
+// it opens, healing the player by its "healthvalue" and playing its unlocked sounds
+static bool door_activate(entity_t *e, bool by_player)
+{
+    if (!master_ok(e)) return false;
+    if ((e->spawnflags & 32) && e->state == MS_AT_TOP) { door_go_down(e); return true; }
+    float hv = ent_float(e, "healthvalue", 0);
+    if (by_player && hv > 0) player_take_health(hv, DMG_GENERIC);
+    play_lock_sounds(e, false, false);
+    door_go_up(e, by_player);
+    return true;
+}
+// CBaseDoor::Use (also the player's +use of a SF_DOOR_USE_ONLY door, the only kind it can use)
+static void door_use(entity_t *e, bool by_player)
+{
+    if (e->state == MS_AT_BOTTOM || ((e->spawnflags & 32) && e->state == MS_AT_TOP)) door_activate(e, by_player);
+}
+// CBaseDoor::DoorTouch: the touch is armed at the bottom (and at the top for a toggle door), never
+// for use-only or non-solid doors; a named door only answers with its locked sounds
+static bool player_touches(entity_t *e, const float *porg, const float *pmins, const float *pmaxs);
+static void door_touch(entity_t *e, const float *porg, const float *pmins, const float *pmaxs)
+{
+    if ((e->spawnflags & 256) || e->solid == SOLID_NOT) return;
+    if (!(e->state == MS_AT_BOTTOM || ((e->spawnflags & 32) && e->state == MS_AT_TOP))) return;
+    float mn[3], mx[3];
+    for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 2; mx[k] = pmaxs[k] + 2; }
+    if (!player_touches(e, porg, mn, mx)) return;
+    if (!master_ok(e)) play_lock_sounds(e, true, false);
+    if (e->targetname[0]) { play_lock_sounds(e, true, false); return; }
+    door_activate(e, true);
+}
+
+// buttons.cpp: CBaseButton::ButtonUse / TakeDamage / ButtonTouch all come to this
+// (ButtonResponseToTouch): pressed at rest it goes in (ButtonActivate, sound first, then the master
+// check and the lock sounds); in, a toggle button that doesn't stay pushed comes back out
+static void button_press(entity_t *e)
+{
+    if (e->state == MS_GOING_UP || e->state == MS_GOING_DOWN) return;
+    const char *bs = button_sound(e->movesnd);
+    if (e->state == MS_AT_TOP) {
+        if (e->wait != -1 && (e->spawnflags & 32)) {
+            if (bs) snd_emit(e - entities, CHAN_VOICE, bs, 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+            e->state = MS_GOING_DOWN;   // ButtonReturn
+            e->texframe = 0;
+            if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang1);
+            else move_linear(e, e->pos1);
+        }
+        return;
+    }
+    if (bs) snd_emit(e - entities, CHAN_VOICE, bs, 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+    if (!master_ok(e)) { play_lock_sounds(e, true, true); return; }
+    play_lock_sounds(e, false, true);
+    e->state = MS_GOING_UP;
+    if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang2);
+    else move_linear(e, e->pos2);
 }
 
 // ------------------------------------------------------------------ sound entities (sound.cpp)
@@ -612,17 +823,126 @@ static float ambient_attenuation(entity_t *e)
     return ATTN_STATIC;
 }
 
+// ---- ambient_generic (sound.cpp CAmbientGeneric) with its dynamic pitch/volume (dynpitchvol_t):
+// spin up/down of pitch, fade in/out of volume, an LFO, presets, and "cspinup" steps per use
+typedef struct {
+    int16_t ent;
+    int preset, pitchrun, pitchstart, spinup, spindown, volrun, volstart, fadein, fadeout;
+    int lfotype, lforate, lfomodpitch, lfomodvol, cspinup, cspincount, pitch;
+    int spinupsav, spindownsav, pitchfrac, vol, fadeinsav, fadeoutsav, volfrac, lfofrac, lfomult;
+} dpv_t;
+#define MAX_DPV 96
+static dpv_t dpv_pool[MAX_DPV];
+static int num_dpv;
+static const int8_t dpv_presets[27][14] = {
+    // pitch pstart spinup spindwn volrun volstrt fadein fadeout lfotype lforate(/10 for 150,750: below) modptch modvol cspnup
+    {1, 0, 75, 95, 95, 10, 1, 50, 95, 0, 0, 0, 0, 0}, {2, 0, 85, 70, 88, 10, 1, 20, 88, 0, 0, 0, 0, 0},
+    {3, 0, 100, 50, 75, 10, 1, 10, 75, 0, 0, 0, 0, 0}, {4, 100, 100, 0, 0, 10, 1, 90, 90, 0, 0, 0, 0, 0},
+    {5, 100, 100, 0, 0, 10, 1, 80, 80, 0, 0, 0, 0, 0}, {6, 100, 100, 0, 0, 10, 1, 50, 70, 0, 0, 0, 0, 0},
+    {7, 100, 100, 0, 0, 5, 1, 40, 50, 1, 50, 0, 10, 0}, {8, 100, 100, 0, 0, 5, 1, 40, 50, 1, 0, 0, 10, 0},
+    {9, 100, 100, 0, 0, 5, 1, 40, 50, 1, 0, 0, 10, 0}, {10, 0, 100, 50, 75, 10, 1, 30, 40, 2, 8, 20, 0, 0},
+    {11, 0, 100, 50, 75, 10, 1, 30, 40, 2, 25, 20, 0, 0}, {12, 0, 100, 50, 75, 10, 1, 30, 40, 2, 70, 20, 0, 0},
+    {13, 50, 50, 0, 0, 10, 1, 20, 50, 0, 0, 0, 0, 0}, {14, 70, 70, 0, 0, 10, 1, 20, 50, 0, 0, 0, 0, 0},
+    {15, 90, 90, 0, 0, 10, 1, 20, 50, 0, 0, 0, 0, 0}, {16, 120, 120, 0, 0, 10, 1, 20, 50, 0, 0, 0, 0, 0},
+    {17, 0, 0, 0, 0, 10, 1, 20, 50, 0, 0, 0, 0, 0}, {18, 0, 0, 0, 0, 10, 1, 20, 50, 0, 0, 0, 0, 0},
+    {19, 0, 75, 90, 90, 10, 1, 50, 90, 2, 100, 20, 0, 0}, {20, 0, 75, 97, 90, 10, 1, 50, 90, 1, 40, 50, 0, 0},
+    {21, 100, 100, 0, 0, 10, 1, 30, 50, 3, 15, 20, 0, 0}, {22, 0, 0, 0, 0, 10, 1, 50, 50, 3, 0, 25, 0, 0},
+    {23, 0, 75, 88, 0, 10, 1, 40, 0, 0, 0, 0, 0, 5}, {24, 0, 20, 95, 70, 10, 1, 70, 70, 3, 20, 50, 0, 0},
+    {25, 0, 100, 50, 60, 10, 1, 40, 60, 2, 90, 100, 100, 0}, {26, 60, 60, 0, 0, 10, 1, 40, 70, 3, 80, 20, 50, 0},
+    {27, 0, 90, 10, 10, 10, 1, 20, 40, 1, 5, 10, 20, 0},
+};
+// the values that don't fit in an int8 (pitches over 127, LFO rates over 127), by preset
+static void dpv_preset_fix(int preset, int *pitchrun, int *pitchstart, int *lforate)
+{
+    static const int16_t pr[27] = {255, 255, 255, 100, 100, 100, 100, 100, 100, 128, 128, 128, 50, 70, 90, 120, 180, 255, 200, 255, 100, 160, 255, 200, 180, 60, 128};
+    static const int16_t ps[27] = {75, 85, 100, 100, 100, 100, 100, 100, 100, 100, 100, 100, 50, 70, 90, 120, 180, 255, 75, 75, 100, 160, 75, 20, 100, 60, 90};
+    static const int16_t lr[27] = {0, 0, 0, 0, 0, 0, 50, 150, 750, 8, 25, 70, 0, 0, 0, 0, 0, 0, 100, 40, 15, 500, 0, 20, 90, 80, 5};
+    *pitchrun = pr[preset - 1]; *pitchstart = ps[preset - 1]; *lforate = lr[preset - 1];
+}
+static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static int ramp_key(entity_t *e, const char *k)   // spinup/spindown/fadein/fadeout: 0-100 -> per-think step
+{
+    int v = clampi((int)ent_float(e, k, 0), 0, 100);
+    return v > 0 ? (101 - v) * 64 : 0;
+}
+static dpv_t *dpv_for(entity_t *e, bool make)
+{
+    int ei = (int)(e - entities);
+    for (int k = 0; k < num_dpv; k++) if (dpv_pool[k].ent == ei) return &dpv_pool[k];
+    if (!make || num_dpv >= MAX_DPV) return NULL;
+    dpv_t *d = &dpv_pool[num_dpv++];
+    memset(d, 0, sizeof(*d));
+    d->ent = (int16_t)ei;
+    // CAmbientGeneric::KeyValue
+    d->preset = (int)ent_float(e, "preset", 0);
+    d->pitchrun = clampi((int)ent_float(e, "pitch", 0), 0, 255);
+    d->pitchstart = clampi((int)ent_float(e, "pitchstart", 0), 0, 255);
+    d->spinup = d->spinupsav = ramp_key(e, "spinup");
+    d->spindown = d->spindownsav = ramp_key(e, "spindown");
+    d->volstart = clampi((int)ent_float(e, "volstart", 0), 0, 10) * 10;
+    d->fadein = d->fadeinsav = ramp_key(e, "fadein");
+    d->fadeout = d->fadeoutsav = ramp_key(e, "fadeout");
+    d->lfotype = (int)ent_float(e, "lfotype", 0);
+    if (d->lfotype > 4) d->lfotype = 2;
+    d->lforate = clampi((int)ent_float(e, "lforate", 0), 0, 1000) * 256;
+    d->lfomodpitch = clampi((int)ent_float(e, "lfomodpitch", 0), 0, 100);
+    d->lfomodvol = clampi((int)ent_float(e, "lfomodvol", 0), 0, 100);
+    d->cspinup = clampi((int)ent_float(e, "cspinup", 0), 0, 100);
+    return d;
+}
+// InitModulationParms
+static void dpv_init(entity_t *e, dpv_t *d)
+{
+    d->volrun = clampi((int)(e->health * 10), 0, 100);
+    if (d->preset != 0 && d->preset <= 27) {
+        const int8_t *p = dpv_presets[d->preset - 1];
+        int keep_ent = d->ent;
+        d->preset = p[0];
+        dpv_preset_fix(d->preset, &d->pitchrun, &d->pitchstart, &d->lforate);
+        d->spinup = p[3] > 0 ? (101 - p[3]) * 64 : 0;   // (the table's spinup/spindown columns)
+        d->spindown = p[4] > 0 ? (101 - p[4]) * 64 : 0;
+        d->volrun = p[5] * 10; d->volstart = p[6] * 10;
+        d->fadein = p[7] > 0 ? (101 - p[7]) * 64 : 0;
+        d->fadeout = p[8] > 0 ? (101 - p[8]) * 64 : 0;
+        d->lfotype = p[9]; d->lforate *= 256;
+        d->lfomodpitch = p[11]; d->lfomodvol = p[12]; d->cspinup = p[13];
+        d->fadeinsav = d->fadein; d->fadeoutsav = d->fadeout;
+        d->spinupsav = d->spinup; d->spindownsav = d->spindown;
+        d->ent = (int16_t)keep_ent;
+    }
+    d->fadein = d->fadeinsav;
+    d->fadeout = 0;
+    d->vol = d->fadein ? d->volstart : d->volrun;
+    d->spinup = d->spinupsav;
+    d->spindown = 0;
+    d->pitch = d->spinup ? d->pitchstart : d->pitchrun;
+    if (d->pitch == 0) d->pitch = PITCH_NORM;
+    d->pitchfrac = d->pitch << 8;
+    d->volfrac = d->vol << 8;
+    d->lfofrac = 0;
+    d->lforate = abs(d->lforate);
+    d->cspincount = 1;
+    if (d->cspinup) {
+        int pitchinc = (255 - d->pitchstart) / d->cspinup;
+        d->pitchrun = d->pitchstart + pitchinc;
+        if (d->pitchrun > 255) d->pitchrun = 255;
+    }
+    if ((d->spinupsav || d->spindownsav || (d->lfotype && d->lfomodpitch)) && d->pitch == PITCH_NORM) d->pitch = PITCH_NORM + 1;
+}
+
 static void ambient_play(entity_t *e)
 {
     char msg[64];
     str_copy(msg, ent_value(e, "message"), sizeof(msg));
     if (!msg[0]) return;
-    float vol = e->health * 0.1f;
-    if (vol > 1) vol = 1;
-    int pitch = (int)ent_float(e, "pitch", 100);
-    if (pitch <= 0) pitch = 100;
+    dpv_t *d = dpv_for(e, true);
+    float vol;
+    int pitch;
+    if (d) { vol = d->vol * 0.01f; pitch = d->pitch; }
+    else { vol = fminf(e->health * 0.1f, 1); pitch = (int)ent_float(e, "pitch", 100); if (pitch <= 0) pitch = 100; }
     int id = snd_emit(e - entities, CHAN_STATIC, msg, vol, ambient_attenuation(e), pitch, e->origin);
     e->snd = id + 1;
+    e->ltime2 = g_time + 0.1f;   // RampThink
 }
 
 static void ambient_stop(entity_t *e)
@@ -633,18 +953,86 @@ static void ambient_stop(entity_t *e)
     e->snd = 0;
 }
 
-// CAmbientGeneric::ToggleUse
+// CAmbientGeneric::ToggleUse (USE_ON / USE_OFF only when that changes it)
 static void ambient_use(entity_t *e)
 {
+    extern int g_use_type;
+    if (g_use_type != 2 && ((e->active && g_use_type == 1) || (!e->active && g_use_type == 0))) return;
     bool looping = !(e->spawnflags & 32);
+    dpv_t *d = dpv_for(e, true);
     if (e->active) {
-        e->active = false;
-        ambient_stop(e);
+        if (d && d->cspinup) {
+            // each use winds it up another step
+            if (d->cspincount <= d->cspinup) {
+                d->cspincount++;
+                int pitchinc = (255 - d->pitchstart) / d->cspinup;
+                d->spinup = d->spinupsav;
+                d->spindown = 0;
+                d->pitchrun = d->pitchstart + pitchinc * d->cspincount;
+                if (d->pitchrun > 255) d->pitchrun = 255;
+                e->ltime2 = g_time + 0.1f;
+            }
+        } else {
+            e->active = false;
+            e->spawnflags |= 16;   // AMBIENT_SOUND_START_SILENT
+            if (d && (d->spindownsav || d->fadeoutsav)) {
+                d->spindown = d->spindownsav; d->spinup = 0;
+                d->fadeout = d->fadeoutsav; d->fadein = 0;
+                e->ltime2 = g_time + 0.1f;
+            } else ambient_stop(e);
+        }
         return;
     }
     if (looping) e->active = true;
     else ambient_stop(e);
+    if (d) dpv_init(e, d);
     ambient_play(e);
+}
+
+// CAmbientGeneric::RampThink, every 0.2 s while it has a ramp or LFO going
+static void ambient_think(entity_t *e)
+{
+    dpv_t *d = dpv_for(e, false);
+    if (!d || !e->snd || g_time < e->ltime2) return;
+    if (!d->spinup && !d->spindown && !d->fadein && !d->fadeout && !d->lfotype) return;
+    int pitch = d->pitch, vol = d->vol, prev;
+    bool changed = false, any = false;
+    if (d->spinup || d->spindown) {
+        prev = d->pitchfrac >> 8;
+        if (d->spinup > 0) d->pitchfrac += d->spinup;
+        else if (d->spindown > 0) d->pitchfrac -= d->spindown;
+        pitch = d->pitchfrac >> 8;
+        if (pitch > d->pitchrun) { pitch = d->pitchrun; d->spinup = 0; }
+        if (pitch < d->pitchstart) { d->spindown = 0; ambient_stop(e); return; }
+        pitch = clampi(pitch, 1, 255);
+        d->pitch = pitch;
+        changed |= prev != pitch; any = true;
+    }
+    if (d->fadein || d->fadeout) {
+        prev = d->volfrac >> 8;
+        if (d->fadein > 0) d->volfrac += d->fadein;
+        else if (d->fadeout > 0) d->volfrac -= d->fadeout;
+        vol = d->volfrac >> 8;
+        if (vol > d->volrun) { vol = d->volrun; d->fadein = 0; }
+        if (vol < d->volstart) { d->fadeout = 0; ambient_stop(e); return; }
+        vol = clampi(vol, 1, 100);
+        d->vol = vol;
+        changed |= prev != vol; any = true;
+    }
+    if (d->lfotype) {
+        if (d->lfofrac > 0x6fffffff) d->lfofrac = 0;
+        d->lfofrac += d->lforate;
+        int pos = d->lfofrac >> 8;
+        if (d->lfofrac < 0) { d->lfofrac = 0; d->lforate = abs(d->lforate); pos = 0; }
+        else if (pos > 255) { pos = 255; d->lfofrac = 255 << 8; d->lforate = -abs(d->lforate); }
+        if (d->lfotype == 1) d->lfomult = pos < 128 ? 255 : 0;            // square
+        else if (d->lfotype == 3) { if (pos == 255) d->lfomult = rand() % 256; }   // random
+        else d->lfomult = pos;                                             // triangle
+        if (d->lfomodpitch) { prev = pitch; pitch = clampi(pitch + ((d->lfomult - 128) * d->lfomodpitch) / 100, 1, 255); changed |= prev != pitch; any = true; }
+        if (d->lfomodvol) { prev = vol; vol = clampi(vol + ((d->lfomult - 128) * d->lfomodvol) / 100, 0, 100); changed |= prev != vol; any = true; }
+    }
+    if (any && changed) snd_adjust(e->snd - 1, vol * 0.01f, pitch == PITCH_NORM ? PITCH_NORM + 1 : pitch);
+    e->ltime2 = g_time + 0.2f;
 }
 
 static void play_cd_track(int track)
@@ -656,12 +1044,23 @@ static void play_cd_track(int track)
 void game_effect_sparks(const float *o);
 void game_effect_lightning(const float *a, const float *b, int r, int g, int bl);
 void game_effect_env_beam(const float *a, const float *b, int r, int g, int bl, int tex, float noise, float boltwidth, float life);
-static void spark_sound(entity_t *e)
+// buttons.cpp DoSpark: sparks at the middle of the entity, a quiet random crackle (0.1-0.3)
+static void spark_at_point(entity_t *e, const float *o)
 {
-    game_effect_sparks(e->origin);
+    game_effect_sparks(o);
     char s[32];
     snprintf(s, sizeof(s), "buttons/spark%d.wav", 1 + rand() % 6);
-    snd_emit(e - entities, CHAN_VOICE, s, 0.1f + (rand() % 100) / 160.0f, ATTN_NORM, PITCH_NORM, NULL);
+    snd_emit(e - entities, CHAN_VOICE, s, (0.25f + (rand() % 1000) / 1000.0f * 0.5f) * 0.4f, ATTN_NORM, PITCH_NORM, NULL);
+}
+static void spark_sound(entity_t *e) { spark_at_point(e, e->origin); }
+static void spark_at(entity_t *e)
+{
+    float c[3];
+    if (e->model > 0) {
+        bmodel_t *bm = &world.bmodels[e->model];
+        for (int k = 0; k < 3; k++) c[k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f;
+    } else memcpy(c, e->origin, 12);
+    spark_at_point(e, c);
 }
 
 // CScriptedSentence::FindEntity / AcceptableSpeaker
@@ -752,7 +1151,13 @@ static void special_use(entity_t *e)
             if (k < 0) for (int j = 0; j < m->n && j < 24; j++) if (!(m->on & (1u << j))) { k = j; break; }   // caller unknown
             if (k >= 0) m->on ^= 1u << k;
         } else e->msource_count++;
-        if (msource_triggered(e)) fire_entity_target(e);
+        // all on: its targets, toggled (USE_ON with a global state)
+        if (msource_triggered(e)) {
+            int saved = g_use_type;
+            g_use_type = ent_value(e, "globalstate") ? 1 : 2;
+            fire_entity_target(e);
+            g_use_type = saved;
+        }
     }
         break;
     case ENT_ENV_FADE: {
@@ -806,6 +1211,7 @@ static void special_use(entity_t *e)
     case ENT_CAMERA: {
         // triggers.cpp CTriggerCamera::Use (toggles)
         int idx = (int)(e - entities);
+        if (!ents_should_toggle(e->active)) break;
         if (e->active) { e->active = false; e->nextthink = 0; game_set_camera(-1, 0, false); break; }
         e->active = true;
         float wait = ent_float(e, "wait", 10);
@@ -942,6 +1348,33 @@ static void breakable_center(entity_t *e, float *c)
     for (int k = 0; k < 3; k++) c[k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f;
 }
 
+// CBreakable::DamageSound
+static void breakable_damage_sound(entity_t *e)
+{
+    int mat = (int)ent_float(e, "material", 0);
+    int pitch = (rand() % 3) ? PITCH_NORM : 95 + rand() % 35;
+    float vol = 0.75f + (rand() % 1000) / 1000.0f * 0.25f;
+    if (mat == 6 && (rand() & 1)) mat = 2;   // a computer sounds like glass or metal
+    static const char *glass[] = {"debris/glass1.wav", "debris/glass2.wav", "debris/glass3.wav"};
+    static const char *wood[] = {"debris/wood1.wav", "debris/wood2.wav", "debris/wood3.wav"};
+    static const char *metal[] = {"debris/metal1.wav", "debris/metal3.wav"};
+    static const char *flesh[] = {"debris/flesh1.wav", "debris/flesh2.wav", "debris/flesh3.wav", "debris/flesh5.wav", "debris/flesh6.wav", "debris/flesh7.wav"};
+    static const char *conc[] = {"debris/concrete1.wav", "debris/concrete2.wav", "debris/concrete3.wav"};
+    const char **t = NULL;
+    int n = 0;
+    switch (mat) {
+    case 6: case 0: case 7: t = glass; n = 3; break;
+    case 1: t = wood; n = 3; break;
+    case 2: t = metal; n = 2; break;
+    case 3: t = flesh; n = 6; break;
+    case 8: case 4: t = conc; n = 3; break;
+    }
+    if (!n) return;
+    float c[3];
+    breakable_center(e, c);
+    snd_emit(e - entities, CHAN_VOICE, t[rand() % n], vol, ATTN_NORM, pitch, c);
+}
+
 // CBreakable::Die
 static void breakable_die(entity_t *e)
 {
@@ -949,7 +1382,9 @@ static void breakable_die(entity_t *e)
     int mat = (int)ent_float(e, "material", 0);
     char s[40];
     int pitch = 95 + rand() % 30;
-    float vol = 0.5f + (rand() % 50) / 100.0f;
+    if (pitch > 97 && pitch < 103) pitch = 100;
+    float vol = 0.85f + (rand() % 1000) / 1000.0f * 0.15f + fabsf(e->health) / 100.0f;   // the harder the hit, the louder
+    if (vol > 1) vol = 1;
     switch (mat) {
     case 0: case 7: snprintf(s, sizeof(s), "debris/bustglass%d.wav", 1 + rand() % 2); break;
     case 1: snprintf(s, sizeof(s), "debris/bustcrate%d.wav", 1 + rand() % 2); break;
@@ -973,7 +1408,8 @@ static void breakable_die(entity_t *e)
     }
     float mag = ent_float(e, "explodemagnitude", 0);
     if (mag > 0) {
-        snd_emit(-1, CHAN_AUTO, "weapons/explode3.wav", 1.0f, 0.3f, PITCH_NORM, c);
+        static const char *ex[] = {"weapons/explode3.wav", "weapons/explode4.wav", "weapons/explode5.wav"};
+        snd_emit(-1, CHAN_AUTO, ex[rand() % 3], 1.0f, 0.3f, PITCH_NORM, c);
         game_radius_damage(c, mag, mag * 2.5f, -1, DMG_BLAST);
         game_effect_explosion(c, mag);
     }
@@ -997,8 +1433,11 @@ int ents_aim_targets(float (*c)[3], int *idx, int max)
 bool ents_brush_is_breakable(int ent)
 {
     entity_t *e = &entities[ent];
-    return !e->removed && (e->type == ENT_BREAKABLE || e->type == ENT_PUSHABLE) && e->maxhealth > 0 &&
-           !(e->type == ENT_BREAKABLE && (e->spawnflags & 1));
+    // CBreakable: takes damage unless SF_BREAK_TRIGGER_ONLY, and breaks unless it's unbreakable
+    // glass (IsBreakable); a pushable only with SF_PUSH_BREAKABLE (CPushable::TakeDamage)
+    if (e->removed || (int)ent_float(e, "material", 0) == 7) return false;
+    if (e->type == ENT_BREAKABLE) return !(e->spawnflags & 1);
+    return e->type == ENT_PUSHABLE && (e->spawnflags & 128);
 }
 
 // CBreakable::TakeDamage (bullets, explosions, the crowbar)
@@ -1021,10 +1460,7 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
     if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && !e->removed && ent_float(e, "health", 0) > 0) {
         // CBaseButton::TakeDamage: a button with health is pressed by shooting it (On A Rail's
         // track switches); like a press, it does nothing while it's moving
-        if (e->state == MS_AT_BOTTOM || (e->state == MS_AT_TOP && (e->spawnflags & 32))) {
-            if (!master_ok(e)) door_locked_sound(e);
-            else ent_use(e);
-        }
+        button_press(e);   // CBaseButton::TakeDamage
         return;
     }
     if (!ents_brush_is_breakable(ent)) {
@@ -1032,21 +1468,11 @@ void ents_damage_brush(int ent, float dmg, int dmgtype, const float *dir)
         return;
     }
     if (e->type == ENT_BREAKABLE && (e->spawnflags & 256) && (dmgtype & DMG_CLUB)) dmg = e->health;  // SF_BREAK_CROWBAR
-    if (dmgtype & DMG_BLAST) dmg *= 1.0f;
-    int mat = (int)ent_float(e, "material", 0);
-    char s[40] = "";
-    switch (mat) {
-    case 0: case 7: snprintf(s, sizeof(s), "debris/glass%d.wav", 1 + rand() % 3); break;
-    case 1: snprintf(s, sizeof(s), "debris/wood%d.wav", 1 + rand() % 3); break;
-    case 2: case 6: snprintf(s, sizeof(s), "debris/metal%d.wav", 1 + rand() % 3); break;
-    case 3: snprintf(s, sizeof(s), "debris/flesh%d.wav", 1 + rand() % 7); break;
-    case 4: case 8: snprintf(s, sizeof(s), "debris/concrete%d.wav", 1 + rand() % 3); break;
-    }
-    float c[3];
-    breakable_center(e, c);
+    if (dmgtype & DMG_CLUB) dmg *= 2;        // CBreakable::TakeDamage
+    if (dmgtype & DMG_POISON) dmg *= 0.1f;
     e->health -= dmg;
     if (e->health <= 0) { breakable_die(e); return; }
-    if (s[0] && (rand() & 1)) snd_emit(-1, CHAN_VOICE, s, 0.9f, ATTN_NORM, 95 + rand() % 30, c);
+    breakable_damage_sound(e);
 }
 
 void game_effect_blood(const float *o);
@@ -1314,6 +1740,8 @@ void ents_maker_child_died(int maker)
 }
 
 int g_use_type = 2;   // USE_TOGGLE unless a trigger_relay says otherwise
+// CBaseEntity::ShouldToggle: USE_ON to something on, or USE_OFF to something off, does nothing
+bool ents_should_toggle(bool on) { return !((on && g_use_type == 1) || (!on && g_use_type == 0)); }
 static void ent_use(entity_t *e)
 {
     if (e->removed) return;
@@ -1330,38 +1758,37 @@ static void ent_use(entity_t *e)
         game_spawn_gibs(e->origin, n > 10 ? 10 : (n < 1 ? 1 : n), false, v * 0.6f);
         return;
     }
-    if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) &&
-        !master_ok(e)) return;   // locked by its master (UTIL_IsMasterTriggered)
+    if ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !master_ok(e)) return;   // DoorActivate: locked by its master
     switch (e->type) {
     case ENT_DOOR:
     case ENT_DOOR_ROTATING:
-        if (e->state == MS_AT_TOP || e->state == MS_GOING_UP) {
-            if (e->wait == -1 || (e->spawnflags & 32)) door_go_down(e);
-        } else {
-            door_go_up(e, true);
-        }
+        door_use(e, true);
         break;
     case ENT_BUTTON:
     case ENT_ROT_BUTTON:
-        if (e->state == MS_AT_BOTTOM) {
-            snd_emit(e - entities, CHAN_VOICE, button_sound(e->movesnd), 1.0f, ATTN_NORM, PITCH_NORM, NULL);
-            e->state = MS_GOING_UP;
-            if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang2);
-            else move_linear(e, e->pos2);
-        } else if (e->state == MS_AT_TOP && (e->spawnflags & 32)) {   // SF_BUTTON_TOGGLE: ButtonReturn
-            snd_emit(e - entities, CHAN_VOICE, button_sound(e->movesnd), 1.0f, ATTN_NORM, PITCH_NORM, NULL);
-            e->state = MS_GOING_DOWN;
-            if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang1);
-            else move_linear(e, e->pos1);
-        }
+        button_press(e);
         break;
     case ENT_PLAT:
-        if (e->state == MS_AT_BOTTOM) { e->state = MS_GOING_UP; move_linear(e, e->pos1); mover_sound_start(e); }
-        else if (e->state == MS_AT_TOP) { e->state = MS_GOING_DOWN; move_linear(e, e->pos2); mover_sound_start(e); }
+        // CFuncPlat::PlatUse: a toggle plat goes up or down (ShouldToggle: "on" is at the bottom);
+        // any other plat answers once, going down from the top
+        if (plat_toggle(e)) {
+            extern int g_use_type;
+            bool on = e->state == MS_AT_BOTTOM;
+            if ((on && g_use_type == 1) || (!on && g_use_type == 0)) break;
+            if (e->state == MS_AT_TOP) { e->state = MS_GOING_DOWN; move_linear(e, e->pos2); mover_sound_start(e); }
+            else if (e->state == MS_AT_BOTTOM) { e->state = MS_GOING_UP; move_linear(e, e->pos1); mover_sound_start(e); }
+        } else if (!e->triggered) {
+            e->triggered = true;
+            if (e->state == MS_AT_TOP) { e->state = MS_GOING_DOWN; move_linear(e, e->pos2); mover_sound_start(e); }
+        }
         break;
-    case ENT_WALL_TOGGLE:
+    case ENT_WALL_TOGGLE: {
+        // CFuncWallToggle::Use: ShouldToggle(useType, IsOn())
+        extern int g_use_type;
+        if ((e->visible && g_use_type == 1) || (!e->visible && g_use_type == 0)) break;
         e->visible = !e->visible;
         e->solid = e->visible ? SOLID_BSP : SOLID_NOT;
+    }
         break;
     case ENT_WALL: {   // CFuncWall::Use: its textures switch to the alternate set (screens, signs)
         extern int g_use_type;
@@ -1373,14 +1800,23 @@ static void ent_use(entity_t *e)
         const char *ts = ent_value(e, "triggerstate");
         extern int g_use_type;
         int saved = g_use_type;
-        g_use_type = ts ? atoi(ts) : 2;
+        g_use_type = triggerstate_use(ts);
         fire_entity_target(e);
         g_use_type = saved;
+        if (e->spawnflags & 1) e->removed = true;   // SF_RELAY_FIREONCE
         break;
     }
     case ENT_TRIGGER_ONCE:
     case ENT_TRIGGER_MULTIPLE:
-        fire_entity_target(e);
+        break;   // CTriggerMultiple has no Use: only touching fires it
+    case ENT_INFODECAL:
+        // CDecal::TriggerDecal: stamped once, then the entity is spent
+        e->triggered = true;   // kept by saves (infodecal is a point entity: only the bit is)
+        break;
+    case ENT_TRIGGER_COUNTER:
+        // CBaseTrigger::CounterUse: fires (ActivateMultiTrigger, then gone) on its "count"th use
+        if (--e->msource_count != 0) break;
+        trigger_activate(e, false);
         break;
     case ENT_MULTI_MANAGER: {
         // CMultiManager: targets fire from its think (never synchronously); while running,
@@ -1423,16 +1859,31 @@ static void ent_use(entity_t *e)
         request_changelevel(e);
         break;
     case ENT_ROTATING:
-        e->active = !e->active;
+        rotating_use(e);
         break;
     case ENT_TRAIN:
-        // CFuncTrain::Use toggles between waiting and moving
+        // CFuncTrain::Use toggles between waiting (SF_TRAIN_WAIT_RETRIGGER) and moving. Stopped, it
+        // heads for the corner it was making for (pev->enemy) when started again
         if (e->state == MS_IDLE || e->triggered) { e->triggered = false; train_next(e); }
-        else { e->triggered = true; e->active = false; }
+        else {
+            e->triggered = true;
+            e->active = false;
+            e->nextthink = 0;
+            if (e->path >= 0) str_copy(e->target, entities[e->path].targetname, sizeof(e->target));
+            const char *st = plat_stop_sound(e->stopsnd);
+            if (st) snd_emit(e - entities, CHAN_VOICE, st, mover_volume(e), ATTN_NORM, PITCH_NORM, NULL);
+        }
         break;
     case ENT_TRACKTRAIN:
         tt_use(e, (int)(e - entities));
         break;
+    case ENT_REPEL: {
+        // CHGruntRepel::RepelUse: a grunt on a rope, once (UTIL_Remove(this))
+        extern void npc_grunt_repel(const float *origin, float yaw);
+        e->removed = true;
+        npc_grunt_repel(e->origin, e->angles[1]);
+        break;
+    }
     case ENT_TRACKAUTO:
         trackchange_use(e);
         break;
@@ -1452,7 +1903,8 @@ static void ent_use(entity_t *e)
     }
     case ENT_BREAKABLE:
     case ENT_PUSHABLE:
-        if (e->type == ENT_BREAKABLE || e->maxhealth > 0) breakable_die(e);
+        // CBreakable::Use (IsBreakable); a pushable only with SF_PUSH_BREAKABLE
+        if ((int)ent_float(e, "material", 0) != 7 && (e->type == ENT_BREAKABLE || (e->spawnflags & 128))) breakable_die(e);
         break;
     case ENT_GUNTARGET: {   // CGunTarget::Use: on -> stop; off -> takes hits and sets off along its path
         extern int g_use_type;
@@ -1496,6 +1948,7 @@ static void ent_use(entity_t *e)
         special_use(e);
         break;
     case ENT_GLOBAL_BEAM:
+        if (!ents_should_toggle(e->active)) break;   // CLightning / CLaser::Use
         e->active = !e->active;
         break;
     case ENT_ENV_GLOBAL: {
@@ -1524,6 +1977,7 @@ static void ent_use(entity_t *e)
         e->active = !e->active;
         break;
     case ENT_TANK:
+        if (!ents_should_toggle(e->active)) break;
         e->active = !e->active;   // CFuncTank::Use: TankActivate / TankDeactivate
         break;
     case ENT_SPRITE: {
@@ -1532,7 +1986,7 @@ static void ent_use(entity_t *e)
         if (e->code == 5) { e->active = true; e->sprt0 = g_time; }
         else if (e->code == 1) game_effect_explosion(e->origin, 60 * sc);
         else if (e->code == 2) { extern void game_effect_flash(const float *o, float rad); game_effect_flash(e->origin, 24 * sc); }
-        else { e->active = !e->active; if (e->active) e->sprt0 = g_time; }
+        else if (ents_should_toggle(e->active)) { e->active = !e->active; if (e->active) e->sprt0 = g_time; }   // CSprite::Use
         break;
     }
     case ENT_MORTAR_FIELD: {
@@ -1556,8 +2010,15 @@ static void ent_use(entity_t *e)
     }
     case ENT_MONSTERMAKER:
         // CMonsterMaker::CyclicUse makes one per use; ToggleUse switches the timed maker on and off
+        // (a maker without a name has no Use; one that has made its last has none left either)
+        if (!e->targetname[0] || e->maker_count == 0) break;
         if (e->spawnflags & 4) maker_make(e);
-        else { e->active = !e->active; if (e->active) e->nextthink = g_time; }
+        else {
+            extern int g_use_type;
+            if ((e->active && g_use_type == 1) || (!e->active && g_use_type == 0)) break;   // ShouldToggle
+            e->active = !e->active;
+            if (e->active) e->nextthink = g_time;
+        }
         break;
     default:
         break;
@@ -1595,7 +2056,8 @@ static enttype_t classify(const char *cn)
         {"trigger_transition", ENT_INVISIBLE_BRUSH}, {"func_vehiclecontrols", ENT_INVISIBLE_BRUSH},
         {"trigger", ENT_INVISIBLE_BRUSH},
         {"env_bubbles", ENT_INVISIBLE_BRUSH}, {"func_tankmortar", ENT_TANK}, {"func_tanklaser", ENT_TANK},
-        {"func_tankrocket", ENT_TANK},
+        {"func_tankrocket", ENT_TANK}, {"monster_grunt_repel", ENT_REPEL}, {"trigger_counter", ENT_TRIGGER_COUNTER},
+        {"env_lightning", ENT_GLOBAL_BEAM}, {"infodecal", ENT_INFODECAL}, {"env_sound", ENT_ENV_SOUND}, {"env_debris", ENT_ENV_SPARK},
     };
     for (unsigned i = 0; i < sizeof(tab) / sizeof(tab[0]); i++)
         if (!strcasecmp(cn, tab[i].n)) return tab[i].t;
@@ -1754,26 +2216,56 @@ static void spawn_entity(entity_t *e)
         memcpy(e->pos1, e->origin, 12);
         memcpy(e->pos2, e->origin, 12);
         e->pos2[2] -= h;
+        // CPlatTrigger::SpawnInsideTrigger (not for toggle plats): a box over the plat's whole travel
+        // to 8 above its top (a thin plat's is a line down its middle)
+        {
+            bmodel_t *bm = &world.bmodels[e->model];
+            float tmn[3], tmx[3];
+            // (vecTMin = mins + (25,25,0): the box starts 25 in from the plat's low sides, as in the game)
+            for (int k = 0; k < 3; k++) { tmn[k] = bm->mins[k] + (k < 2 ? 25 : 0); tmx[k] = bm->maxs[k] + (k < 2 ? 25 : 8); }
+            tmn[2] = tmx[2] - (e->pos1[2] - e->pos2[2] + 8);
+            for (int k = 0; k < 2; k++)
+                if (size[k] <= 50) { tmn[k] = (bm->mins[k] + bm->maxs[k]) / 2; tmx[k] = tmn[k] + 1; }
+            for (int k = 0; k < 3; k++) { e->ctlmins[k] = e->pos1[k] + tmn[k]; e->ctlmaxs[k] = e->pos1[k] + tmx[k]; }
+        }
         if (!e->targetname[0]) { memcpy(e->origin, e->pos2, 12); e->state = MS_AT_BOTTOM; }
         else e->state = MS_AT_TOP;
-        // func_platrot: turns about yaw while it travels (m_end at the top, m_start at the bottom)
+        e->triggered = false;   // a non-toggle plat answers one Use only (SetUse(NULL))
+        // func_platrot (CFuncPlatRot::SetupRotation): turns "rotation" degrees about its axis
+        // (CBaseToggle::AxisDir) on the way up: m_end at the top, m_start at the bottom
         memset(e->ang2, 0, 12);
         if (!strcasecmp(e->classname, "func_platrot")) {
-            e->ang2[1] = ent_float(e, "rotation", 0);
-            e->angles[1] = e->state == MS_AT_TOP ? e->ang2[1] : 0;
+            int ax = (e->spawnflags & 64) ? 2 : (e->spawnflags & 128) ? 0 : 1;
+            e->ang2[ax] = ent_float(e, "rotation", 0);
+            if (e->state == MS_AT_TOP) memcpy(e->angles, e->ang2, 12);
         }
         break;
     }
-    case ENT_ROTATING:
-        if (e->speed == 0) e->speed = 100;
+    case ENT_ROTATING: {
+        // bmodels.cpp CFuncRotating::Spawn: no default speed; "fanfriction" (percent, 100 unset) is
+        // how fast it spins up and down, "volume" (tenths, 10 unset) its sound
+        if (e->speed < 0) e->speed = 0;
         memset(e->avelocity, 0, 12);
         if (e->spawnflags & 4) e->avelocity[2] = 1;       // Z axis -> roll
         else if (e->spawnflags & 8) e->avelocity[0] = 1;  // X axis -> pitch
         else e->avelocity[1] = 1;
         if (e->spawnflags & 2) for (int i = 0; i < 3; i++) e->avelocity[i] = -e->avelocity[i];
-        e->active = (e->spawnflags & 1) != 0; // start on
+        e->lip = ent_float(e, "fanfriction", 0) / 100.0f;
+        if (e->lip == 0) e->lip = 1;
+        e->dist = ent_float(e, "Volume", 0) / 10.0f;
+        if (e->dist == 0) e->dist = 1;
+        e->curspeed = 0;
+        e->active = false;
+        e->snd = 0;
+        e->nextthink = (e->spawnflags & 1) ? 1.5f : 0;   // SF_BRUSH_ROTATE_INSTANT: started after 1.5 s
         if (e->spawnflags & 64) e->solid = SOLID_NOT;
+        {
+            float so[3];
+            const char *v = ent_value(e, "spawnorigin");
+            if (v && sscanf(v, "%f %f %f", &so[0], &so[1], &so[2]) == 3 && (so[0] != 0 || so[1] != 0 || so[2] != 0)) memcpy(e->origin, so, 12);
+        }
         break;
+    }
     case ENT_LADDER:
         e->contents = -16; // CONTENTS_LADDER
         e->solid = SOLID_NOT;
@@ -1802,6 +2294,26 @@ static void spawn_entity(entity_t *e)
     case ENT_WALL_TOGGLE:
         if (e->spawnflags & 1) { e->visible = false; e->solid = SOLID_NOT; } // starts invisible
         break;
+    case ENT_ENV_SOUND:
+        // CEnvSound::Spawn: first look within half a second
+        e->visible = false;
+        e->solid = SOLID_NOT;
+        e->dist = ent_float(e, "radius", 0);
+        e->lip = ent_float(e, "roomtype", 0);
+        e->nextthink = g_time + (rand() % 50) / 100.0f;
+        break;
+    case ENT_INFODECAL:
+        // CDecal::Spawn: no name, a static decal now; a name, one when used
+        e->visible = false;
+        e->solid = SOLID_NOT;
+        e->triggered = !e->targetname[0];
+        break;
+    case ENT_TRIGGER_COUNTER:
+        e->msource_count = (int)ent_float(e, "count", 0);   // m_cTriggersLeft
+        if (e->msource_count == 0) e->msource_count = 2;
+        e->visible = false;
+        e->solid = SOLID_NOT;
+        break;
     case ENT_TRIGGER_ONCE:
     case ENT_TRIGGER_MULTIPLE:
     case ENT_TRIGGER_CHANGELEVEL:
@@ -1812,6 +2324,7 @@ static void spawn_entity(entity_t *e)
         e->visible = false;
         e->solid = SOLID_NOT;
         if (e->type == ENT_TRIGGER_MULTIPLE && e->wait == 0) e->wait = 0.2f;
+        if (e->type == ENT_TRIGGER_ONCE) e->wait = -1;
         if (e->type == ENT_TRIGGER_HURT) e->active = !(e->spawnflags & 2);   // SF_TRIGGER_HURT_START_OFF
         if (e->type == ENT_TRIGGER_PUSH) {
             if (e->speed == 0) e->speed = 100;
@@ -2323,11 +2836,15 @@ static void mover_step(entity_t *e, int idx, float dt)
             float lz = d[0] * u0[0] + d[1] * u0[1] + d[2] * u0[2];
             for (int k = 0; k < 3; k++) rp[k] = e->origin[k] + f1[k] * lx - r1[k] * ly + u1[k] * lz;
             if (riding) rp[2] += 0.03125f;
-            if (pm_position_free(rp)) {
-                pm_set_origin(rp);
-                memcpy(porg, rp, 12);
+            // SV_PushRotate: SV_PushEntity traces the player there (the door left out), so a wall
+            // stops them short; only a player left inside the door blocks it
+            float np[3];
+            pm_trace_move(porg, rp, idx, np);
+            if (!pm_player_in_entity(idx, np)) {
+                pm_set_origin(np);
+                memcpy(porg, np, 12);
                 turned = true;
-                if (riding && moved[1] != 0 && moved[0] == 0 && moved[2] == 0) game_add_view_yaw(moved[1]);
+                if (moved[1] != 0) game_add_view_yaw(moved[1]);
             }
         }
         if (!turned && pm_player_in_entity(idx, porg)) {
@@ -2336,11 +2853,29 @@ static void mover_step(entity_t *e, int idx, float dt)
             if (!e->angular && pm_position_free(np)) {
                 pm_set_origin(np);
             } else {
-                // blocked: undo, doors reverse (CBaseDoor::Blocked)
+                // blocked: undo (SV_Push), then the mover's Blocked
                 memcpy(cur, old, 12);
-                if ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && e->wait >= 0) {
-                    if (e->state == MS_GOING_DOWN) door_go_up(e, false);
-                    else if (e->state == MS_GOING_UP) door_go_down(e);
+                if (e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) {
+                    // CBaseDoor::Blocked: its "dmg" to the blocker; back the way it came (and so do
+                    // the other doors of its name, the other half of a double door)
+                    float dmg = ent_float(e, "dmg", 0);
+                    if (dmg > 0) player_take_damage(dmg, DMG_CRUSH, e->origin, idx);
+                    if (e->wait >= 0) {
+                        if (e->state == MS_GOING_DOWN) door_go_up(e, false);
+                        else door_go_down(e);
+                    }
+                    if (e->targetname[0])
+                        for (int k = 1; k < num_entities; k++) {
+                            entity_t *o = &entities[k];
+                            if (o == e || o->removed || !is_door(o) || o->wait < 0 || strcasecmp(o->targetname, e->targetname)) continue;
+                            if (o->state == MS_GOING_DOWN) door_go_up(o, false);
+                            else door_go_down(o);
+                        }
+                } else if (e->type == ENT_PLAT) {
+                    // CFuncPlat::Blocked: hurt the blocker a little, send it back where it came from
+                    player_take_damage(1, DMG_CRUSH, e->origin, idx);
+                    if (e->state == MS_GOING_UP) { e->state = MS_GOING_DOWN; move_linear(e, e->pos2); }
+                    else if (e->state == MS_GOING_DOWN) { e->state = MS_GOING_UP; move_linear(e, e->pos1); }
                 }
                 return;
             }
@@ -2364,7 +2899,7 @@ static void model_center(entity_t *e, float *c)
 static void train_next(entity_t *e)
 {
     int t = ents_find_targetname(e->target, 1);
-    if (t < 0) { e->active = false; return; }
+    if (t < 0) { e->active = false; mover_sound_stop(e); return; }
     entity_t *corner = &entities[t];
     if (e->path >= 0 && entities[e->path].speed != 0) e->speed = entities[e->path].speed;
     e->path = t;
@@ -2390,7 +2925,11 @@ static void train_wait(entity_t *e)
     entity_t *corner = e->path >= 0 ? &entities[e->path] : NULL;
     if (corner) {
         const char *msg = ent_value(corner, "message");
-        if (msg) { char m[48]; str_copy(m, msg, 48); queue_fire(m, 0); }
+        // (SF_CORNER_FIREONCE: the corner's message is then cleared - the code field marks it)
+        if (msg && msg[0] && !((corner->spawnflags & 4) && corner->code == 0x7ff1)) {
+            char m[48]; str_copy(m, msg, 48); queue_fire(m, 0);
+            if (corner->spawnflags & 4) corner->code = 0x7ff1;
+        }
         if ((corner->spawnflags & 1) || e->triggered) { e->triggered = true; e->state = MS_AT_TOP; mover_sound_stop(e); return; } // wait for retrigger
         float w = corner->wait;
         if (w == -1) { e->state = MS_AT_TOP; mover_sound_stop(e); return; }
@@ -2545,8 +3084,9 @@ static void path_link_all(void)
 
 static void path_track_use(entity_t *e)
 {
-    if (e->palt >= 0) e->spawnflags ^= SF_PATH_ALTERNATE;   // toggle between the two paths
-    else e->spawnflags ^= SF_PATH_DISABLED;                // toggle enabled/disabled
+    // CPathTrack::Use (ShouldToggle: "on" is the main path / enabled)
+    if (e->palt >= 0) { if (ents_should_toggle(!(e->spawnflags & SF_PATH_ALTERNATE))) e->spawnflags ^= SF_PATH_ALTERNATE; }
+    else if (ents_should_toggle(!(e->spawnflags & SF_PATH_DISABLED))) e->spawnflags ^= SF_PATH_DISABLED;
 }
 
 // ------------------------------------------------------------------ moving brush entities
@@ -2609,7 +3149,9 @@ static bool rotating_blocked(entity_t *e, int idx)
     return blocked;
 }
 
-static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
+// true: blocked (SV_Push): the player would be left inside it and can't be moved out of the way;
+// the mover stays where it was for this frame and its Blocked() is the caller's to run
+static bool push_entity(entity_t *e, int idx, const float *delta, float dyaw)
 {
     float porg[3];
     pm_get_origin(porg);
@@ -2633,7 +3175,7 @@ static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
             float hi = (rot ? e->origin[k] + r : e->origin[k] + bm->maxs[k]) + fabsf(delta[k]) + 96;
             far = porg[k] < lo || porg[k] > hi;
         }
-        if (far) return;
+        if (far) return false;
     }
     pm_build_physents(); // collision must see the mover at its new position
     if (riding || (e->solid == SOLID_BSP && pm_player_in_entity(idx, porg))) {
@@ -2652,8 +3194,15 @@ static void push_entity(entity_t *e, int idx, const float *delta, float dyaw)
         if (pm_position_free(np)) {
             pm_set_origin(np);
             if (riding && dyaw != 0) game_add_view_yaw(dyaw);
+        } else if ((player_alive() && !pm_noclip_active()) && pm_player_in_entity(idx, porg)) {
+            // SV_Push: blocked by the player; back to where it was
+            memcpy(e->origin, oldorg, 12);
+            e->angles[1] = fmodf(e->angles[1] - dyaw + 360.0f, 360.0f);
+            pm_build_physents();
+            return true;
         }
     }
+    return false;
 }
 
 // ------------------------------------------------------------------ func_tracktrain (plats.cpp CFuncTrackTrain)
@@ -2666,6 +3215,26 @@ static void fire_from(int activator, const char *name)
     str_copy(m, name, sizeof(m));
     ents_fire_targets(m);
     cur_activator = old;
+}
+
+// CFuncTrackTrain::Blocked: someone riding it is nudged up; anyone else is shoved away from it at
+// "dmg" speed and takes "dmg"
+static void tt_blocked(entity_t *e, int idx)
+{
+    float v[3];
+    pm_get_velocity(v);
+    if (pm_entity_for_physent(pm_get_groundent()) == idx) {
+        float ds = fminf(fabsf(e->curspeed), 50);
+        if (v[2] == 0) { v[2] += ds; pm_set_velocity(v); }
+        return;
+    }
+    float dmg = ent_float(e, "dmg", 0), po[3], d[3];
+    pm_get_origin(po);
+    for (int k = 0; k < 3; k++) d[k] = po[k] - e->origin[k];
+    float l = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    for (int k = 0; k < 3; k++) v[k] = l > 0 ? d[k] / l * dmg : 0;
+    pm_set_velocity(v);
+    if (dmg > 0) player_take_damage(dmg, DMG_CRUSH, e->origin, idx);
 }
 
 static void tt_find(entity_t *e)
@@ -2725,6 +3294,7 @@ static void tt_dead_end(entity_t *e, int idx)
 // CFuncTrackTrain::Use (USE_TOGGLE / USE_ON)
 static void tt_use(entity_t *e, int idx)
 {
+    if (!ents_should_toggle(e->curspeed != 0)) return;   // CFuncTrackTrain::Use
     if (e->curspeed == 0) e->curspeed = e->speed;   // m_speed * m_dir
     else e->curspeed = 0;
     e->deadend = false;
@@ -2829,8 +3399,8 @@ static void tracktrain_think(entity_t *e, int idx, float dt)
         float t = dt > 0.1f ? 0.1f : dt;
         float mv[3] = {vel[0] * t, vel[1] * t, vel[2] * t};
         float dyaw = vy * 10 * t, dpitch = vx * 10 * t;
-        push_entity(e, idx, mv, dyaw);
-        e->angles[0] = fix_angle(e->angles[0] + dpitch);
+        if (push_entity(e, idx, mv, dyaw)) tt_blocked(e, idx);
+        else e->angles[0] = fix_angle(e->angles[0] + dpitch);
     } else {
         // end of the path: roll to the dead end, then stop (CFuncTrackTrain::DeadEnd)
         e->oldspeed = e->curspeed;
@@ -3060,6 +3630,16 @@ static bool plat_toggle(const entity_t *e)
 {
     return (e->spawnflags & 1) || !strcasecmp(e->classname, "func_plat_toggle");   // SF_PLAT_TOGGLE
 }
+// CPlatTrigger::Touch: a living player in the box sends the plat up from the bottom, and keeps it
+// at the top a second longer
+static void plat_trigger_touch(entity_t *e, const float *porg, const float *pmins, const float *pmaxs)
+{
+    if (plat_toggle(e) || !player_alive()) return;
+    for (int k = 0; k < 3; k++)
+        if (porg[k] + pmins[k] > e->ctlmaxs[k] || porg[k] + pmaxs[k] < e->ctlmins[k]) return;
+    if (e->state == MS_AT_BOTTOM) { e->state = MS_GOING_UP; move_linear(e, e->pos1); mover_sound_start(e); }
+    else if (e->state == MS_AT_TOP && e->nextthink > 0) e->nextthink = g_time + 1;
+}
 static float frame_dt_for_use;
 // Head-To-Head: what the second player's touching does (ents_think, run with player 1's context,
 // handles player 1 and everything that moves; this is the touch part of it for player 2)
@@ -3075,22 +3655,14 @@ void ents_touch_only(float dt)
         if (i == tank_driven && e->type == ENT_TANK) { tank_think(e, i, dt, porg); continue; }   // player 2 at a gun's controls
         switch (e->type) {
         case ENT_DOOR: case ENT_DOOR_ROTATING:
-            if (!e->targetname[0] && e->contents >= 0 && !(e->spawnflags & 256) && e->state == MS_AT_BOTTOM && master_ok(e)) {
-                float mn[3], mx[3];
-                for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 2; mx[k] = pmaxs[k] + 2; }
-                if (player_touches(e, porg, mn, mx)) door_go_up(e, true);
-            }
+            door_touch(e, porg, pmins, pmaxs);
             break;
         case ENT_PLAT:
-            if (e->state == MS_AT_BOTTOM && !plat_toggle(e) && pm_entity_for_physent(pm_get_groundent()) == i) {
-                e->state = MS_GOING_UP;
-                move_linear(e, e->pos1);
-                mover_sound_start(e);
-            }
+            plat_trigger_touch(e, porg, pmins, pmaxs);
             break;
         case ENT_TRIGGER_HURT:
             if (!(e->spawnflags & 8) && e->active && g_time >= hurt_next[i] && player_touches(e, porg, pmins, pmaxs)) {
-                float dmg = ent_float(e, "dmg", 10) * 0.5f;
+                float dmg = hurt_dmg(e) * 0.5f;
                 int type = (int)ent_float(e, "damagetype", 0);
                 if (dmg < 0) player_take_health(-dmg, type);
                 else if (dmg > 0) player_take_damage(dmg, type, NULL, i);
@@ -3146,6 +3718,24 @@ void ents_touch_only(float dt)
     }
 }
 
+// the player's env_sound state (CBasePlayer m_pentSndLast, m_flSndRoomtype, m_flSndRange)
+static int snd_last = -1, room_type;
+static float snd_roomtype, snd_range;
+// FEnvSoundInRange: in its radius, in sight, and not across a water surface
+static bool env_sound_in_range(entity_t *e, int idx, const float *eye, float *range)
+{
+    float d2 = 0;
+    for (int k = 0; k < 3; k++) d2 += (eye[k] - e->origin[k]) * (eye[k] - e->origin[k]);
+    if (d2 > e->dist * e->dist) return false;
+    gtrace_t tr;
+    game_trace(e->origin, eye, NULL, NULL, TR_IGNORE_MONSTERS | TR_IGNORE_PLAYER, idx, &tr);
+    if (tr.fraction != 1) return false;
+    int c0 = game_point_contents(e->origin), c1 = game_point_contents(eye);
+    bool w0 = c0 <= -3 && c0 >= -5, w1 = c1 <= -3 && c1 >= -5;
+    if (w0 != w1) return false;
+    *range = sqrtf(d2);
+    return true;
+}
 void ents_think(float dt)
 {
     frame_dt_for_use = dt;
@@ -3165,7 +3755,8 @@ void ents_think(float dt)
             int old = cur_activator, oldc = cur_caller;
             cur_activator = act;
             cur_caller = caller;
-            ents_fire_targets(name);
+            if (name[0] == 1) kill_targets(name + 1);   // a delayed killtarget
+            else ents_fire_targets(name);
             cur_activator = old;
             cur_caller = oldc;
         } else i++;
@@ -3192,7 +3783,7 @@ void ents_think(float dt)
         for (int i = 1; i < num_entities; i++) {
             switch (entities[i].type) {
             case ENT_AMBIENT: case ENT_BUTTON: case ENT_CAMERA: case ENT_CDAUDIO: case ENT_DOOR: case ENT_DOOR_ROTATING:
-            case ENT_ENDSECTION: case ENT_ENV_SPARK: case ENT_GLOBAL_BEAM: case ENT_HEALTHCHARGER: case ENT_MONSTERMAKER:
+            case ENT_ENDSECTION: case ENT_ENV_SPARK: case ENT_INFODECAL: case ENT_ENV_SOUND: case ENT_GLOBAL_BEAM: case ENT_HEALTHCHARGER: case ENT_MONSTERMAKER:
             case ENT_PLAT: case ENT_PUSHABLE: case ENT_RECHARGE: case ENT_ROTATING: case ENT_ROT_BUTTON: case ENT_SENTENCE: case ENT_GUNTARGET:
             case ENT_SPEAKER: case ENT_TARGET_CDAUDIO: case ENT_TRACKAUTO: case ENT_TRACKTRAIN: case ENT_TRAIN:
             case ENT_TRIGGER_AUTO: case ENT_TRIGGER_CHANGELEVEL: case ENT_TRIGGER_HURT: case ENT_TRIGGER_MULTIPLE:
@@ -3206,8 +3797,11 @@ void ents_think(float dt)
             }
         }
         think_built = num_entities;
+        if (think_gen != ents_gen) { snd_last = -1; snd_roomtype = snd_range = 0; room_type = 0; }   // CWorld: room_type 0 (not saved)
         think_gen = ents_gen;
     }
+    // the room the sound plays in: under water, waterroom_type (14)
+    snd_set_room(pm_get_waterlevel() == 3 ? 14 : room_type);
     float friction_touch = 1;   // func_friction under the player this frame
     for (int ti = 0; ti < num_think; ti++) {
         int i = think_list[ti];
@@ -3234,12 +3828,13 @@ void ents_think(float dt)
         case ENT_ROT_BUTTON:
         case ENT_PLAT:
             if (e->active) mover_step(e, i, dt);
-            if (e->type == ENT_PLAT && e->ang2[1] != 0 && e->pos1[2] != e->pos2[2])
-                e->angles[1] = e->ang2[1] * (e->origin[2] - e->pos2[2]) / (e->pos1[2] - e->pos2[2]);
+            if (e->type == ENT_PLAT && (e->ang2[0] != 0 || e->ang2[1] != 0 || e->ang2[2] != 0) && e->pos1[2] != e->pos2[2])
+                for (int k = 0; k < 3; k++) e->angles[k] = e->ang2[k] * (e->origin[2] - e->pos2[2]) / (e->pos1[2] - e->pos2[2]);
             if (e->nextthink > 0 && g_time >= e->nextthink) {
                 e->nextthink = 0;
                 if (e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) {
-                    e->state = MS_GOING_DOWN;
+                    e->state = MS_GOING_DOWN;   // ButtonReturn
+                    e->texframe = 0;
                     if (e->type == ENT_ROT_BUTTON) move_angular(e, e->ang1);
                     else move_linear(e, e->pos1);
                 } else if (e->type == ENT_PLAT) {
@@ -3250,20 +3845,20 @@ void ents_think(float dt)
                     door_go_down(e);
                 }
             }
-            // touch-activated doors (no targetname, not use-only)
-            if ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !e->targetname[0] && e->contents >= 0 &&
-                !(e->spawnflags & 256) && e->state == MS_AT_BOTTOM && master_ok(e)) {
-                float mn[3], mx[3];
-                for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 2; mx[k] = pmaxs[k] + 2; }
-                if (player_touches(e, porg, mn, mx)) door_go_up(e, true);
+            // CBaseDoor::DoorTouch
+            if (e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) door_touch(e, porg, pmins, pmaxs);
+            if (e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) {
+                // CBaseButton::ButtonTouch (SF_BUTTON_TOUCH_ONLY): armed at rest, and in for a toggle
+                if ((e->spawnflags & 256) && (e->state == MS_AT_BOTTOM || (e->state == MS_AT_TOP && (e->spawnflags & 32) && e->wait != -1)) &&
+                    player_touches(e, porg, pmins, pmaxs))
+                    button_press(e);
+                // ButtonSpark (SF_BUTTON_SPARK_IF_OFF): sparks while it's out
+                if ((e->spawnflags & 64) && e->state == MS_AT_BOTTOM && g_time >= e->ltime2) {
+                    if (e->ltime2 > 0) spark_at(e);
+                    e->ltime2 = g_time + 0.1f + (rand() % 1000) / 1000.0f * 1.5f;
+                }
             }
-            // plats rise when stood on (PlatSpawnInsideTrigger; a toggle plat only moves when used)
-            if (e->type == ENT_PLAT && e->state == MS_AT_BOTTOM && !plat_toggle(e) &&
-                pm_entity_for_physent(pm_get_groundent()) == i) {
-                e->state = MS_GOING_UP;
-                move_linear(e, e->pos1);
-                mover_sound_start(e);
-            }
+            if (e->type == ENT_PLAT) plat_trigger_touch(e, porg, pmins, pmaxs);
             break;
         case ENT_TRAIN:
             if (e->path < 0 && e->nextthink > 0 && g_time >= e->nextthink) {
@@ -3290,11 +3885,45 @@ void ents_think(float dt)
                 float f = arrived || l < 1e-6f ? 1.0f : step / l;
                 for (int k = 0; k < 3; k++) delta[k] = d[k] * f;
                 memcpy(e->origin, old, 12);
-                push_entity(e, i, delta, 0);
-                if (arrived) { e->active = false; train_wait(e); }
+                if (push_entity(e, i, delta, 0)) {
+                    // CFuncTrain::Blocked: its "dmg" (2 unset) to the blocker, every half second
+                    if (g_time >= e->ltime2) {
+                        e->ltime2 = g_time + 0.5f;
+                        float dmg = ent_float(e, "dmg", 0);
+                        player_take_damage(dmg != 0 ? dmg : 2, DMG_CRUSH, e->origin, i);
+                    }
+                } else if (arrived) { e->active = false; train_wait(e); }
             } else if (e->nextthink > 0 && g_time >= e->nextthink) {
                 e->nextthink = 0;
                 if (e->state == MS_GOING_UP) train_wait(e); else train_next(e);
+            }
+            break;
+        case ENT_BREAKABLE:
+            // CBreakable::BreakTouch: SF_BREAK_TOUCH breaks when run into hard enough (the player takes a
+            // quarter of it); SF_BREAK_PRESSURE gives way after "delay" (0.1) under someone standing on it
+            if (e->nextthink > 0) {
+                if (g_time >= e->nextthink) { e->nextthink = 0; breakable_die(e); }
+            } else if ((e->spawnflags & 6) && !(e->spawnflags & 1) && ents_brush_is_breakable(i)) {
+                float mn[3], mx[3];
+                for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 1; mx[k] = pmaxs[k] + 1; }
+                if (player_alive() && player_touches(e, porg, mn, mx)) {
+                    if (e->spawnflags & 2) {
+                        float v[3];
+                        pm_get_velocity(v);
+                        float d = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) * 0.01f;
+                        if (d >= e->health) {
+                            e->health -= d;
+                            player_take_damage(d / 4, DMG_SLASH, NULL, i);
+                            breakable_die(e);
+                            break;
+                        }
+                    }
+                    bmodel_t *bm = &world.bmodels[e->model];
+                    if ((e->spawnflags & 4) && porg[2] + pmins[2] >= bm->maxs[2] - 2) {
+                        breakable_damage_sound(e);
+                        e->nextthink = g_time + (e->delay != 0 ? e->delay : 0.1f);
+                    }
+                }
             }
             break;
         case ENT_TRIGGER_AUTO: {
@@ -3307,10 +3936,13 @@ void ents_think(float dt)
             if (!e->removed && g_time > 0.2f && i < MAX_ENTITIES && auto_gen[i] != (int16_t)(ents_gen + 1)) {
                 auto_gen[i] = (int16_t)(ents_gen + 1);
                 if (global_ok(e)) {
-                    int oldc = cur_caller;
-                    cur_caller = i;
-                    queue_fire(e->target, e->delay);
-                    cur_caller = oldc;
+                    // SUB_UseTargets( this, triggerType ): "triggerstate" as for trigger_relay
+                    const char *ts = ent_value(e, "triggerstate");
+                    extern int g_use_type;
+                    int saved = g_use_type;
+                    g_use_type = triggerstate_use(ts);
+                    fire_entity_target(e);
+                    g_use_type = saved;
                     if (e->spawnflags & 1) e->removed = true;   // SF_AUTO_FIREONCE
                 }
             }
@@ -3338,8 +3970,9 @@ void ents_think(float dt)
         case ENT_AMBIENT:
             if (e->nextthink > 0 && g_time >= e->nextthink) {   // start-up of a looping ambient
                 e->nextthink = 0;
-                if (e->active) ambient_play(e);
+                if (e->active) { dpv_t *d = dpv_for(e, true); if (d) dpv_init(e, d); ambient_play(e); }
             }
+            if (e->snd) ambient_think(e);
             break;
         case ENT_SPEAKER:
 #ifndef NOSPEAKER
@@ -3478,6 +4111,34 @@ void ents_think(float dt)
                 maker_make(e);
             }
             break;
+        case ENT_ENV_SOUND: {
+            // CEnvSound::Think: the nearest env_sound that can see the player sets the room;
+            // the room stays until another one takes over
+            if (g_time < e->nextthink) break;
+            float eye[3], range;
+            player_get_eye(eye);
+            bool cur = snd_last == i;
+            if (cur && !(snd_roomtype != 0 && snd_range != 0)) { e->nextthink = g_time + 0.75f; break; }
+            if (env_sound_in_range(e, i, eye, &range)) {
+                if (cur) snd_range = range;
+                else if (range < snd_range || snd_range == 0) { snd_last = i; snd_roomtype = e->lip; snd_range = range; room_type = (int)e->lip; }
+                e->nextthink = g_time + 0.25f;
+            } else if (cur) {
+                snd_range = 0; snd_roomtype = 0;
+                e->nextthink = g_time + 0.75f;
+            } else e->nextthink = g_time + 0.25f;
+            break;
+        }
+        case ENT_INFODECAL: {
+            // stamped (again after a load or a map change wipes the decals) while it's due
+            static uint16_t placed[MAX_ENTITIES];
+            int me = (int)(e - entities);
+            if (e->triggered && placed[me] != (uint16_t)mapdecals_epoch) {
+                placed[me] = (uint16_t)mapdecals_epoch;
+                game_map_decal(e->origin, ent_value(e, "texture"));
+            }
+            break;
+        }
         case ENT_ENV_SPARK:
             if (e->active && e->nextthink > 0 && g_time >= e->nextthink) {
                 float dd = 0;
@@ -3518,7 +4179,7 @@ void ents_think(float dt)
             if (e->model > 0 && !(e->spawnflags & 8 /* SF_TRIGGER_HURT_NO_CLIENTS */) && e->active &&
                 g_time >= e->nextthink && player_touches(e, porg, pmins, pmaxs)) {
                 // CTriggerHurt::HurtTouch: dmg is per second, applied every half second
-                float dmg = ent_float(e, "dmg", 10) * 0.5f;
+                float dmg = hurt_dmg(e) * 0.5f;
                 int type = (int)ent_float(e, "damagetype", 0);
                 if (dmg < 0) player_take_health(-dmg, type);
                 else if (dmg > 0) player_take_damage(dmg, type, NULL, i);
@@ -3533,7 +4194,7 @@ void ents_think(float dt)
             // land in kill_pain and burst into gibs
             if (e->model > 0 && e->active && !(e->spawnflags & 32) && g_time >= e->ltime2) {
                 bmodel_t *bm = &world.bmodels[e->model];
-                float dmg = ent_float(e, "dmg", 10) * 0.5f;
+                float dmg = hurt_dmg(e) * 0.5f;
                 int type = (int)ent_float(e, "damagetype", 0);
                 bool any = false;
                 for (int n = 0; n < num_npcs && dmg > 0; n++) {
@@ -3554,40 +4215,58 @@ void ents_think(float dt)
             if (e->model > 0 && !e->targetname[0] && player_touches(e, porg, pmins, pmaxs)) game_end_section();
             break;
         case ENT_ROTATING:
-            if (e->active) {
+            if (e->nextthink > 0 && g_time >= e->nextthink) { e->nextthink = 0; rotating_use(e); }   // SUB_CallUseToggle
+            rotating_ramp(e, dt);
+            if (e->curspeed > 0 && !e->snd && e->code != -1) {   // (spinning after a load: its sound again)
+                float pct = e->speed > 0 ? e->curspeed / e->speed : 1;
+                rotating_sound_set(e, e->dist * pct, pct >= 1 ? 100 : (int)(30 + 70 * pct), true);
+                if (!e->snd) e->code = -1;   // it has none
+            }
+            if (e->curspeed > 0) {
                 float was[3];
                 memcpy(was, e->angles, 12);
                 if (e->avelocity[0] == 0 && e->avelocity[2] == 0 && e->solid == SOLID_BSP && e->model > 0) {
                     // spinning about the vertical: whoever stands on it turns with it (SV_PushRotate;
                     // Lambda Core's c3a2c platforms used to turn under the player)
                     static const float zero[3] = {0, 0, 0};
-                    push_entity(e, i, zero, e->avelocity[1] * e->speed * dt);
+                    push_entity(e, i, zero, e->avelocity[1] * e->curspeed * dt);
                 } else
                     for (int k = 0; k < 3; k++) {
-                        e->angles[k] += e->avelocity[k] * e->speed * dt;
+                        e->angles[k] += e->avelocity[k] * e->curspeed * dt;
                         e->angles[k] = fmodf(e->angles[k], 360.0f);
                     }
                 if (e->solid == SOLID_BSP && e->model > 0 && rotating_blocked(e, i)) memcpy(e->angles, was, 12);
+                // CFuncRotating::HurtTouch (SF_BRUSH_HURT): a tenth of its spin as damage, and a shove away
+                if ((e->spawnflags & 32) && e->solid == SOLID_BSP && player_alive()) {
+                    float mn[3], mx[3];
+                    for (int k = 0; k < 3; k++) { mn[k] = pmins[k] - 1; mx[k] = pmaxs[k] + 1; }
+                    if (player_touches(e, porg, mn, mx)) {
+                        float dmg = e->curspeed / 10, c[3], d[3], l = 0;
+                        breakable_center(e, c);
+                        for (int k = 0; k < 3; k++) { d[k] = porg[k] - c[k]; l += d[k] * d[k]; }
+                        l = sqrtf(l);
+                        for (int k = 0; k < 3; k++) d[k] = l > 0 ? d[k] / l * dmg : 0;
+                        pm_set_velocity(d);
+                        player_take_damage(dmg, DMG_CRUSH, c, i);
+                    }
+                }
             }
             break;
         case ENT_TRIGGER_ONCE:
         case ENT_TRIGGER_MULTIPLE:
-            if (e->model > 0 && g_time >= e->nextthink && master_ok(e) &&
-                ((!(e->spawnflags & 2 /* SF_TRIGGER_NOCLIENTS */) && player_touches(e, porg, pmins, pmaxs)) ||
-                 ((e->spawnflags & 1 /* SF_TRIGGER_ALLOWMONSTERS */) && monster_touching(e) >= 0))) {
-                fire_entity_target(e);
-                if (e->type == ENT_TRIGGER_ONCE) e->removed = true;
-                else e->nextthink = g_time + e->wait;
-            } else if (num_pushables > 0 && e->model > 0 && (e->spawnflags & 4 /* SF_TRIGGER_PUSHABLES */) && g_time >= e->nextthink && master_ok(e)) {
-                // the specimen cart rolling into the spectrometer beam starts the resonance cascade
-                for (int pi = 0; pi < num_pushables && pi < MAX_PUSHABLES; pi++) {
-                    entity_t *p = &entities[pushable_list[pi]];
-                    if (p->type != ENT_PUSHABLE || p->removed || p->model <= 0) continue;
-                    if (!box_touches(e, p->origin, world.bmodels[p->model].mins, world.bmodels[p->model].maxs)) continue;
-                    fire_entity_target(e);
-                    if (e->type == ENT_TRIGGER_ONCE) e->removed = true;
-                    else e->nextthink = g_time + e->wait;
-                    break;
+            if (e->model > 0 && g_time >= e->nextthink && master_ok(e)) {
+                bool pl = !(e->spawnflags & 2 /* SF_TRIGGER_NOCLIENTS */) && player_touches(e, porg, pmins, pmaxs);
+                if (pl || ((e->spawnflags & 1 /* SF_TRIGGER_ALLOWMONSTERS */) && monster_touching(e) >= 0)) {
+                    trigger_activate(e, pl);
+                } else if (num_pushables > 0 && (e->spawnflags & 4 /* SF_TRIGGER_PUSHABLES */)) {
+                    // the specimen cart rolling into the spectrometer beam starts the resonance cascade
+                    for (int pi = 0; pi < num_pushables && pi < MAX_PUSHABLES; pi++) {
+                        entity_t *p = &entities[pushable_list[pi]];
+                        if (p->type != ENT_PUSHABLE || p->removed || p->model <= 0) continue;
+                        if (!box_touches(e, p->origin, world.bmodels[p->model].mins, world.bmodels[p->model].maxs)) continue;
+                        trigger_activate(e, false);
+                        break;
+                    }
                 }
             }
             break;
@@ -3666,10 +4345,12 @@ void ents_think(float dt)
 static void charger_use(entity_t *e, int idx)
 {
     bool health = e->type == ENT_HEALTHCHARGER;
+    float v = health ? 1.0f : 0.85f;   // (the suit charger's sounds are all at 0.85)
+    if (e->juice <= 0) e->texframe = 1;   // empty: pev->frame = 1, its "off" textures
     if (e->juice <= 0 || !player.suit) {
         if (g_time >= e->sndtime) {
             e->sndtime = g_time + 0.62f;
-            snd_emit(idx, CHAN_ITEM, health ? "items/medshotno1.wav" : "items/suitchargeno1.wav", 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+            snd_emit(idx, CHAN_ITEM, health ? "items/medshotno1.wav" : "items/suitchargeno1.wav", v, ATTN_NORM, PITCH_NORM, NULL);
         }
         if (e->charge_on) { snd_stop(idx, CHAN_STATIC, NULL); e->charge_on = 0; }
         return;
@@ -3678,7 +4359,7 @@ static void charger_use(entity_t *e, int idx)
     if (g_time < e->ltime) return;
     if (!e->charge_on) {
         e->charge_on = 1;
-        snd_emit(idx, CHAN_ITEM, health ? "items/medshot4.wav" : "items/suitchargeok1.wav", 1.0f, ATTN_NORM, PITCH_NORM, NULL);
+        snd_emit(idx, CHAN_ITEM, health ? "items/medshot4.wav" : "items/suitchargeok1.wav", v, ATTN_NORM, PITCH_NORM, NULL);
         e->sndtime = g_time + 0.56f;
     }
     if (e->charge_on == 1 && g_time >= e->sndtime) {
@@ -3728,12 +4409,13 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
     for (int i = 1; i < num_entities; i++) {
         entity_t *e = &entities[i];
         if (e->removed || e->model <= 0) continue;
-        bool usable = e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON || e->type == ENT_RECHARGE ||
+        // CBaseButton::ObjectCaps: not a shootable one; a touch-only one has no Use
+        bool usable = ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && !(ent_float(e, "health", 0) > 0) && !(e->spawnflags & 256)) ||
+                      e->type == ENT_RECHARGE ||
                       (e->type == ENT_MOMENTARY_BUTTON && !(e->spawnflags & 1)) ||   // (a "door" only turns with its button)
                       e->type == ENT_TANKCONTROLS ||
                       e->type == ENT_HEALTHCHARGER ||
-                      ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && !e->targetname[0]) ||
-                      (e->type == ENT_PLAT && !e->targetname[0]) ||
+                      ((e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) && (e->spawnflags & 256)) ||   // CBaseDoor::ObjectCaps (plats: none)
                       e->type == ENT_PUSHABLE;
         if (!usable) continue;
         bmodel_t *bm = &world.bmodels[e->model];
@@ -3786,11 +4468,9 @@ bool ents_player_use_hold(const float *eye, const float *forward, bool pressed)
         }
         if (!pressed) return true;
         if (e->type == ENT_DOOR || e->type == ENT_DOOR_ROTATING) {
-            if (!master_ok(e)) { door_locked_sound(e); return true; }
-            if (e->state == MS_AT_BOTTOM || e->state == MS_GOING_DOWN) door_go_up(e, true);
-            else if (e->wait == -1 || (e->spawnflags & 32)) door_go_down(e);
-        } else if ((e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) && !master_ok(e)) {
-            door_locked_sound(e);
+            door_use(e, true);
+        } else if (e->type == ENT_BUTTON || e->type == ENT_ROT_BUTTON) {
+            button_press(e);
         } else {
             ent_use(e);
         }
@@ -3805,7 +4485,7 @@ bool ents_sound_origin(int ent, float *out)
 {
     if (ent <= 0 || ent >= num_entities) return false;
     entity_t *e = &entities[ent];
-    if (npc_origin_for_entity(ent, out)) { out[2] += 36; return true; }
+    if (npc_origin_for_entity(ent, out)) return true;   // (CAudio::UpdateVolume: the entity's origin, at its feet)
     if (e->model > 0) {
         bmodel_t *bm = &world.bmodels[e->model];
         for (int k = 0; k < 3; k++) out[k] = e->origin[k] + (bm->mins[k] + bm->maxs[k]) * 0.5f;

@@ -284,6 +284,125 @@ static bool music_open;
 static double music_resume = -1;   // position to pick the track up from after a level load
 static bool music_reopen;
 
+
+// ---- room acoustics (the PC engine's DSP; env_sound / waterroom_type pick the room). The
+// Dreamcast port dropped it; here it runs on the CPU over each mixed buffer before it's queued,
+// only while a room other than 0 is set. Per room: lowpass (water), modulation, reverb
+// (size, reflectivity, lowpass), echo (delay, feedback, lowpass) and the stereo spread
+// ("left": the echo's right side lags by that much)
+typedef struct { float lp, mod, size, refl, rvblp, delay, feedback, dlylp, left; } room_t;
+static const room_t rooms[29] = {
+    {0, 0, 0,     0,     1, 0,     0,     2, 0},       // 0  off
+    {0, 0, 0,     0,     1, 0.065f, 0.1f, 0, 0.01f},   // 1  generic
+    {0, 0, 0,     0,     1, 0.02f, 0.75f, 0, 0.01f},   // 2  metallic
+    {0, 0, 0,     0,     1, 0.03f, 0.78f, 0, 0.02f},   // 3
+    {0, 0, 0,     0,     1, 0.06f, 0.77f, 0, 0.03f},   // 4
+    {0, 0, 0.05f, 0.85f, 1, 0.008f, 0.96f, 2, 0.01f},  // 5  tunnel
+    {0, 0, 0.05f, 0.88f, 1, 0.01f, 0.98f, 2, 0.02f},   // 6
+    {0, 0, 0.05f, 0.92f, 1, 0.015f, 0.995f, 2, 0.04f}, // 7
+    {0, 0, 0.05f, 0.84f, 1, 0,     0,     2, 0.012f},  // 8  chamber
+    {0, 0, 0.05f, 0.9f,  1, 0,     0,     2, 0.008f},  // 9
+    {0, 0, 0.05f, 0.95f, 1, 0,     0,     2, 0.004f},  // 10
+    {0, 0, 0.05f, 0.7f,  0, 0,     0,     2, 0.012f},  // 11 bright
+    {0, 0, 0.055f, 0.78f, 0, 0,    0,     2, 0.008f},  // 12
+    {0, 0, 0.05f, 0.86f, 0, 0,     0,     2, 0.002f},  // 13
+    {1, 0, 0,     0,     1, 0,     0,     2, 0.01f},   // 14 water
+    {1, 0, 0,     0,     1, 0.06f, 0.85f, 2, 0.02f},   // 15
+    {1, 0, 0,     0,     1, 0.2f,  0.6f,  2, 0.05f},   // 16
+    {0, 0, 0.05f, 0.8f,  1, 0,     0.48f, 2, 0.016f},  // 17 concrete
+    {0, 0, 0.06f, 0.9f,  1, 0,     0.52f, 2, 0.01f},   // 18
+    {0, 0, 0.07f, 0.94f, 1, 0.3f,  0.6f,  2, 0.008f},  // 19
+    {0, 0, 0,     0,     1, 0.3f,  0.42f, 2, 0},       // 20 outside
+    {0, 0, 0,     0,     1, 0.35f, 0.48f, 2, 0},       // 21
+    {0, 0, 0,     0,     1, 0.38f, 0.6f,  2, 0},       // 22
+    {0, 0, 0.05f, 0.9f,  1, 0.2f,  0.28f, 0, 0},       // 23 cavern
+    {0, 0, 0.07f, 0.9f,  1, 0.3f,  0.4f,  0, 0},       // 24
+    {0, 0, 0.09f, 0.9f,  1, 0.35f, 0.5f,  0, 0},       // 25
+    {0, 1, 0.01f, 0.9f,  0, 0,     0,     2, 0.05f},   // 26 weirdo
+    {0, 0, 0,     0,     1, 0.009f, 0.999f, 2, 0.04f}, // 27
+    {0, 0, 0.001f, 0.999f, 0, 0.2f, 0.8f, 2, 0.05f},  // 28
+};
+#define DSP_RATE 22050
+#define DLY_MAX (DSP_RATE * 2 / 5)          // 0.4 s of echo
+#define RVB_MAX (DSP_RATE / 10 + 16)        // 0.1 s per reverb line
+#define LEFT_MAX (DSP_RATE / 20 + 2)        // 0.05 s of stereo lag
+static int room_cur, room_want;
+static int16_t *dsp_mem;                    // the delay lines, while a room is on
+static int16_t *dly_line, *rvb_line[2], *left_line;
+static int dly_len, dly_pos, rvb_len[2], rvb_pos[2], left_len, left_pos;
+static int32_t dly_fb, rvb_fb, lp_l, lp_r, dly_lp, rvb_lp[2], mod_t;
+static bool dsp_lp, dsp_dlylp, dsp_rvblp, dsp_mod;
+void snd_set_room(int type) { room_want = type >= 0 && type < 29 ? type : 0; }
+static void dsp_setup(void)
+{
+    room_cur = room_want;
+    if (!room_cur) { free(dsp_mem); dsp_mem = NULL; return; }
+    if (!dsp_mem) {
+        dsp_mem = malloc(sizeof(int16_t) * (DLY_MAX + 2 * RVB_MAX + LEFT_MAX));
+        if (!dsp_mem) { room_cur = 0; return; }
+    }
+    memset(dsp_mem, 0, sizeof(int16_t) * (DLY_MAX + 2 * RVB_MAX + LEFT_MAX));
+    dly_line = dsp_mem; rvb_line[0] = dly_line + DLY_MAX; rvb_line[1] = rvb_line[0] + RVB_MAX; left_line = rvb_line[1] + RVB_MAX;
+    const room_t *r = &rooms[room_cur];
+    dly_len = (int)(r->delay * DSP_RATE); if (dly_len > DLY_MAX) dly_len = DLY_MAX;
+    dly_fb = (int32_t)(r->feedback * 256);
+    rvb_len[0] = (int)(r->size * DSP_RATE); if (rvb_len[0] > RVB_MAX) rvb_len[0] = RVB_MAX;
+    rvb_len[1] = rvb_len[0] * 71 / 100;     // a second, shorter line so the reflections don't ring at one pitch
+    rvb_fb = (int32_t)(r->refl * 256);
+    left_len = (int)(r->left * DSP_RATE); if (left_len >= LEFT_MAX) left_len = LEFT_MAX - 1;
+    dsp_lp = r->lp > 0; dsp_dlylp = r->dlylp > 0; dsp_rvblp = r->rvblp > 0; dsp_mod = r->mod > 0;
+    dly_pos = rvb_pos[0] = rvb_pos[1] = left_pos = 0;
+    lp_l = lp_r = dly_lp = rvb_lp[0] = rvb_lp[1] = mod_t = 0;
+}
+static inline int32_t clip16(int32_t v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : v; }
+static void dsp_process(uint32_t *buf, int n)
+{
+    for (int i = 0; i < n; i++) {
+        uint32_t w = buf[i];
+        int32_t l = (int16_t)(w >> 16), r = (int16_t)w;
+        if (dsp_lp) { lp_l += (l - lp_l) >> 2; lp_r += (r - lp_r) >> 2; l = lp_l; r = lp_r; }   // under water: muffled
+        int32_t m = (l + r) >> 1, wet = 0;
+        if (dly_len > 0) {                   // echo
+            int32_t d = dly_line[dly_pos];
+            if (dsp_dlylp) { dly_lp += (d - dly_lp) >> 1; d = dly_lp; }
+            dly_line[dly_pos] = clip16(m + ((d * dly_fb) >> 8));
+            if (++dly_pos >= dly_len) dly_pos = 0;
+            wet += d >> 1;
+        }
+        for (int k = 0; k < 2; k++) {        // reverb
+            if (rvb_len[k] <= 0) continue;
+            int32_t d = rvb_line[k][rvb_pos[k]];
+            if (dsp_rvblp) { rvb_lp[k] += (d - rvb_lp[k]) >> 1; d = rvb_lp[k]; }
+            rvb_line[k][rvb_pos[k]] = clip16(m + ((d * rvb_fb) >> 8));
+            if (++rvb_pos[k] >= rvb_len[k]) rvb_pos[k] = 0;
+            wet += (d * 3) >> 4;
+        }
+        if (dsp_mod) {                       // a slow wobble in level
+            mod_t = (mod_t + 1) & 4095;
+            int32_t tri = mod_t < 2048 ? mod_t : 4096 - mod_t;
+            wet = (wet * (1024 + tri)) >> 12;
+        }
+        int32_t wl = wet, wr = wet;
+        if (left_len > 0) { wr = left_line[left_pos]; left_line[left_pos] = clip16(wet); if (++left_pos >= left_len) left_pos = 0; }
+        buf[i] = ((uint32_t)(uint16_t)clip16(l + wl) << 16) | (uint16_t)clip16(r + wr);
+    }
+}
+// mixer_try_play, with the room applied to each buffer on its way to the AI
+static void snd_flush(void)
+{
+    if (room_want != room_cur) dsp_setup();
+    if (!room_cur) { mixer_try_play(); return; }
+    int free_buffers = audio_get_num_buffers() - audio_get_queued_buffers();
+    int fill = free_buffers - 1 > 1 ? free_buffers - 1 : free_buffers > 0 ? 1 : 0;
+    while (fill-- > 0) {
+        short *b = audio_write_begin();
+        int n = audio_get_buffer_length();
+        mixer_poll(b, n);
+        dsp_process((uint32_t *)b, n);
+        audio_write_end();
+    }
+}
+
 void snd_set_volume(float v) { master_volume = v; }
 float snd_master_volume(void) { return master_volume; }
 
@@ -353,12 +472,16 @@ static void spatialize(slot_t *s, float *l, float *r)
     float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
     float dot = 0;
     if (len > 0.1f) dot = (d[0] * lis_right[0] + d[1] * lis_right[1] + d[2] * lis_right[2]) / len;
-    float dist = len * s->attn / NOMINAL_CLIP;
-    float sc = 1.0f - dist;
-    if (sc < 0) sc = 0;
-    sc *= sc;   // perceptual falloff: distant sounds drop off faster than GoldSrc's linear ramp
-    *l = v * sc * (1.0f - dot);
-    *r = v * sc * (1.0f + dot);
+    // CAudio::UpdateVolume (Dreamcast): gain = (1 - attenuation/1000 * distance) * volume (speech
+    // 10% louder), set as DirectSound volume 1000*ln(gain) millibels - an amplitude of gain^1.1513
+    // - and panned by dot * stereo_sep (20) * 100 millibels: the far ear down by up to 20 dB
+    float g = (1.0f - len * s->attn / NOMINAL_CLIP);
+    if (s->words) g *= 1.1f;
+    if (g <= 0) { *l = *r = 0; return; }
+    if (g > 1) g = 1;
+    float amp = v * powf(g, 1.1513f);
+    *l = amp * (dot > 0 ? powf(10.0f, -dot) : 1.0f);
+    *r = amp * (dot < 0 ? powf(10.0f, dot) : 1.0f);
     if (*l > 1) *l = 1;
     if (*r > 1) *r = 1;
 }
@@ -536,6 +659,18 @@ void snd_adjust(int id, float vol, int pitch)
     }
 }
 
+// a fixed-position sound that moves (a rocket's motor), and stopping one by its id
+void snd_move(int id, const float *origin)
+{
+    if (id < 0 || id >= MAX_SLOTS || !slots[id].active || !slots[id].has_origin) return;
+    memcpy(slots[id].origin, origin, 12);
+}
+void snd_kill(int id)
+{
+    if (id < 0 || id >= MAX_SLOTS || !slots[id].active) return;
+    slot_free(&slots[id]);
+}
+
 // the player's own sounds (footsteps, UI): non-spatial
 void snd_play(const char *sample, float volume, int channel)
 {
@@ -638,7 +773,7 @@ void snd_update(const float *listener, const float *right)
     float mv = master_volume * 0.7f;
     mixer_ch_set_vol(MUSIC_CH, mv, mv);
     if (music_open && !mixer_ch_playing(MUSIC_CH)) { if (music_track == -1) wav64_play(&music_wave.wav, MUSIC_CH); else snd_music_stop(); }   // CD tracks play once
-    mixer_try_play();
+    snd_flush();
 }
 
 // silence everything (before a level load, which stalls the main loop for a moment)
@@ -673,5 +808,5 @@ void snd_poll(void)
         if (s->word_end < 1e29f && mixer_ch_get_pos(s->mix) >= s->word_end) mixer_ch_stop(s->mix);
         if (!mixer_ch_playing(s->mix)) sentence_next_word(s);
     }
-    mixer_try_play();
+    snd_flush();
 }

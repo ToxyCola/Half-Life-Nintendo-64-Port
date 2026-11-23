@@ -29,7 +29,8 @@ typedef struct {
     float health, maxhealth;
     float corpse_hp;        // CBaseMonster::BecomeDead: max_health / 2 (placed bodies 8), worn down by DMG_GIB_CORPSE
     int enemy;               // -1 none, 0 player, n+1 = npc n
-    float next_think, next_attack, next_look, pain_time, attack_hit_time;
+    float next_think, next_attack, next_look, pain_time, attack_hit_time, pain_snd_time;
+    bool flinched;           // bits_MEMORY_FLINCHED: never forgotten
     bool attack_hit_done;
     int attack_kind;
     float last_seen[3];
@@ -85,6 +86,7 @@ typedef struct {
     float bt[4], bv[3];          //   timers, flying velocity
     int weapons;                 // human grunt "weapons" bits (1 mp5, 2 hand grenades, 4 launcher, 8 shotgun)
     float next_grenade, cover_until;
+    float repel_v;               // monster_grunt_repel: sliding down its rope at this speed (0: not)
     float respawn_at;            // Head-To-Head: a picked-up item comes back then (0: never)
     int8_t puppet;               // Head-To-Head: the other player's body (player index), -1 none
     void *weapmodel;             // Head-To-Head: the gun in its hand (studio_t, p_*), NULL none

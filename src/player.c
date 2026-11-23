@@ -26,6 +26,7 @@ static PCTX float suit_next;
 static PCTX struct { char name[24]; float until; } norepeat[SUIT_NOREPEAT];
 
 static PCTX float max_fall;
+static PCTX int drown_restores;   // DrownRecover ticks so far (bDuration 4: five of them)
 static PCTX bool was_onground = true;
 static PCTX float air_finished, drown_next, drown_dmg;
 static PCTX float health_fade, armor_fade, flash_fade;
@@ -51,7 +52,7 @@ static void hazards_reset(void)
     geiger_next = 0;
     memset(dmg_expire, 0, sizeof(dmg_expire));
     drown_next = drown_restore_next = 0;
-    drown_dmg = 0;
+    drown_dmg = 2;
 }
 
 float player_max_health(void) { return 100; }
@@ -173,7 +174,7 @@ void player_take_damage(float dmg, int type, const float *from, int attacker_ent
     if (dbg_god) return;   // Debug menu: god mode
     (void)attacker_ent;
     if (!player_alive() || pm_noclip_active()) return;
-    float prev = player.health;
+    float prev = player.health, dmg_in = dmg;
     // armour (CBasePlayer::TakeDamage: ARMOR_RATIO 0.2, ARMOR_BONUS 0.5)
     if (player.armor > 0 && !(type & (DMG_FALL | DMG_DROWN))) {
         float flnew = dmg * 0.2f;
@@ -189,7 +190,7 @@ void player_take_damage(float dmg, int type, const float *from, int attacker_ent
     // view kick and the pain indicator for the direction it came from
     float p[3];
     pm_get_punch(p);
-    p[0] -= dmg > 20 ? 4 : 2;
+    p[0] = -2;   // pev->punchangle.x = -2
     pm_set_punch(p);
     if (from) {
         float o[3];
@@ -216,21 +217,16 @@ void player_take_damage(float dmg, int type, const float *from, int attacker_ent
         player.dead = true;
         dead_time = game_time();
         if (h2h_active) { extern void h2h_player_died(bool gibbed); h2h_player_died(gibbed); }
+        // CBasePlayer::DeathSound: one of three pain sounds, or (two times in five) nothing
         static const char *ds[] = {"player/pl_pain5.wav", "player/pl_pain6.wav", "player/pl_pain7.wav"};
-        snd_emit(0, CHAN_VOICE, ds[rand() % 3], 1, ATTN_NORM, PITCH_NORM, NULL);
+        int r = rand() % 5;
+        if (r < 3) snd_emit(0, CHAN_VOICE, ds[r], 1, ATTN_NORM, PITCH_NORM, NULL);
         if (player.suit) suit_say("HEV_DEAD", true);
         return;
     }
-    // CBasePlayer::PainSound
-    if (dmg >= 1 && !(type & (DMG_DROWN | DMG_FALL))) {
-        int r = rand() % 6;
-        if (r < 3) {
-            static const char *ps[] = {"player/pl_pain5.wav", "player/pl_pain6.wav", "player/pl_pain7.wav"};
-            snd_emit(0, CHAN_VOICE, ps[r], 1, ATTN_NORM, PITCH_NORM, NULL);
-        }
-    }
-    // the suit's diagnosis
-    bool trivial = player.health > 75 || dmg < 5, major = dmg > 25, critical = player.health < 30;
+    // (no pain sound: CBasePlayer::Pain is never called in the game)
+    // the suit's diagnosis (m_lastDamageAmount: the damage before the armour took its share)
+    bool trivial = player.health > 75 || dmg_in < 5, major = dmg_in > 25, critical = player.health < 30;
     if (!trivial) {
         if (type & DMG_CLUB && major) player_suit_update("!HEV_DMG4", false, 30);
         if (type & (DMG_FALL | DMG_CRUSH)) player_suit_update(major ? "!HEV_DMG5" : "!HEV_DMG4", false, 30);
@@ -339,30 +335,42 @@ void player_think(float dt)
     if (onground && !was_onground) {
         if (max_fall > 580 && pm_get_waterlevel() == 0 && !pm_noclip_active()) {
             float dmg = (max_fall - 580) * 100.0f / (1024 - 580);
+            if (dmg > player.health) snd_emit(0, CHAN_ITEM, "common/bodysplat.wav", 1, ATTN_NORM, PITCH_NORM, NULL);   // splat
             player_take_damage(dmg, DMG_FALL, NULL, -1);
         }
         max_fall = 0;
     }
     if (onground) max_fall = 0;
     was_onground = onground;
-    // drowning (CBasePlayer::WaterMove: 12 seconds of air, then rising damage every second)
-    if (pm_get_waterlevel() == 3 && !pm_noclip_active()) {
+    // drowning (CBasePlayer::WaterMove: 12 seconds of air (AIRTIME), then damage every second from
+    // 3 rising to 5 (pev->dmg starts at 2 above water); no sound of its own
+    if (pm_get_waterlevel() == 3 && !pm_noclip_active() && player.health >= 0) {
         if (air_finished == 0) air_finished = now + 12;
         if (now > air_finished && now > drown_next) {
             drown_dmg = drown_dmg < 5 ? drown_dmg + 1 : 5;
             drown_next = now + 1;
             player_take_damage(drown_dmg, DMG_DROWN, NULL, -1);
-            snd_emit(0, CHAN_VOICE, rand() & 1 ? "player/pl_drown1.wav" : "player/pl_drown1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
         }
-    } else {
+        // a stroke now and then, more often the less air is left
+        int air = (int)(air_finished - now);
+        if (!(rand() % 32) && rand() % 12 >= air) {
+            char sw[32];
+            snprintf(sw, sizeof(sw), "player/pl_swim%d.wav", 1 + rand() % 4);
+            snd_emit(0, CHAN_BODY, sw, 0.8f, ATTN_NORM, PITCH_NORM, NULL);
+        }
+        drown_restores = 0;
+    } else if (!pm_noclip_active() && player.health >= 0) {
+        // surfacing: a gasp if the air ran out, a breath if it was getting low
         if (air_finished && now > air_finished) snd_emit(0, CHAN_VOICE, "player/pl_wade1.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
+        else if (air_finished && air_finished < now + 9) snd_emit(0, CHAN_VOICE, "player/pl_wade2.wav", 1, ATTN_NORM, PITCH_NORM, NULL);
         air_finished = 0;
-        drown_dmg = 0;
+        drown_dmg = 2;
         // DMG_DROWNRECOVER: out of the water, the health drowning took comes back, up to 10 every
-        // 2 seconds (CBasePlayer::CheckTimeBasedDamage, itbd_DrownRecover)
+        // 2 seconds, five times at most (CBasePlayer::CheckTimeBasedDamage, itbd_DrownRecover)
         if (drown_taken > 0 && now > drown_restore_next) {
             float g = drown_taken < 10 ? drown_taken : 10;
-            if (drown_restore_next > 0) { player_take_health(g, DMG_GENERIC); drown_taken -= g; }
+            if (drown_restore_next > 0 && drown_restores < 5) { player_take_health(g, DMG_GENERIC); drown_taken -= g; drown_restores++; }
+            if (drown_restores >= 5) drown_taken = 0;
             drown_restore_next = now + 2;
         }
     }

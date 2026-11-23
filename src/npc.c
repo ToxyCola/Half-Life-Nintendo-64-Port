@@ -113,13 +113,13 @@ static const mdef_t defs[] = {
     {"monster_barney", "barney", {-16, -16, 0}, {16, 16, 72}, NF_TALKER, "sk_barney_health", 35, C_ALLY, 0, NULL, R_BULLET, 0, 1024, "sk_9mm_bullet", 0.5f, &S_BARNEY},
     {"monster_barney_dead", "barney", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_gman", "gman", {-16, -16, 0}, {16, 16, 72}, NF_NOAI | NF_INVULN, NULL, 100, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
-    {"monster_headcrab", "headcrab", {-12, -12, 0}, {12, 12, 24}, 0, "sk_headcrab_health", 10, C_PREY, 0, NULL, R_LEAP, 64, 256, "sk_headcrab_dmg_bite", 2.0f, &S_HEADCRAB},
-    {"monster_babycrab", "baby_headcrab", {-12, -12, 0}, {12, 12, 24}, 0, NULL, 3, C_PREY, 0, NULL, R_LEAP, 32, 180, "sk_headcrab_dmg_bite", 2.0f, &S_HEADCRAB},
+    {"monster_headcrab", "headcrab", {-12, -12, 0}, {12, 12, 24}, 0, "sk_headcrab_health", 10, C_PREY, 0, NULL, R_LEAP, 0, 256, "sk_headcrab_dmg_bite", 2.0f, &S_HEADCRAB},
+    {"monster_babycrab", "baby_headcrab", {-12, -12, 0}, {12, 12, 24}, 0, NULL, 3, C_PREY, 0, NULL, R_LEAP, 0, 180, "sk_headcrab_dmg_bite", 2.0f, &S_HEADCRAB},
     {"monster_zombie", "zombie", {-16, -16, 0}, {16, 16, 72}, 0, "sk_zombie_health", 50, C_ALIEN, 70, "sk_zombie_dmg_one_slash", R_NONE, 0, 0, NULL, 0, &S_ZOMBIE},
     {"monster_human_grunt", "hgrunt", {-16, -16, 0}, {16, 16, 72}, 0, "sk_hgrunt_health", 50, C_MILITARY, 64, "sk_hgrunt_kick", R_BULLET, 0, 2048, "sk_9mmAR_bullet", 0.9f, &S_GRUNT},
     {"monster_hgrunt_dead", "hgrunt", {-16, -16, 0}, {16, 16, 72}, NF_DEAD | NF_NOTSOLID, NULL, 0, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
-    {"monster_alien_slave", "islave", {-16, -16, 0}, {16, 16, 72}, 0, "sk_islave_health", 30, C_ALIEN, 64, "sk_islave_dmg_claw", R_ZAP, 64, 1024, "sk_islave_dmg_zap", 2.5f, &S_SLAVE},
-    {"monster_vortigaunt", "islave", {-16, -16, 0}, {16, 16, 72}, 0, "sk_islave_health", 30, C_ALIEN, 64, "sk_islave_dmg_claw", R_ZAP, 64, 1024, "sk_islave_dmg_zap", 2.5f, &S_SLAVE},
+    {"monster_alien_slave", "islave", {-16, -16, 0}, {16, 16, 72}, 0, "sk_islave_health", 30, C_ALIEN, 64, "sk_islave_dmg_claw", R_ZAP, 64, 784, "sk_islave_dmg_zap", 2.5f, &S_SLAVE},
+    {"monster_vortigaunt", "islave", {-16, -16, 0}, {16, 16, 72}, 0, "sk_islave_health", 30, C_ALIEN, 64, "sk_islave_dmg_claw", R_ZAP, 64, 784, "sk_islave_dmg_zap", 2.5f, &S_SLAVE},
     {"monster_alien_grunt", "agrunt", {-32, -32, 0}, {32, 32, 64}, 0, "sk_agrunt_health", 60, C_ALIEN, 100, "sk_agrunt_dmg_punch", R_HORNET, 100, 1024, "sk_hornet_dmg", 1.2f, &S_AGRUNT},
     {"monster_bullchicken", "bullsquid", {-32, -32, 0}, {32, 32, 64}, 0, "sk_bullsquid_health", 40, C_PREY, 85, "sk_bullsquid_dmg_bite", R_SPIT, 64, 784, "sk_bullsquid_dmg_spit", 3.0f, &S_SQUID},
     {"monster_houndeye", "houndeye", {-16, -16, 0}, {16, 16, 36}, 0, "sk_houndeye_health", 20, C_ALIEN, 0, NULL, R_SONIC, 0, 192, "sk_houndeye_dmg_blast", 2.5f, &S_HOUND},
@@ -129,7 +129,7 @@ static const mdef_t defs[] = {
     {"monster_rat", "bigrat", {0, 0, 0}, {4, 4, 4}, NF_NOTSOLID, NULL, 8, C_NONE, 0, NULL, R_NONE, 0, 0, NULL, 0, NULL},
     {"monster_alien_controller", "controller", {-32, -32, 0}, {32, 32, 64}, NF_NODROP | NF_FLY, "sk_controller_health", 60, C_ALIEN, 0, NULL, R_BALL, 64, 2048, "sk_controller_dmgball", 2.0f, &S_CONTROLLER},
     {"monster_human_assassin", "hassassin", {-16, -16, 0}, {16, 16, 72}, 0, "sk_hassassin_health", 30, C_MILITARY, 0, NULL, R_BULLET, 64, 2048, "sk_9mm_bullet", 0.6f, NULL},
-    {"monster_gargantua", "garg", {-32, -32, 0}, {32, 32, 64}, 0, "sk_gargantua_health", 800, C_ALIEN, 140, "sk_gargantua_dmg_slash", R_FLAME, 0, 330, "sk_gargantua_dmg_fire", 0.2f, &S_GARG},
+    {"monster_gargantua", "garg", {-32, -32, 0}, {32, 32, 64}, 0, "sk_gargantua_health", 800, C_ALIEN, 90, "sk_gargantua_dmg_slash", R_FLAME, 0, 330, "sk_gargantua_dmg_fire", 0.2f, &S_GARG},
     {"monster_ichthyosaur", "icky", {-32, -32, -32}, {32, 32, 32}, NF_NODROP | NF_FLY, "sk_ichthyosaur_health", 200, C_ALIEN, 100, "sk_ichthyosaur_shake", R_NONE, 0, 0, NULL, 0, &S_ICKY},
     {"monster_sentry", "sentry", {-16, -16, 0}, {16, 16, 48}, NF_STATIC, "sk_sentry_health", 40, C_MACHINE, 0, NULL, R_BULLET, 0, 1200, "sk_9mm_bullet", 0.1f, &S_TURRET},
     {"monster_miniturret", "miniturret", {-16, -16, -16}, {16, 16, 16}, NF_NODROP | NF_STATIC, "sk_miniturret_health", 40, C_MACHINE, 0, NULL, R_BULLET, 0, 1200, "sk_9mm_bullet", 0.1f, &S_TURRET},
@@ -502,6 +502,7 @@ static void spawn_one(int i, const char *cls_override)
     if (!nodrop) drop_box(n, n->origin);
     n->health = n->maxhealth = d ? (d->hp ? skill_get(d->hp) : d->hpdef) : 100;
     if (n->health <= 0) n->health = n->maxhealth = d && d->hpdef > 0 ? d->hpdef : 20;
+    if (d && !strcmp(d->model, "baby_headcrab") && skill_get("sk_headcrab_health") > 0) n->health = n->maxhealth = skill_get("sk_headcrab_health") * 0.25f;   // CBabyCrab::Spawn
     if (e->health > 0 && !(n->flags & NF_ITEM)) n->health = n->maxhealth = e->health;
     if (n->bkind == 2) n->health = n->maxhealth = 150 * fmaxf(skill_get("sk_bigmomma_health_factor"), 1);
     if (!strcmp(mname, "hassassin") && !(n->flags & NF_DEAD)) n->weapons = 2;   // CHAssassin throws grenades too
@@ -610,6 +611,24 @@ void npcs_spawn_all(void)
 }
 
 // CMonsterMaker::MakeMonster: a monster appearing during play (alien slaves teleporting in, ...)
+// CHGruntRepel::RepelUse: a human grunt slides down a rope from here (128-196 units a second); the
+// rope hangs to the floor below until it would have reached it
+void game_effect_env_beam(const float *a, const float *b, int r, int g, int bl, int tex, float noise, float boltwidth, float life);
+int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker);
+void npc_grunt_repel(const float *origin, float yaw)
+{
+    int k = npc_spawn_monster("monster_human_grunt", origin, yaw, "", 0);
+    if (k < 0) return;
+    npc_t *n = &npcs[k];
+    n->repel_v = 128 + (rand() % 1000) / 1000.0f * 68;
+    n->onground = false;
+    float dn[3] = {origin[0], origin[1], origin[2] - 4096};
+    gtrace_t tr;
+    game_trace(origin, dn, NULL, NULL, TR_IGNORE_PLAYER, -1, &tr);
+    float top[3] = {origin[0], origin[1], origin[2] + 112};
+    game_effect_env_beam(top, tr.endpos, 255, 255, 255, 2, 0, 10, 4096 * tr.fraction / n->repel_v + 0.5f);
+}
+
 int npc_spawn_monster(const char *classname, const float *origin, float yaw, const char *targetname, int maker)
 {
     // reuse the slots of a made monster whose body is gone (endless makers: cockroaches)
@@ -981,8 +1000,9 @@ static void gravity(npc_t *n, float dt)
         }
     }
     // ground check
+    if (n->repel_v > 0) { n->onground = false; n->vz = n->repel_v; }   // on a rope: no gravity
     float dn[3] = {n->origin[0], n->origin[1], n->origin[2] - (n->onground ? 2 : n->vz * dt + 1)};
-    if (!n->onground) { n->vz += 800 * dt; dn[2] = n->origin[2] - n->vz * dt; }
+    if (!n->onground) { if (n->repel_v <= 0) n->vz += 800 * dt; dn[2] = n->origin[2] - n->vz * dt; }
     gtrace_t tr;
     game_trace(n->origin, dn, n->mins, n->maxs, TR_IGNORE_PLAYER, self, &tr);
     if (tr.startsolid) { n->onground = true; n->vz = 0; if (tr.ent > 0) { n->ground_ent = tr.ent; } }
@@ -1344,6 +1364,21 @@ static void target_pos(int target, float *o)
     else { npc_t *t = &npcs[target - 1]; npc_center(t, o); }
 }
 
+// m_flFieldOfView: each monster's view cone, as a dot product (VIEW_FIELD_WIDE -0.7, FULL -1)
+static float view_fov(npc_t *n)
+{
+    const mdef_t *d = D(n);
+    if (!d) return 0.5f;
+    static const struct { const char *m; float f; } t[] = {
+        {"agrunt", 0.2f}, {"bullsquid", 0.2f}, {"hgrunt", 0.2f}, {"big_mom", 0.3f}, {"controller", -1},
+        {"garg", -0.2f}, {"icky", -0.7f}, {"scientist", -0.7f}, {"barney", -0.7f}, {"hassassin", -0.7f},
+        {"islave", -0.7f}, {"leech", -0.5f}, {"sentry", -1}, {"miniturret", -1}, {"turret", -1},
+        {"apache", -0.707f}, {"osprey", 0}, {"nihilanth", -1}, {"otis", -0.7f}, {"cleansuit_scientist", -0.7f},
+        {"hgrunt_opfor", 0.2f}, {"massn", 0.2f},
+    };
+    for (unsigned k = 0; k < sizeof(t) / sizeof(t[0]); k++) if (!strcmp(d->model, t[k].m)) return t[k].f;
+    return 0.5f;   // zombie, headcrab, houndeye, barnacle, gman, roach, rat ...
+}
 static bool can_see(npc_t *n, int target, bool need_fov)
 {
     float eye[3], tp[3];
@@ -1353,10 +1388,12 @@ static bool can_see(npc_t *n, int target, bool need_fov)
     float d = dist3(eye, tp);
     if (d > 2048) return false;
     if (need_fov) {
-        float a = n->yaw * (float)M_PI / 180;
-        float dx = tp[0] - eye[0], dy = tp[1] - eye[1];
+        // FInViewCone: origin to origin, flat
+        float a = n->yaw * (float)M_PI / 180, to[3];
+        if (target == 0) memcpy(to, player_pos, 12); else memcpy(to, npcs[target - 1].origin, 12);
+        float dx = to[0] - n->origin[0], dy = to[1] - n->origin[1];
         float l = sqrtf(dx * dx + dy * dy);
-        if (l > 1 && (cosf(a) * dx + sinf(a) * dy) / l < 0.3f) return false;   // VIEW_FIELD_WIDE-ish
+        if (l > 1 && (cosf(a) * dx + sinf(a) * dy) / l <= view_fov(n)) return false;
     }
     return game_visible(eye, tp);
 }
@@ -1546,16 +1583,33 @@ void npc_take_damage(int i, float dmg, int dmgtype, const float *dir, int attack
             npc_say(n, grp(n, "SC_PLFEAR", "BA_SHOT"), 3, 1, ATTN_NORM);
         }
     }
-    if (n->health <= -30 && npc_bleeds(n) && !(n->flags & NF_STATIC)) { npc_die(n, dmgtype, dir); npc_gib(n); return; }
+    // CBaseMonster::Killed / ShouldGibMonster: under GIB_HEALTH_VALUE (-30), or DMG_ALWAYSGIB; never with DMG_NEVERGIB
+    if (n->health <= 0 && npc_bleeds(n) && !(n->flags & NF_STATIC) && !(dmgtype & DMG_NEVERGIB) &&
+        (n->health < -30 || (dmgtype & DMG_ALWAYSGIB))) { npc_die(n, dmgtype, dir); npc_gib(n); return; }
     if (n->health <= 0) { npc_die(n, dmgtype, dir); return; }
-    if (n->weapons && n->ai == AI_COMBAT && dmg >= 8 && rand() % 2 == 0) grunt_take_cover(n);
-    // pain: sound, flinch now and then
-    if (game_time() > n->pain_time) {
-        n->pain_time = game_time() + 0.5f + (rand() % 100) / 100.0f;
-        if (d && d->snd) npc_sound(n, CHAN_VOICE, d->snd->pain, d->snd->np, 1.0f, ATTN_NORM);
-        if (n->script < 0 && n->ai != AI_ATTACK && !(n->flags & NF_STATIC) && dmg > 5 && rand() % 2 == 0) {
-            if (set_activity(n, ACT_SMALL_FLINCH)) { restart_seq(n, n->seq); n->ai = AI_PAIN; }
-        }
+    // PainSound: every hit, each monster with its own rule
+    if (d && d->snd && d->snd->pain) {
+        float now = game_time();
+        const char *m = d->model;
+        bool say = true;
+        int chan = CHAN_VOICE;
+        if (!strcmp(m, "zombie") || !strcmp(m, "controller") || !strncmp(m, "zombie_", 7)) say = rand() % 6 < 2;
+        else if (!strcmp(m, "islave")) { say = rand() % 3 == 0; chan = CHAN_WEAPON; }
+        else if (!strcmp(m, "agrunt")) { say = now >= n->pain_snd_time; if (say) n->pain_snd_time = now + 0.6f; }
+        else if (n->flags & NF_TALKER) { say = now >= n->pain_snd_time; if (say) n->pain_snd_time = now + 0.5f + (rand() % 100) / 400.0f; }
+        else if (n->weapons || !strcmp(m, "hgrunt")) { say = now > n->pain_snd_time; if (say) n->pain_snd_time = now + 1; }
+        if (say) npc_sound(n, chan, d->snd->pain, d->snd->np, 1.0f, (!strcmp(m, "headcrab") || !strcmp(m, "baby_headcrab")) ? ATTN_IDLE : ATTN_NORM);
+    }
+    // bits_COND_LIGHT_DAMAGE: grunts run for cover nine times in ten, else flinch; everything else
+    // flinches the first time it's hurt in a fight (bits_MEMORY_FLINCHED is never forgotten)
+    bool flinch = false;
+    if (n->weapons) {
+        if (n->ai == AI_COMBAT && rand() % 100 <= 90 && n->enemy >= 0) grunt_take_cover(n);
+        else flinch = true;
+    } else if (!n->flinched) { flinch = true; n->flinched = true; }
+    if (flinch && n->script < 0 && n->ai != AI_ATTACK && !(n->flags & NF_STATIC) && game_time() > n->pain_time) {
+        n->pain_time = game_time() + 0.5f;
+        if (set_activity(n, ACT_SMALL_FLINCH)) { restart_seq(n, n->seq); n->ai = AI_PAIN; }
     }
     // being hurt makes enemies of whoever did it
     if (n->script < 0 && attacker >= 0 && attacker != i + 1 && hates(n, attacker)) {
@@ -1786,12 +1840,64 @@ static void attack_hit(npc_t *n)
 }
 
 // pick and start an attack if one is possible
+// CBaseMonster::CheckEnemy: the distance to the enemy is the nearest of its origin, head and feet
+static float attack_dist(npc_t *n, int t)
+{
+    float eo[3], sz;
+    if (t == 0) { memcpy(eo, player_pos, 12); sz = 72; }
+    else { npc_t *v = &npcs[t - 1]; memcpy(eo, v->origin, 12); sz = v->maxs[2] - v->mins[2]; }
+    float d0 = dist3(eo, n->origin);
+    eo[2] += sz * 0.5f;
+    float d = dist3(eo, n->origin);
+    if (d < d0) return d;
+    eo[2] -= sz;
+    d = dist3(eo, n->origin);
+    return d < d0 ? d : d0;
+}
+// CheckAttacks' flDot: how squarely the monster faces its enemy (2D)
+static float attack_dot(npc_t *n, int t)
+{
+    float tp[3];
+    target_pos(t, tp);
+    float dx = tp[0] - n->origin[0], dy = tp[1] - n->origin[1], l = sqrtf(dx * dx + dy * dy);
+    if (l < 1) return 1;
+    float a = n->yaw * (float)M_PI / 180;
+    return (cosf(a) * dx + sinf(a) * dy) / l;
+}
+// the CheckMeleeAttack1 / CheckRangeAttack1 thresholds that differ from CBaseMonster's
+// (melee within 64 facing 0.7, ranged 64-784 facing 0.5)
+static float melee_decide(const mdef_t *d)
+{
+    if (!strcmp(d->model, "agrunt")) return 100;          // AGRUNT_MELEE_DIST
+    if (!strcmp(d->model, "bullsquid")) return 85;
+    if (!strcmp(d->model, "garg")) return 80;             // GARG_ATTACKDIST
+    if (!strcmp(d->model, "icky") || !strcmp(d->model, "tentacle2") || !strcmp(d->model, "leech")) return d->melee_range;
+    return d->melee_range < 64 ? d->melee_range : 64;
+}
+static float melee_dot(const mdef_t *d)
+{
+    if (!strcmp(d->model, "agrunt")) return 0.6f;
+    if (!strcmp(d->model, "tentacle2") || !strcmp(d->model, "leech")) return -2;
+    return 0.7f;
+}
+static float range_dot(const mdef_t *d, uint16_t flags)
+{
+    if (flags & NF_STATIC) return -2;                     // turrets aim on their own
+    if (!strcmp(d->model, "headcrab")) return 0.65f;
+    if (!strcmp(d->model, "baby_headcrab")) return 0.55f;
+    if (!strcmp(d->model, "houndeye")) return 0.3f;
+    if (!strcmp(d->model, "garg")) return 0.8f;           // the flame (CheckMeleeAttack2)
+    if (!strcmp(d->model, "hassassin")) return -2;
+    return 0.5f;
+}
 static bool try_attack(npc_t *n, float dist, bool visible)
 {
     const mdef_t *d = D(n);
     float now = game_time();
     if (!d || now < n->next_attack || !visible) return false;
-    if (d->melee_dmg && dist <= d->melee_range) {
+    dist = attack_dist(n, n->enemy);
+    float dot = attack_dot(n, n->enemy);
+    if (d->melee_dmg && dist <= melee_decide(d) && dot >= melee_dot(d)) {
         if (!set_activity(n, ACT_MELEE_ATTACK1)) return false;
         restart_seq(n, n->seq);
         n->attack_kind = 1;
@@ -1803,7 +1909,7 @@ static bool try_attack(npc_t *n, float dist, bool visible)
         return true;
     }
     float rmax = (n->weapons & 8) ? 640 : d->rmax;   // shotgun grunts close in
-    if (d->ranged != R_NONE && dist >= d->rmin && dist <= rmax) {
+    if (d->ranged != R_NONE && dist >= d->rmin && dist <= rmax && dot >= range_dot(d, n->flags)) {
         int act = ACT_RANGE_ATTACK1;
         if (d->ranged == R_LEAP && !n->onground) return false;
         if (!set_activity(n, act) && !set_activity(n, ACT_MELEE_ATTACK1)) {
@@ -1999,9 +2105,13 @@ static void ai_idle(npc_t *n, float dt)
         face_yaw(n, yaw_to(n->origin, tp), 120, dt);
     }
     if (n->flags & NF_TALKER) talker_idle(n, dt);
-    else if (d && d->snd && d->snd->idle && now > n->idle_speak_time) {
-        n->idle_speak_time = now + 5 + rand() % 15;
-        if (player_in_pvs(n) && dist3(n->origin, player_pos) < 800) npc_sound(n, CHAN_VOICE, d->snd->idle, d->snd->ni, 1, ATTN_IDLE);
+    else if (d && d->snd && d->snd->idle && now > n->idle_speak_time && !(n->flags & NF_FLY && (!strcmp(d->model, "icky") || !strcmp(d->model, "leech"))) &&
+             !(!strcmp(d->model, "agrunt") && (entities[n->ent].spawnflags & 2))) {
+        // RunAI: one chance in a hundred each tenth of a second. Its SF_MONSTER_GAG test reads
+        // pev->flags, where that bit is FL_SWIM: swimmers never idle; the gag itself only quiets
+        // the alien grunt (CAGrunt::FCanSpeak) out of a fight
+        n->idle_speak_time = now + 0.1f;
+        if (rand() % 100 == 0 && player_in_pvs(n) && dist3(n->origin, player_pos) < 800) npc_sound(n, CHAN_VOICE, d->snd->idle, d->snd->ni, 1, ATTN_IDLE);
     }
     // alerted by a noise: look that way, then walk over to where it came from (SCHED_INVESTIGATE_SOUND)
     if (now < n->alert_until && !n->following && !(n->flags & (NF_STATIC | NF_SCI)) && klass(n) != C_ALLY) {
@@ -3313,6 +3423,16 @@ void npcs_think(float dt)
         }
         dt = n->think_dt;
         n->think_dt = 0;
+
+        // ---- CHGruntRepel: down the rope (MOVETYPE_FLY at a steady speed, ACT_GLIDE), then the
+        // landing (slGruntRepelLand) and on with the fight
+        if (n->repel_v > 0) {
+            play_named(n, "repel_repel", false);
+            gravity(n, dt);
+            if (n->onground) { n->repel_v = 0; play_named(n, "repel_land", true); }
+            npc_relight(n, now);
+            continue;
+        }
 
         // ---- scripted sequences take priority
         if (n->script >= 0 || n->sstate != NS_IDLE) {

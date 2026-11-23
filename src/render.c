@@ -370,6 +370,7 @@ static inline bool face_back(int fi, const float *eye)
 }
 
 static float cur_fovy = 74, cur_far = 4096;
+float g_view_fov = 90;
 // the first-person weapon's projection: the world's on the full screen; in a split-screen half the
 // full screen's, so the gun looks the same size and sits at the bottom of the half
 static int view_rect[4] = {0, 0, 320, 240};
@@ -478,6 +479,124 @@ static void draw_world(void)
 // GoldSrc lights the lightmaps of every surface near a dlight (R_AddDynamicLights): here the
 // visible world faces near it are drawn again, additively, shaded per vertex by the distance to
 // the light. skip_n / skip_d: the plane the caller lights itself (the flashlight's spot)
+// the flashlight's spot on the surface it hits: a disc of radius R around c, cut to the triangles
+// of the faces on that plane (the plain disc hung past the wall's edges and over the space behind)
+static int clip_tri_poly(float (*in)[2], int n, const float (*t)[2], float (*out)[2])
+{
+    // Sutherland-Hodgman against each edge of the (either-winding) triangle t
+    float area = (t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[1][1] - t[0][1]) * (t[2][0] - t[0][0]);
+    if (fabsf(area) < 1e-3f) return 0;
+    float sgn = area > 0 ? 1 : -1;
+    float buf[2][12][2];
+    float (*src)[2] = in, (*dst)[2] = buf[0];
+    for (int e = 0; e < 3 && n > 0; e++) {
+        const float *a = t[e], *b = t[(e + 1) % 3];
+        float ex = b[0] - a[0], ey = b[1] - a[1];
+        int m = 0;
+        for (int i = 0; i < n; i++) {
+            const float *p = src[i], *q = src[(i + 1) % n];
+            float dp = sgn * (ex * (p[1] - a[1]) - ey * (p[0] - a[0])), dq = sgn * (ex * (q[1] - a[1]) - ey * (q[0] - a[0]));
+            if (dp >= 0 && m < 12) { dst[m][0] = p[0]; dst[m][1] = p[1]; m++; }
+            if ((dp >= 0) != (dq >= 0) && m < 12) {
+                float f = dp / (dp - dq);
+                dst[m][0] = p[0] + (q[0] - p[0]) * f; dst[m][1] = p[1] + (q[1] - p[1]) * f; m++;
+            }
+        }
+        n = m;
+        src = dst;
+        dst = (e & 1) ? buf[0] : buf[1];
+    }
+    for (int i = 0; i < n; i++) { out[i][0] = src[i][0]; out[i][1] = src[i][1]; }
+    return n;
+}
+typedef struct { const float *c, *U, *V; float R, bright, pd; const float *n; float ofs[3]; bool mode; int tris; } spot_t;
+static float spot_ring[17][2];
+static void spot_face(spot_t *sp, int fi)
+{
+    bface_t *f = &world.faces[fi];
+    bplane_t *pl = &world.planes[f->planenum];
+    float nx = pl->normal[0], ny = pl->normal[1], nz = pl->normal[2];
+    float fd = pl->dist + nx * sp->ofs[0] + ny * sp->ofs[1] + nz * sp->ofs[2];
+    if (f->side) { nx = -nx; ny = -ny; nz = -nz; fd = -fd; }
+    const float *n = sp->n, *c = sp->c, *U = sp->U, *V = sp->V;
+    float R = sp->R;
+    if (nx * n[0] + ny * n[1] + nz * n[2] < 0.99f || fabsf(fd - sp->pd) > 2) return;   // only the lit plane
+    float inv = 1.0f / world.vertscale;
+    for (int ci = 0; ci < f->numchunks; ci++) {
+        bchunk_t *ch = &world.chunks[f->firstchunk + ci];
+        const uint8_t *tri = world.tris + ch->firsttri * 3;
+        for (int k = 0; k < ch->numtris && sp->tris < 64; k++, tri += 3) {
+            float tv[3][2], mn[2] = {1e9f, 1e9f}, mx[2] = {-1e9f, -1e9f};
+            for (int q = 0; q < 3; q++) {
+                int vi = ch->firstvert + tri[q];
+                const int16_t *pos = (vi & 1) ? world.verts[vi >> 1].posB : world.verts[vi >> 1].posA;
+                float w[3] = {pos[0] * inv + sp->ofs[0] - c[0], pos[1] * inv + sp->ofs[1] - c[1], pos[2] * inv + sp->ofs[2] - c[2]};
+                tv[q][0] = w[0] * U[0] + w[1] * U[1] + w[2] * U[2];
+                tv[q][1] = w[0] * V[0] + w[1] * V[1] + w[2] * V[2];
+                for (int z = 0; z < 2; z++) { mn[z] = fminf(mn[z], tv[q][z]); mx[z] = fmaxf(mx[z], tv[q][z]); }
+            }
+            if (mn[0] > R || mx[0] < -R || mn[1] > R || mx[1] < -R) continue;
+            sp->tris++;
+            for (int r = 0; r < 16; r++) {
+                // one wedge of the disc, cut to this triangle
+                float wedge[3][2] = {{0, 0}, {spot_ring[r][0] * R, spot_ring[r][1] * R}, {spot_ring[r + 1][0] * R, spot_ring[r + 1][1] * R}};
+                float poly[12][2];
+                int m = clip_tri_poly(wedge, 3, (const float (*)[2])tv, poly);
+                if (m < 3) continue;
+                float sv[12][7];
+                bool ok = true;
+                for (int q = 0; q < m && ok; q++) {
+                    float w[3];
+                    for (int z = 0; z < 3; z++) w[z] = c[z] + U[z] * poly[q][0] + V[z] * poly[q][1];
+                    T3DVec3 p3 = {{w[0], w[1], w[2]}}, o3;
+                    t3d_viewport_calc_viewspace_pos(&viewport, &o3, &p3);
+                    ok = o3.v[2] > 0 && o3.v[2] < 1 && fabsf(o3.v[0]) < 1500 && fabsf(o3.v[1]) < 1500;
+                    float in = 1 - sqrtf(poly[q][0] * poly[q][0] + poly[q][1] * poly[q][1]) / R;
+                    float al = in > 0 ? sp->bright * powf(in, 1.0f / 2.5f) : 0;
+                    if (al > 0.85f) al = 0.85f;
+                    sv[q][0] = o3.v[0]; sv[q][1] = o3.v[1]; sv[q][2] = (o3.v[2] + 1) * 0.5f - 0.0004f;
+                    sv[q][3] = 1; sv[q][4] = 1; sv[q][5] = 0.92f; sv[q][6] = al;
+                }
+                if (!ok) continue;
+                if (!sp->mode) {
+                    rdpq_set_mode_standard();
+                    rdpq_mode_combiner(RDPQ_COMBINER_SHADE);
+                    rdpq_mode_blender(RDPQ_BLENDER_MULTIPLY);
+                    rdpq_mode_zbuf(true, false);
+                    sp->mode = true;
+                }
+                for (int q = 1; q + 1 < m; q++) rdpq_triangle(&TRIFMT_ZBUF_SHADE, sv[0], sv[q], sv[q + 1]);
+            }
+        }
+    }
+}
+// model: 0 the world, else a brush model placed at ofs (unrotated)
+void render_flash_spot(const float *c, const float *n, float R, float bright, int model, const float *ofs)
+{
+    if (!tex_chain || !face_box) return;
+    float a[3] = {fabsf(n[2]) < 0.9f ? 0 : 1, 0, fabsf(n[2]) < 0.9f ? 1 : 0}, U[3], V[3];
+    U[0] = n[1] * a[2] - n[2] * a[1]; U[1] = n[2] * a[0] - n[0] * a[2]; U[2] = n[0] * a[1] - n[1] * a[0];
+    float ul = sqrtf(U[0] * U[0] + U[1] * U[1] + U[2] * U[2]); if (ul < 1e-4f) return;
+    for (int k = 0; k < 3; k++) U[k] /= ul;
+    V[0] = n[1] * U[2] - n[2] * U[1]; V[1] = n[2] * U[0] - n[0] * U[2]; V[2] = n[0] * U[1] - n[1] * U[0];
+    if (spot_ring[1][0] == 0) for (int k = 0; k <= 16; k++) { spot_ring[k][0] = cosf(k * (float)M_PI / 8); spot_ring[k][1] = sinf(k * (float)M_PI / 8); }
+    spot_t sp = {c, U, V, R, bright, n[0] * c[0] + n[1] * c[1] + n[2] * c[2], n, {0, 0, 0}, false, 0};
+    if (model <= 0) {
+        for (int t = 0; t < world.numtextures; t++)
+            for (int fi = tex_chain[t]; fi >= 0; fi = face_next[fi]) {
+                const int16_t *b = face_box[fi];
+                float d2 = 0;
+                for (int k = 0; k < 3; k++) { float v = c[k] < b[k] ? b[k] - c[k] : c[k] > b[k + 3] ? c[k] - b[k + 3] : 0; d2 += v * v; }
+                if (d2 <= R * R) spot_face(&sp, fi);
+            }
+    } else if (model < world.nummodels) {
+        memcpy(sp.ofs, ofs, 12);
+        bmodel_t *bm = &world.bmodels[model];
+        for (int i = 0; i < bm->numfaces && i < 512; i++) spot_face(&sp, bm->firstface + i);
+    }
+    if (sp.mode) rdpq_set_mode_standard();
+}
+
 void render_dlight_world(const float *c, float R, float bright, const float *skip_n, float skip_d)
 {
     if (!tex_chain || !face_box) return;
@@ -509,15 +628,18 @@ void render_dlight_world(const float *c, float R, float bright, const float *ski
                     const int16_t *pos = (vi & 1) ? world.verts[vi >> 1].posB : world.verts[vi >> 1].posA;
                     float w[3] = {pos[0] * inv, pos[1] * inv, pos[2] * inv};
                     float dd = sqrtf((w[0] - c[0]) * (w[0] - c[0]) + (w[1] - c[1]) * (w[1] - c[1]) + (w[2] - c[2]) * (w[2] - c[2]));
-                    float in = 1 - dd / R;
+                    // R_AddDynamicLights: radius less the light's height over the face, less the
+                    // distance across it; shown through the light gamma (bright: the peak, already so)
+                    float inplane = sqrtf(fmaxf(dd * dd - above * above, 0));
+                    float in = (R - fabsf(above) - inplane) / R;
                     if (in < 0) in = 0;
                     T3DVec3 p3 = {{w[0], w[1], w[2]}}, o3;
                     t3d_viewport_calc_viewspace_pos(&viewport, &o3, &p3);
                     vok[v] = o3.v[2] > 0 && o3.v[2] < 1 && fabsf(o3.v[0]) < 1500 && fabsf(o3.v[1]) < 1500;
                     // blended toward warm white by the light's strength: an additive blend wraps
                     // past full brightness on the RDP and turned lit surfaces blue/green
-                    float a = in * in * bright * 0.6f;
-                    if (a > 0.6f) a = 0.6f;
+                    float a = in > 0 ? bright * powf(in, 1.0f / 2.5f) : 0;
+                    if (a > 0.85f) a = 0.85f;
                     sv[v][0] = o3.v[0]; sv[v][1] = o3.v[1]; sv[v][2] = (o3.v[2] + 1) * 0.5f - 0.0004f;   // (tiny3d's depth: clip z -1..1 -> 0..1)
                     sv[v][3] = 1; sv[v][4] = 1; sv[v][5] = 0.92f; sv[v][6] = a;
                     if (in > 0) any = true;
@@ -982,18 +1104,11 @@ static void draw_npcs(const float *eye)
         if (c->model->numatt > 0) { extern float game_time(void); c->att_time = game_time(); }
         memcpy(d.origin, c->origin, 12);
         memcpy(d.light, c->light, 3);
-        {   // flashlight dynamic light on characters (R_LightPoint adds dlights within their radius)
-            extern bool weapons_flashlight_point(float *out);
-            float fp[3];
-            if (weapons_flashlight_point(fp)) {
-                float dd = 0;
-                for (int k = 0; k < 3; k++) { float q = c->origin[k] + (k == 2 ? 36 : 0) - fp[k]; dd += q * q; }
-                dd = sqrtf(dd);
-                if (dd < 140) {
-                    int add = (int)(160 * (1 - dd / 140));
-                    for (int k = 0; k < 3; k++) { int v = d.light[k] + add; d.light[k] = v > 255 ? 255 : v; }
-                }
-            }
+        {   // the flashlight on characters (R_StudioDynamicLight: radius minus the distance from their origin)
+            extern int weapons_flashlight_model_add(const float *origin, int base);
+            int base = (d.light[0] + d.light[1] + d.light[2]) / 3;
+            int add = weapons_flashlight_model_add(c->origin, base);
+            for (int k = 0; k < 3; k++) { int v = d.light[k] + add; d.light[k] = v > 255 ? 255 : v; }
         }
         // talking: flap the jaw while the voice channel plays
         if (c->model->mouth_bone >= 0 && snd_playing(c->ent, CHAN_VOICE)) {
@@ -1057,7 +1172,8 @@ void render_view(const float *eye, const float *angles, void (*hud)(void), int v
         r[0] = -sr * sp * cy + cr * sy; r[1] = -sr * sp * sy - cr * cy; r[2] = -sr * cp;
         u[0] = cr * sp * cy + sr * sy; u[1] = cr * sp * sy - sr * cy; u[2] = cr * cp;
     }
-    const float fovx = 90.0f;
+    extern float g_view_fov;
+    const float fovx = g_view_fov > 1 ? g_view_fov : 90.0f;   // (the crossbow's zoom narrows it)
     const float fovy = 2.0f * atanf(tanf(fovx * 0.5f * M_PI / 180) * vh / (float)vw) * 180 / M_PI;
     t3d_viewport_set_area(&viewport, vx, vy, vw, vh);
     view_rect[0] = vx; view_rect[1] = vy; view_rect[2] = vw; view_rect[3] = vh;

@@ -316,6 +316,92 @@ void bsp_light_at(const float *p, uint8_t *rgb)
     }
 }
 
+// R_DecalNode: down the tree; where a node's plane passes within 4 units of the decal, every
+// surface on it whose texture-space span the decal overlaps gets a piece of it
+typedef struct { const float *pos; float w, h, size; bdecal_t *out; int n, max; } dwalk_t;
+static void decal_surface(dwalk_t *dw, int fi)
+{
+    bface_t *f = &world.faces[fi];
+    if (f->flags & (FF_SKY | FF_NODRAW | FF_WATER) || !f->numchunks) return;
+    bfacetex_t *ft = &world.facetex[fi];
+    const float *S = ft->s, *T = ft->t;
+    float ls = sqrtf(S[0] * S[0] + S[1] * S[1] + S[2] * S[2]), lt = sqrtf(T[0] * T[0] + T[1] * T[1] + T[2] * T[2]);
+    if (ls < 1e-5f || lt < 1e-5f) return;
+    // the surface's exact span in texels
+    float smin = 1e9f, smax = -1e9f, tmin = 1e9f, tmax = -1e9f, inv = 1.0f / world.vertscale, best = 1e18f;
+    uint32_t col = 0xffffffff;
+    for (int c = 0; c < f->numchunks; c++) {
+        bchunk_t *ch = &world.chunks[f->firstchunk + c];
+        for (int v = 0; v < ch->numverts; v++) {
+            int vi = ch->firstvert + v;
+            const int16_t *q = (vi & 1) ? world.verts[vi >> 1].posB : world.verts[vi >> 1].posA;
+            float p[3] = {q[0] * inv, q[1] * inv, q[2] * inv};
+            float a = p[0] * S[0] + p[1] * S[1] + p[2] * S[2] + S[3], b = p[0] * T[0] + p[1] * T[1] + p[2] * T[2] + T[3];
+            smin = fminf(smin, a); smax = fmaxf(smax, a);
+            tmin = fminf(tmin, b); tmax = fmaxf(tmax, b);
+            // the light there: the baked colour of the surface's nearest vertex
+            float dd = 0;
+            for (int k = 0; k < 3; k++) dd += (p[k] - dw->pos[k]) * (p[k] - dw->pos[k]);
+            if (dd < best) { best = dd; col = (vi & 1) ? world.verts[vi >> 1].rgbaB : world.verts[vi >> 1].rgbaA; }
+        }
+    }
+    const float *P = dw->pos;
+    float ps = P[0] * S[0] + P[1] * S[1] + P[2] * S[2] + S[3], pt = P[0] * T[0] + P[1] * T[1] + P[2] * T[2] + T[3];
+    float hw = dw->w * ls * 0.5f, hh = dw->h * lt * 0.5f;   // the decal's half size in this surface's texels
+    float s0 = fmaxf(ps - hw, smin), s1 = fminf(ps + hw, smax), t0 = fmaxf(pt - hh, tmin), t1 = fminf(pt + hh, tmax);
+    if (s1 - s0 < 0.5f || t1 - t0 < 0.5f) return;
+    if (dw->n >= dw->max) return;
+    // (s, t) -> the point on the plane: rows S, T, N; solved by cross products
+    bplane_t *pl = &world.planes[f->planenum];
+    const float *N = pl->normal;
+    float tn[3] = {T[1] * N[2] - T[2] * N[1], T[2] * N[0] - T[0] * N[2], T[0] * N[1] - T[1] * N[0]};
+    float ns[3] = {N[1] * S[2] - N[2] * S[1], N[2] * S[0] - N[0] * S[2], N[0] * S[1] - N[1] * S[0]};
+    float st[3] = {S[1] * T[2] - S[2] * T[1], S[2] * T[0] - S[0] * T[2], S[0] * T[1] - S[1] * T[0]};
+    float det = S[0] * tn[0] + S[1] * tn[1] + S[2] * tn[2];
+    if (fabsf(det) < 1e-6f) return;
+    bdecal_t *d = &dw->out[dw->n++];
+    d->face = fi;
+    d->rgb[0] = col >> 24; d->rgb[1] = col >> 16; d->rgb[2] = col >> 8;
+    float sgn = f->side ? -1.0f : 1.0f;
+    for (int k = 0; k < 3; k++) d->n[k] = N[k] * sgn;
+    for (int q = 0; q < 4; q++) {
+        float cs = (q & 1) ? s1 : s0, ct = (q & 2) ? t1 : t0;
+        float r0 = cs - S[3], r1 = ct - T[3], r2 = pl->dist;
+        for (int k = 0; k < 3; k++) d->c[q][k] = (r0 * tn[k] + r1 * ns[k] + r2 * st[k]) / det;
+        d->uv[q][0] = (cs - (ps - hw)) / (2 * hw);
+        d->uv[q][1] = (ct - (pt - hh)) / (2 * hh);
+    }
+}
+static void decal_node(dwalk_t *dw, int nn)
+{
+    while (nn >= 0) {
+        bnode_t *node = &world.nodes[nn];
+        bplane_t *pl = &world.planes[node->planenum];
+        float dist = dw->pos[0] * pl->normal[0] + dw->pos[1] * pl->normal[1] + dw->pos[2] * pl->normal[2] - pl->dist;
+        if (dist > dw->size) { nn = node->children[0]; continue; }
+        if (dist < -dw->size) { nn = node->children[1]; continue; }
+        if (dist < 4 && dist > -4)
+            for (int i = 0; i < node->numfaces; i++) decal_surface(dw, node->firstface + i);
+        decal_node(dw, node->children[0]);
+        nn = node->children[1];
+    }
+}
+int bsp_decal_faces(int modelindex, const float *pos, float w, float h, bdecal_t *out, int max)
+{
+    if (modelindex < 0 || modelindex >= world.nummodels) return 0;
+    dwalk_t dw = {pos, w, h, fmaxf(w, h) * 0.5f, out, 0, max};
+    decal_node(&dw, world.bmodels[modelindex].headnode[0]);
+    return dw.n;
+}
+
+// the face a line from start to end hits first (in model `modelindex`, placed at `offset`), -1 none
+int bsp_trace_face(int modelindex, const float *offset, const float *start, const float *end)
+{
+    float s[3], e[3];
+    for (int i = 0; i < 3; i++) { s[i] = start[i] - offset[i]; e[i] = end[i] - offset[i]; }
+    return trace_face_r(world.bmodels[modelindex].headnode[0], s, e);
+}
+
 const char *bsp_trace_texture(int modelindex, const float *offset, const float *start, const float *end)
 {
     float s[3], e[3], hit[3];

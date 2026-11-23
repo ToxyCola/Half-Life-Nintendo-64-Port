@@ -37,7 +37,7 @@ typedef enum {
     ENT_AMBIENT, ENT_SPEAKER, ENT_CDAUDIO, ENT_TARGET_CDAUDIO, ENT_RECHARGE, ENT_HEALTHCHARGER,
     ENT_ENV_SHAKE, ENT_ENV_SHOOTER, ENT_BEVERAGE, ENT_FUNNEL, ENT_ENV_BLOOD, ENT_WEAPONSTRIP, ENT_ENV_SPARK, ENT_ENV_EXPLOSION, ENT_GLOBAL_BEAM, ENT_MONSTERMAKER,
     ENT_ENV_GLOBAL, ENT_TRIGGER_GRAVITY, ENT_LOADSAVED, ENT_PENDULUM, ENT_FRICTION, ENT_AUTOSAVE, ENT_MORTAR_FIELD,
-    ENT_MOMENTARY_BUTTON, ENT_TANK, ENT_TANKCONTROLS, ENT_SPRITE, ENT_GUNTARGET,
+    ENT_MOMENTARY_BUTTON, ENT_TANK, ENT_TANKCONTROLS, ENT_SPRITE, ENT_GUNTARGET, ENT_REPEL, ENT_TRIGGER_COUNTER, ENT_INFODECAL, ENT_ENV_SOUND,
 } enttype_t;
 
 enum { MS_IDLE = 0, MS_AT_BOTTOM, MS_AT_TOP, MS_GOING_UP, MS_GOING_DOWN };
@@ -90,6 +90,8 @@ typedef struct entity_s {
     int leaf;               // env_sprite: BSP leaf (PVS test), 0 unknown
     int16_t sprid;          // env_sprite: converted PC sprite (weapons.c fxspr), -1 none
     uint8_t texframe;       // brush entity texture frame (pev->frame: 1 = the alternate +a.. textures)
+    float lock_sentwait;     // doors/buttons: PlayLockSounds' sentence debounce
+    int8_t lock_lidx, lock_uidx; uint8_t lock_eof;   // next locked/unlocked sentence, end reached (bit 0 locked, 1 unlocked)
     float sprt0;            // env_sprite: when its animation started   // momentary_rot_button position 0..1, direction, last held; pendulum phase
 } entity_t;
 
@@ -110,6 +112,7 @@ void pm_build_physents(void);
 int  pm_entity_for_physent(int pe);
 bool pm_player_in_entity(int ent, const float *pos);
 bool pm_position_free(const float *pos);
+void pm_trace_move(const float *start, const float *end, int ignore_ent, float *out);
 bool pm_find_free_position(float *origin);
 bool pm_unstick(float dt);
 
@@ -121,6 +124,8 @@ void ents_fire_entity_target(entity_t *e);
 const char *ent_value(const entity_t *e, const char *key);
 int  ents_find_class(const char *classname, int start);
 int  ents_find_targetname(const char *name, int start);
+void game_map_decal(const float *origin, const char *texname);
+extern int mapdecals_epoch;
 float game_time(void);
 void ents_save_globals(const float *landmark);
 void ents_restore_globals(const float *landmark);
@@ -280,6 +285,9 @@ void snd_play(const char *sample, float volume, int channel);          // the pl
 int  snd_emit(int ent, int chan, const char *sample, float vol, float attn, int pitch, const float *origin);
 int  snd_sentence(int ent, const char *name, float vol, float attn, int pitch);  // "!NAME" or a group
 int  snd_sentence_group_count(const char *group);
+void snd_set_room(int type);
+void snd_move(int id, const float *origin);
+void snd_kill(int id);
 void snd_stop(int ent, int chan, const char *sample);     // chan -1: all; sample NULL: any
 bool snd_playing(int ent, int chan);
 bool snd_slot_playing(int id);

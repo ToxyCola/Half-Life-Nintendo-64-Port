@@ -560,6 +560,18 @@ static bool hull_in_entity(int ent, const float *pos, int usehull)
     return bsp_hull_point_contents(hull, hull->firstclipnode, test) == CONTENTS_SOLID;
 }
 
+// SV_PushEntity for the player: as far as it gets from start toward end, brush entity `ignore_ent`
+// left out (SV_PushRotate makes the pusher non-solid for this)
+void pm_trace_move(const float *start, const float *end, int ignore_ent, float *out)
+{
+    int ign = -1;
+    for (int i = 0; i < pm->numphysent; i++)
+        if (pm->physents[i].info == ignore_ent) { ign = i; break; }
+    pmtrace_t tr = player_trace_ex((float *)start, (float *)end, PM_NORMAL, ign, NULL);
+    if (tr.allsolid || tr.startsolid) { VectorCopy(start, out); }
+    else { VectorCopy(tr.endpos, out); }
+}
+
 bool pm_position_free(const float *pos)
 {
     return test_position_ex((float *)pos, NULL, NULL) < 0;
@@ -836,6 +848,14 @@ void game_trace_(const float *start, const float *end, const float *mins, const 
 #endif
 {
     static const float zero[3] = {0, 0, 0};
+    // a NaN end would send the hull walk round forever: treat it as a blocked trace that went nowhere
+    if (start[0] != start[0] || start[1] != start[1] || start[2] != start[2] || end[0] != end[0] || end[1] != end[1] || end[2] != end[2]) {
+        memset(out, 0, sizeof(*out));
+        out->fraction = 0;
+        out->ent = -1;
+        if (start[0] == start[0] && start[1] == start[1] && start[2] == start[2]) memcpy(out->endpos, start, 12);
+        return;
+    }
     int hn = hull_for_size(mins, maxs);
     // the BSP hull is centred on its own clip box: shift the trace so the object's box lines up
     float off[3] = {0, 0, 0};

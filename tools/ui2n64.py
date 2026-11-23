@@ -308,6 +308,41 @@ def build_fx(valve, ui, tmp):
                 a = Image.fromarray(np.asarray(pix, np.uint8).reshape(dh, dw), 'L')
                 im = Image.merge('LA', (Image.new('L', (dw, dh), 255), a))
                 out('dc_%s%d' % (base, k), im, 'IA8', (size, size) if (dw, dh) != (size, size) else None, Image.BILINEAR)
+        # the decals the maps place themselves (infodecal "texture"): coverage only (I4: on the RDP
+        # an intensity texel is its own alpha), at most 64 a side; mapdecals.txt lists each one's
+        # name, sprite, size in the world (a texel is a unit) and colour (palette[255])
+        names = set()
+        mapdir = find_ci(valve, 'maps')
+        if mapdir and os.path.isdir(mapdir):
+            for f in sorted(os.listdir(mapdir)):
+                if not f.lower().endswith('.bsp'):
+                    continue
+                try:
+                    b = bsp2n64.BSP(open(os.path.join(mapdir, f), 'rb').read())
+                    for e in bsp2n64.parse_entities(b.raw('ENTITIES').split(b'\0')[0].decode('latin1')):
+                        if e.get('classname') == 'infodecal' and e.get('texture'):
+                            names.add(e['texture'].lower())
+                except Exception:
+                    pass
+        lower = {k.lower(): k for k in w}
+        lines = []
+        for i, nm in enumerate(sorted(names)):
+            blob = w.get(lower.get(nm, nm))
+            if blob is None:
+                continue
+            _, dw, dh, pix, pal = bsp2n64.parse_miptex(blob)
+            a = Image.fromarray(np.asarray(pix, np.uint8).reshape(dh, dw), 'L')
+            def p2(v):
+                n = 1
+                while n * 2 <= min(v, 64): n *= 2
+                return n
+            sw, sh = p2(dw), p2(dh)
+            spr = 'md_%d' % i
+            out(spr, a, 'I4', (sw, sh) if (sw, sh) != (dw, dh) else None, Image.BILINEAR)
+            r, g, bb = (int(c) for c in pal[255])
+            lines.append('%s %s %d %d %d %d %d' % (nm, spr, dw, dh, r, g, bb))
+        with open(os.path.join(ui, 'mapdecals.txt'), 'w') as fh:
+            fh.write('\n'.join(lines) + '\n')
     print('effect sprites: %d%s' % (made, (', missing: ' + ' '.join(missing)) if missing else ''))
 
 
