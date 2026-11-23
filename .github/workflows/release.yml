@@ -35,11 +35,17 @@ jobs:
           fetch-depth: 0        # git describe names the version
 
       - name: Host packages
-        timeout-minutes: 10
+        timeout-minutes: 25
         run: |
-          # the runner's package mirror sometimes hangs: time out and retry instead of waiting forever
+          # the runner's package mirror sometimes hangs or crawls: only the 64-bit Windows toolchain the
+          # builder uses (not mingw-w64's 32-bit half too), no recommends, and a retry
           sudo apt-get update -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 || true
-          sudo apt-get install -y -q -o Acquire::http::Timeout=20 -o Acquire::Retries=3 mingw-w64 libz-mingw-w64-dev python3-pip python3-numpy python3-pil
+          pk="gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev libz-mingw-w64-dev python3-pip python3-numpy python3-pil"
+          for i in 1 2 3; do
+            timeout 480 sudo apt-get install -y -q --no-install-recommends -o Acquire::http::Timeout=20 -o Acquire::Retries=3 $pk && break
+            echo "apt-get install attempt $i failed, retrying"; sleep 5
+          done
+          command -v x86_64-w64-mingw32-gcc
 
       - name: N64 toolchain
         run: |
