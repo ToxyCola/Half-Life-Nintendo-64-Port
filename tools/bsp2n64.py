@@ -40,11 +40,12 @@ MAX_CHUNK_VERTS = 64  # tiny3d vertex cache is 70
 
 
 class BSP:
-    def __init__(self, data):
+    def __init__(self, data, source=None):
         self.d = data
         ver = struct.unpack_from('<i', data, 0)[0]
         if ver != 30:
-            raise SystemExit('Not a Half-Life BSP (version %d)' % ver)
+            where = '%s: ' % source if source else ''
+            raise ValueError('%sNot a Half-Life BSP (version %d)' % (where, ver))
         self.lumps = [struct.unpack_from('<ii', data, 4 + 8 * i) for i in range(15)]
         # Blue Shift's maps list the planes before the entities (the first two lumps swapped)
         def text(lump):
@@ -289,7 +290,7 @@ def choose_grid(lm, bmin, finest, tol):
 
 def convert(bsp_path, out_path, wads, grid, maxtexels, verbose=True, lm_tolerance=12, aliases=None):
     data = open(bsp_path, 'rb').read()
-    bsp = BSP(data)
+    bsp = BSP(data, bsp_path)
 
     ent_text = bsp.raw('ENTITIES').split(b'\0')[0].decode('latin1')
     if aliases:   # (an expansion's classes -> the game's, build_assets.EXPANSIONS)
