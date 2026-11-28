@@ -296,7 +296,7 @@ Controller Pak if one is inserted.
 ### Running it
 
 * **Emulator:** use an accurate, LLE emulator such as [ares](https://ares-emu.net/) (tested) or gopher64.
-* 4. Older HLE emulators (Project64 with default plugins, mupen64plus with
+* Older HLE emulators (Project64 with default plugins, mupen64plus with
   HLE plugins) cannot run libdragon ROMs. Enable the Expansion Pak.
 * **Real hardware:** copy `hl64.z64` to a flashcart that supports 64 MB ROMs (SummerCart64,
   EverDrive-64 X7/V3, 64drive). The ROM uses libdragon's open-source IPL3 boot code, so no CIC
